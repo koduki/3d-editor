@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="ost">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="XR-optimized AI agent control panel (ACP v1 client) for XREAL AURA and Meta Quest 3">
+  <title>XR-ACP Companion</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- Top Header -->
+    <header class="top-bar" role="banner">
+      <div class="top-left">
+        <span id="statusDot" class="status-dot status-disconnected" aria-hidden="true"></span>
+        <div class="title-group">
+          <span class="app-title">XR-ACP</span>
+          <span id="demoBadge" class="demo-badge hidden" title="バックエンド未接続のオフラインデモモード">DEMO</span>
+          <span id="statusText" class="status-text">未接続</span>
+        </div>
+      </div>
+
+      <div class="top-controls">
+        <span id="usageBadge" class="usage-badge hidden" title="コンテキスト使用量"></span>
+
+        <label class="sr-only" for="profileQuickSelect">接続プロファイル</label>
+        <select id="profileQuickSelect" class="ctrl-select profile-select" title="接続プロファイル切替"></select>
+
+        <label class="sr-only" for="modeSelect">実行モード</label>
+        <select id="modeSelect" class="ctrl-select" title="実行モード (session/set_mode)" disabled>
+          <option value="default">default</option>
+          <option value="accept-edits">accept-edits</option>
+          <option value="plan">plan</option>
+        </select>
+
+        <button
+          id="themeToggleBtn"
+          type="button"
+          class="ctrl-btn theme-pill"
+          title="光学テーマ切替 (OST: XREAL AURA / VST: Meta Quest 3)"
+          aria-pressed="false"
+        >
+          OST
+        </button>
+
+        <button
+          id="historyBtn"
+          type="button"
+          class="ctrl-btn"
+          title="保存済みセッション履歴を表示"
+          aria-haspopup="dialog"
+          aria-controls="historyModal"
+        >
+          履歴
+        </button>
+
+        <button
+          id="newSessionBtn"
+          type="button"
+          class="ctrl-btn"
+          title="新規セッションを開始 (session/new)"
+        >
+          新規
+        </button>
+
+        <button
+          id="settingsBtn"
+          type="button"
+          class="ctrl-btn"
+          title="接続プロファイル・表示設定"
+          aria-haspopup="dialog"
+          aria-controls="settingsModal"
+        >
+          設定
+        </button>
+      </div>
+    </header>
+
+    <!-- Live Notice Region -->
+    <div id="noticeRegion" class="notice-region" aria-live="polite"></div>
+
+    <!-- Main Conversation Timeline -->
+    <main id="timeline" class="timeline" role="main" aria-label="エージェント対話ログ">
+      <section id="emptyState" class="empty-state">
+        <div class="empty-badge">ACP v1 / XR Companion</div>
+        <h1>空間マルチウィンドウ AI パネル</h1>
+        <p class="empty-desc">
+          編集・LSP・Git 確認は正面の <code>code-server</code> に委譲し、
+          このパネルで対話・縦型 Diff レビュー・権限承認・音声ラフ書きを完結させます。
+        </p>
+
+        <div id="demoQuickPrompts" class="demo-prompts hidden">
+          <div class="demo-prompts-title">オフラインデモ — ワンクリックで体験</div>
+          <div class="demo-prompt-list">
+            <button type="button" class="demo-chip" data-demo-prompt="ブログ記事に XR 音声入力の構成案を追記して">
+              記事ドラフト編集 (縦型 Diff 承認)
+            </button>
+            <button type="button" class="demo-chip" data-demo-prompt="/code 非アクティブ時のパネル減光コードを改善して">
+              コード編集 Diff をレビュー
+            </button>
+            <button type="button" class="demo-chip" data-demo-prompt="/test テストを実行して結果を確認して">
+              コマンド実行の権限承認
+            </button>
+            <button type="button" class="demo-chip" data-demo-prompt="/plan AURA と Quest 3 の使い分けを整理して">
+              Plan モードで編集なし回答
+            </button>
+          </div>
+        </div>
+
+        <div class="shortcut-grid">
+          <div class="shortcut-item"><kbd>Ctrl</kbd>+<kbd>Enter</kbd><span>プロンプト送信（IME安全）</span></div>
+          <div class="shortcut-item"><kbd>Ctrl</kbd>+<kbd>Space</kbd><span>音声入力 ON / OFF</span></div>
+          <div class="shortcut-item"><kbd>y</kbd> / <kbd>Enter</kbd><span>承認待ちを許可（非入力時）</span></div>
+          <div class="shortcut-item"><kbd>n</kbd> / <kbd>Esc</kbd><span>拒否 / 実行中断</span></div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Fixed Permission Approval Bar -->
+    <section
+      id="permissionBar"
+      class="permission-bar hidden"
+      role="region"
+      aria-label="権限承認リクエスト"
+      aria-live="assertive"
+    >
+      <div class="perm-header">
+        <div class="perm-title-row">
+          <span id="permKindBadge" class="perm-kind-badge">EDIT</span>
+          <strong id="permTitle" class="perm-title">ツール実行の承認</strong>
+        </div>
+        <span id="permQueueBadge" class="perm-queue-badge hidden"></span>
+      </div>
+      <div id="permMeta" class="perm-meta"></div>
+      <div id="permPreview" class="perm-preview"></div>
+      <div id="permActions" class="perm-actions"></div>
+      <div class="perm-hint">
+        非入力時キー操作: <kbd>y</kbd> / <kbd>Enter</kbd> 許可 ・ <kbd>a</kbd> 常時許可 ・ <kbd>n</kbd> / <kbd>Esc</kbd> 拒否
+      </div>
+    </section>
+
+    <!-- Bottom Composer -->
+    <footer class="composer-wrap">
+      <div id="slashBar" class="slash-bar hidden" aria-label="利用可能なスラッシュコマンド"></div>
+
+      <div id="voiceBanner" class="voice-banner hidden" aria-live="polite">
+        <span class="voice-dot" aria-hidden="true"></span>
+        <span id="voiceBannerText">音声認識中 (ja-JP)…</span>
+      </div>
+
+      <div class="composer">
+        <button
+          id="voiceBtn"
+          type="button"
+          class="icon-btn voice-btn"
+          title="Push-to-Talk 音声入力 (Ctrl+Space)"
+          aria-pressed="false"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+            <path d="M5 10a7 7 0 0 0 14 0"></path>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+          </svg>
+        </button>
+
+        <textarea
+          id="promptInput"
+          class="prompt-input"
+          rows="1"
+          placeholder="エージェントへ指示… (Ctrl+Enter 送信)"
+          aria-label="プロンプト入力"
+        ></textarea>
+
+        <div class="composer-actions">
+          <button
+            id="cancelBtn"
+            type="button"
+            class="action-btn cancel-btn hidden"
+            title="現在の実行を中断 (Esc)"
+          >
+            中断
+          </button>
+          <button
+            id="sendBtn"
+            type="button"
+            class="action-btn send-btn"
+            title="送信 (Ctrl+Enter / Cmd+Enter)"
+          >
+            送信
+          </button>
+        </div>
+      </div>
+
+      <div class="composer-foot">
+        <span id="sessionLabel" class="meta-chip">Session: -</span>
+        <span id="imeIndicator" class="meta-chip ime-chip hidden">IME 変換中</span>
+        <span class="meta-chip foot-shortcut">Ctrl+Enter 送信 ・ Ctrl+Space 音声</span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Session History Modal (v0.2) -->
+  <div id="historyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="historyModalTitle">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-header">
+        <h2 id="historyModalTitle">セッション履歴（ローカルキャッシュ）</h2>
+        <button id="closeHistoryBtn" type="button" class="ctrl-btn" aria-label="閉じる">閉じる</button>
+      </div>
+      <div class="modal-body">
+        <p class="field-help">
+          <code>session/resume</code> 時に会話ログをリプレイしないエージェント（<code>agy acp</code> 等）でも、
+          ここに保存された直近のタイムライン・Diff を即座に復元します。
+        </p>
+        <div id="historyList" class="history-list"></div>
+        <div class="modal-footer">
+          <button id="clearHistoryBtn" type="button" class="ctrl-btn danger-btn">全履歴を削除</button>
+          <div class="modal-footer-right">
+            <button id="historyNewSessionBtn" type="button" class="action-btn send-btn">新規セッション</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings & Profile Modal (v0.2 / v0.3) -->
+  <div id="settingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-header">
+        <h2 id="settingsModalTitle">接続プロファイル・XR 表示設定</h2>
+        <button id="closeSettingsBtn" type="button" class="ctrl-btn" aria-label="閉じる">閉じる</button>
+      </div>
+
+      <form id="settingsForm" class="modal-body">
+        <!-- Profile Manager Row -->
+        <div class="profile-bar">
+          <div class="field profile-select-field">
+            <label for="profileEditSelect">編集するプロファイル</label>
+            <select id="profileEditSelect" class="field-input"></select>
+          </div>
+          <div class="profile-bar-btns">
+            <button id="addProfileBtn" type="button" class="ctrl-btn">＋ 追加</button>
+            <button id="deleteProfileBtn" type="button" class="ctrl-btn danger-btn">削除</button>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="profileNameInput">プロファイル名</label>
+            <input id="profileNameInput" type="text" class="field-input" required autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="profileModeSelect">接続種別</label>
+            <select id="profileModeSelect" class="field-input">
+              <option value="bridge">ACP ブリッジ (WebSocket)</option>
+              <option value="demo">オフラインデモ (サーバー不要)</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="bridgeFields" class="bridge-fields">
+          <div class="field">
+            <label for="agentSelect">ACP エージェント</label>
+            <select id="agentSelect" class="field-input">
+              <option value="agy">agy acp</option>
+              <option value="copilot">copilot --acp</option>
+              <option value="gemini">gemini --acp</option>
+              <option value="mock">Mock ACP Agent (Demo)</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="wsUrlInput">ブリッジ WebSocket URL（空欄で自動検出）</label>
+            <input
+              id="wsUrlInput"
+              type="text"
+              class="field-input"
+              placeholder="例: ws://100.64.0.10:8765"
+              autocomplete="off"
+            >
+            <small class="field-help">Meta Quest 3 から Tailscale 経由でリモート接続する場合に指定します。</small>
+          </div>
+
+          <div class="field">
+            <label for="tokenInput">認証トークン (ACP_BRIDGE_TOKEN)</label>
+            <input
+              id="tokenInput"
+              type="password"
+              class="field-input"
+              placeholder="ローカル 127.0.0.1 接続時は空欄可"
+              autocomplete="off"
+            >
+          </div>
+
+          <div class="field">
+            <label for="workspaceInput">ワークスペースパス (cwd)</label>
+            <input
+              id="workspaceInput"
+              type="text"
+              class="field-input"
+              placeholder="空欄でサーバー側の WORKSPACE_DIR を使用"
+              autocomplete="off"
+            >
+          </div>
+
+          <div class="diag-row">
+            <button id="testConnectionBtn" type="button" class="ctrl-btn">接続テスト</button>
+            <div id="diagResult" class="diag-result hidden" aria-live="polite"></div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="profileThemeSelect">このプロファイル選択時の光学テーマ</label>
+          <select id="profileThemeSelect" class="field-input">
+            <option value="">現在のテーマを維持</option>
+            <option value="ost">OST モード（XREAL AURA / 完全黒）</option>
+            <option value="vst">VST モード（Meta Quest 3 / 半透明ダーク）</option>
+          </select>
+        </div>
+
+        <div class="field field-toggle">
+          <label for="dimOnBlurToggle">
+            <span>非アクティブ時に自動減光（輝度 50%）</span>
+            <small class="field-help">code-server へフォーカス移動した際、視界の邪魔を抑えます。</small>
+          </label>
+          <input id="dimOnBlurToggle" type="checkbox" checked>
+        </div>
+
+        <div class="modal-footer">
+          <div class="modal-footer-left">
+            <button id="resetProcessBtn" type="button" class="ctrl-btn danger-btn">
+              プロセス再起動
+            </button>
+            <a class="privacy-link" href="/privacy.html" target="_blank" rel="noopener noreferrer">プライバシー</a>
+          </div>
+          <div class="modal-footer-right">
+            <button type="submit" class="action-btn send-btn">保存して接続</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

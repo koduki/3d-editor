@@ -1,0 +1,54 @@
+{
+  "packageId": "dev.koduki.xracpcompanion",
+  "host": "xr-acp-companion.example.com",
+  "name": "XR-ACP Companion",
+  "launcherName": "XR-ACP",
+  "display": "standalone",
+  "themeColor": "#000000",
+  "themeColorDark": "#000000",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#262626",
+  "navigationDividerColorDark": "#262626",
+  "backgroundColor": "#000000",
+  "enableNotifications": false,
+  "startUrl": "/?demo=1",
+  "iconUrl": "https://xr-acp-companion.example.com/icons/icon-512.png",
+  "maskableIconUrl": "https://xr-acp-companion.example.com/icons/icon-maskable-512.png",
+  "splashScreenFadeOutDuration": 200,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "xr-acp-release"
+  },
+  "appVersionName": "0.3.0",
+  "appVersionCode": 3,
+  "shortcuts": [
+    {
+      "name": "OST モード (XREAL AURA)",
+      "shortName": "OST",
+      "url": "https://xr-acp-companion.example.com/?theme=ost",
+      "chosenIconUrl": "https://xr-acp-companion.example.com/icons/icon-192.png"
+    },
+    {
+      "name": "VST モード (Meta Quest 3)",
+      "shortName": "VST",
+      "url": "https://xr-acp-companion.example.com/?theme=vst",
+      "chosenIconUrl": "https://xr-acp-companion.example.com/icons/icon-192.png"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://xr-acp-companion.example.com/manifest.json",
+  "fallbackType": "customtabs",
+  "features": {
+    "locationDelegation": { "enabled": false },
+    "playBilling": { "enabled": false }
+  },
+  "alphaDependencies": { "enabled": false },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://xr-acp-companion.example.com/",
+  "minSdkVersion": 29,
+  "orientation": "default",
+  "fingerprints": []
+}
