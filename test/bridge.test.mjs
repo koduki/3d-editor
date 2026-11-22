@@ -761,3 +761,47 @@ test('/ws/console streams stdout/exit and interrupts running command on kill', a
     await server.close();
   }
 });
+
+// ============================================================================
+// Phase 2 Tests: Android 15 / Android XR Bridge Contract, Asset Sync & Setup
+// ============================================================================
+
+test('Phase 2 Android WebView origin mapping, asset sync, setup script, and XrHostBridge contract', async () => {
+  // 1. Bundled Android WebViewAssetLoader origin defaults to localhost:8765
+  assert.equal(deriveHttpBaseUrl('', 'https://appassets.androidplatform.net'), 'http://127.0.0.1:8765');
+  assert.equal(
+    buildProfileWsUrl({ wsUrl: '', agent: 'agy', token: '' }, { pageOrigin: 'https://appassets.androidplatform.net' }),
+    'ws://127.0.0.1:8765/?agent=agy',
+  );
+
+  // 2. sync-android-assets copies all web assets cleanly
+  const { syncAndroidAssets } = await import('../scripts/sync-android-assets.mjs');
+  const tmpOut = await fs.mkdtemp(path.join(os.tmpdir(), 'xr-android-assets-'));
+  try {
+    const syncRes = await syncAndroidAssets({ destDir: tmpOut });
+    assert.ok(syncRes.count >= 15, `Expected >=15 web asset files, got ${syncRes.count}`);
+    const syncedIndex = await fs.readFile(path.join(tmpOut, 'index.html'), 'utf8');
+    assert.ok(syncedIndex.includes('XR-ACP Workbench'));
+  } finally {
+    await fs.rm(tmpOut, { recursive: true, force: true });
+  }
+
+  // 3. setup-android15-linux.sh --dry-run runs cleanly
+  const setupScript = path.join(REPO_ROOT, 'scripts', 'setup-android15-linux.sh');
+  const setupOut = execFileSync(setupScript, ['--dry-run'], { encoding: 'utf8' });
+  assert.match(setupOut, /xr-acp-workbench\.service/);
+  assert.match(setupOut, /127\.0\.0\.1:8765/);
+
+  // 4. Verify Kotlin XrHostBridge exposes every method expected by public/xr-host.js
+  const ktBridge = await fs.readFile(
+    path.join(REPO_ROOT, 'android', 'app', 'src', 'main', 'java', 'dev', 'koduki', 'xracp', 'XrHostBridge.kt'),
+    'utf8',
+  );
+  for (const method of ['getCapabilities', 'registerShortcuts', 'openSpatialPanel', 'setWindowTitle', 'probeLocalBridge']) {
+    assert.match(
+      ktBridge,
+      new RegExp(`@JavascriptInterface[\\s\\S]*?fun\\s+${method}\\(`),
+      `Missing @JavascriptInterface fun ${method}() in XrHostBridge.kt`,
+    );
+  }
+});

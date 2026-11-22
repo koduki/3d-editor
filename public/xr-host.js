@@ -76,5 +76,16 @@ export function createXrHostBridge() {
         }
       }
     },
+
+    probeLocalBridge() {
+      if (nativeBridge && typeof nativeBridge.probeLocalBridge === 'function') {
+        try {
+          return JSON.parse(nativeBridge.probeLocalBridge());
+        } catch {
+          // fallback
+        }
+      }
+      return null;
+    },
   };
 }

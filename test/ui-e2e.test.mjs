@@ -307,9 +307,15 @@ test(
         'cached session history restored after reload',
       );
 
-      // 10. Command Palette (Ctrl+Shift+P) -> toggle OST -> VST & switch to Offline Demo
-      await chrome.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'P', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }))`);
-      await chrome.waitFor(`!document.getElementById('paletteModal').classList.contains('hidden')`, 3000, 'Command Palette open');
+      // 10. Verify Phase 2 Android XR native hooks (__xrSetWindowFocused & __xrDispatchShortcut)
+      await chrome.evaluate(`window.__xrSetWindowFocused(false)`);
+      assert.equal(await chrome.evaluate(`document.body.classList.contains('window-dimmed')`), true);
+      await chrome.evaluate(`window.__xrSetWindowFocused(true)`);
+      assert.equal(await chrome.evaluate(`document.body.classList.contains('window-dimmed')`), false);
+
+      // Open Command Palette via native Android dispatchKeyEvent bridge hook (Ctrl+Shift+P)
+      await chrome.evaluate(`window.__xrDispatchShortcut({ key: 'P', code: 'KeyP', ctrlKey: true, shiftKey: true, altKey: false, metaKey: false })`);
+      await chrome.waitFor(`!document.getElementById('paletteModal').classList.contains('hidden')`, 3000, 'Command Palette open via native hook');
       await chrome.evaluate(`(() => {
         const inp = document.getElementById('paletteInput');
         inp.value = 'VST';

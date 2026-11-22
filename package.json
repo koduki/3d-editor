@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.mjs",
     "start:mock": "DEFAULT_AGENT=mock node server.mjs",
-    "check": "node --check server.mjs lib/*.mjs scripts/mock-agent.mjs public/*.js",
+    "android:sync": "node scripts/sync-android-assets.mjs",
+    "check": "node --check server.mjs lib/*.mjs scripts/*.mjs public/*.js",
     "test": "node --test test/*.test.mjs",
     "test:unit": "node --test test/bridge.test.mjs",
     "test:ui": "node --test test/ui-e2e.test.mjs"

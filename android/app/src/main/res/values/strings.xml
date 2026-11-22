@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">XR-ACP Workbench</string>
+    <string name="keepalive_channel_name">XR-ACP セッション維持</string>
+    <string name="keepalive_notification_title">XR-ACP Workbench 接続中</string>
+    <string name="keepalive_notification_text">ACP AI エージェントおよびコンソール接続を維持しています</string>
+    <string name="keepalive_action_stop">切断</string>
+</resources>

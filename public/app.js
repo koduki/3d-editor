@@ -2749,7 +2749,49 @@ async function boot() {
     : hostCaps.android15Avf
       ? 'Android 15 Web'
       : 'Spatial Web IDE';
-  xrHost.registerDesktopShortcuts(['Ctrl+P', 'Ctrl+Shift+P', 'Ctrl+Shift+F', 'Ctrl+S', 'Ctrl+B', 'Ctrl+J', 'Ctrl+L']);
+  xrHost.registerDesktopShortcuts([
+    'Ctrl+P',
+    'Ctrl+Shift+P',
+    'Ctrl+Shift+F',
+    'Ctrl+S',
+    'Ctrl+W',
+    'Ctrl+B',
+    'Ctrl+J',
+    'Ctrl+`',
+    'Ctrl+L',
+    'Ctrl+Space',
+    'F1',
+    'Alt+1',
+    'Alt+2',
+    'Alt+3',
+    'Alt+4',
+  ]);
+
+  // Native hardware-keyboard shortcut hook (called by Android Activity.dispatchKeyEvent)
+  window.__xrDispatchShortcut = (spec) => {
+    if (!spec || imeComposing) return false;
+    if ((spec.ctrlKey || spec.metaKey) && !spec.shiftKey && !spec.altKey && String(spec.key).toLowerCase() === 'w') {
+      const tab = spatialEditor.getActiveTab();
+      if (tab) spatialEditor.closeTab(tab.path);
+      return true;
+    }
+    const ev = new KeyboardEvent('keydown', {
+      key: spec.key || '',
+      code: spec.code || '',
+      ctrlKey: Boolean(spec.ctrlKey),
+      shiftKey: Boolean(spec.shiftKey),
+      altKey: Boolean(spec.altKey),
+      metaKey: Boolean(spec.metaKey),
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    return true;
+  };
+
+  window.__xrSetWindowFocused = (focused) => {
+    applyBlurDimming(!focused);
+  };
 
   // Support single-pane spatial detachment (?focusPane=ai|editor|console)
   const focusPane = new URLSearchParams(window.location.search).get('focusPane');

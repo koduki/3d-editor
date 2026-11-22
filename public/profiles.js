@@ -161,13 +161,19 @@ export function deleteProfile(store, profileId) {
   return true;
 }
 
+function isBundledWebViewOrigin(origin) {
+  return !origin || /appassets\.androidplatform\.net|^file:|^null$/i.test(String(origin));
+}
+
 /**
  * Derive HTTP(S) origin from a WS(S) URL or page origin.
  */
 export function deriveHttpBaseUrl(wsUrl, pageOrigin = '') {
   const trimmed = String(wsUrl || '').trim();
   if (!trimmed) {
-    if (!pageOrigin) throw new Error('接続先 URL が空です');
+    if (isBundledWebViewOrigin(pageOrigin)) {
+      return 'http://127.0.0.1:8765';
+    }
     return pageOrigin.replace(/\/+$/, '');
   }
 
@@ -197,7 +203,8 @@ export function buildProfileWsUrl(profile, { defaultAgent = 'agy', pageOrigin = 
   let base = String(profile.wsUrl || '').trim();
 
   if (!base) {
-    const originUrl = new URL(pageOrigin || 'http://127.0.0.1:8765');
+    const effectiveOrigin = isBundledWebViewOrigin(pageOrigin) ? 'http://127.0.0.1:8765' : pageOrigin;
+    const originUrl = new URL(effectiveOrigin);
     originUrl.protocol = originUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     originUrl.pathname = '/';
     originUrl.search = '';
