@@ -51,21 +51,32 @@ class HardwareShortcutRouter {
      * Returns a WebKeySpec if this Android KeyEvent matches a registered desktop shortcut,
      * or null so normal typing / IME composition passes straight through to WebView.
      */
-    fun match(event: KeyEvent): WebKeySpec? {
-        if (event.action != KeyEvent.ACTION_DOWN) return null
-        if (event.keyCode == KeyEvent.KEYCODE_UNKNOWN) return null
+    fun match(event: KeyEvent): WebKeySpec? = matchKey(
+        action = event.action,
+        keyCode = event.keyCode,
+        ctrl = event.isCtrlPressed,
+        meta = event.isMetaPressed,
+        shift = event.isShiftPressed,
+        alt = event.isAltPressed,
+    )
 
-        val ctrl = event.isCtrlPressed
-        val meta = event.isMetaPressed
-        val shift = event.isShiftPressed
-        val alt = event.isAltPressed
+    fun matchKey(
+        action: Int,
+        keyCode: Int,
+        ctrl: Boolean,
+        meta: Boolean,
+        shift: Boolean,
+        alt: Boolean,
+    ): WebKeySpec? {
+        if (action != KeyEvent.ACTION_DOWN) return null
+        if (keyCode == KeyEvent.KEYCODE_UNKNOWN) return null
 
         // Plain unmodified keys (except F1) must never be intercepted
-        if (!ctrl && !meta && !alt && event.keyCode != KeyEvent.KEYCODE_F1) {
+        if (!ctrl && !meta && !alt && keyCode != KeyEvent.KEYCODE_F1) {
             return null
         }
 
-        val mapped = mapKeyCode(event.keyCode, shift) ?: return null
+        val mapped = mapKeyCode(keyCode, shift) ?: return null
         val chordLabel = buildChordLabel(
             ctrlOrMeta = ctrl || meta,
             shift = shift,

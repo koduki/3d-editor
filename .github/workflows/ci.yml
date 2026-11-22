@@ -1,19 +1,102 @@
-name: CI
+name: CI / CD
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feat/**"]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  test:
+  web-and-bridge:
+    name: Web IDE & ACP Bridge Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
       - run: npm ci
       - run: npm run check
       - run: npm test
+
+  android-apk:
+    name: Android 15 / Android XR APK Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Run Android Unit Tests & Build Debug APK
+        working-directory: android
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Rename Debug APK with short SHA
+        run: |
+          mkdir -p dist-apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk "dist-apk/xr-acp-workbench-debug-${GITHUB_SHA::7}.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "dist-apk/xr-acp-workbench-debug.apk"
+          ls -lh dist-apk/
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr-acp-workbench-debug-apk
+          path: dist-apk/xr-acp-workbench-debug*.apk
+          retention-days: 30
+
+      - name: Build Signed Release APK & AAB (when signing secrets are configured)
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/release.keystore" gradle :app:assembleRelease :app:bundleRelease --stacktrace
+          rm -f "$RUNNER_TEMP/release.keystore"
+          cp app/build/outputs/apk/release/app-release.apk ../dist-apk/xr-acp-workbench-release.apk
+          cp app/build/outputs/bundle/release/app-release.aab ../dist-apk/xr-acp-workbench-release.aab
+
+      - name: Upload Signed Release Artifact
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr-acp-workbench-release-bundle
+          path: |
+            dist-apk/xr-acp-workbench-release.apk
+            dist-apk/xr-acp-workbench-release.aab
+          retention-days: 90
+
+      - name: Publish GitHub Release on v* tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          FILES=(dist-apk/xr-acp-workbench-debug.apk)
+          if [ -f dist-apk/xr-acp-workbench-release.apk ]; then
+            FILES+=(dist-apk/xr-acp-workbench-release.apk dist-apk/xr-acp-workbench-release.aab)
+          fi
+          gh release create "$TAG" "${FILES[@]}" \
+            --title "XR-ACP Workbench $TAG" \
+            --generate-notes || \
+          gh release upload "$TAG" "${FILES[@]}" --clobber

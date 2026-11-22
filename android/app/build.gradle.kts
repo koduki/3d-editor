@@ -3,6 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val generatedWebAssetsRoot = layout.buildDirectory.dir("generated/web-assets")
+
+val syncWebAssets by tasks.registering(Sync::class) {
+    from(rootProject.file("../public"))
+    into(generatedWebAssetsRoot.map { it.dir("www") })
+}
+
 android {
     namespace = "dev.koduki.xracp"
     compileSdk = 35
@@ -17,10 +24,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        val ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
+        if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+            create("release") {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: ""
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfigs.findByName("release")?.let { signingConfig = it }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -29,6 +49,12 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(generatedWebAssetsRoot)
         }
     }
 
@@ -41,6 +67,10 @@ android {
         jvmTarget = "17"
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -48,8 +78,13 @@ android {
     }
 }
 
+tasks.named("preBuild") {
+    dependsOn(syncWebAssets)
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
@@ -59,14 +94,5 @@ dependencies {
     implementation("androidx.xr.scenecore:scenecore:1.0.0")
 
     testImplementation("junit:junit:4.13.2")
-}
-
-// Keep android assets in single-source sync with ../../public on every Gradle build
-val syncWebAssets by tasks.registering(Sync::class) {
-    from(rootProject.file("../public"))
-    into(layout.projectDirectory.dir("src/main/assets/www"))
-}
-
-tasks.named("preBuild") {
-    dependsOn(syncWebAssets)
+    testImplementation("org.json:json:20240303")
 }

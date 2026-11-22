@@ -32,3 +32,13 @@ XREAL AURA（Android XR / Android 15 API 35）および Android 15 Desktop Windo
    ```bash
    ./scripts/setup-android15-linux.sh
    ```
+
+## CI/CD による APK 自動ビルド（GitHub Actions）
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) が push / PR / 手動実行 (`workflow_dispatch`) ごとに以下を自動実行します：
+
+1. **Web & Bridge テスト:** `npm ci`, `npm run check`, `npm test`（ユニット + FS/Git/Console/ACP + Headless Chromium E2E）
+2. **Android APK ビルド:** `gradle :app:testDebugUnitTest :app:assembleDebug` を実行し、`xr-acp-workbench-debug-apk` Artifact として APK をアップロード（Actions 画面から直接ダウンロードして XREAL AURA へインストール可能）
+3. **署名済み Release APK / AAB & GitHub Release（任意）:**
+   - リポジトリ Secrets に `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` を登録すると署名済み Release APK/AAB も自動生成されます。
+   - `git tag v0.4.0 && git push origin v0.4.0` のように `v*` タグを push すると、GitHub Release へ APK が自動添付されます。

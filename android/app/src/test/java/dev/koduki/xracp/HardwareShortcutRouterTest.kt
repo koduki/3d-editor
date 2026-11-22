@@ -17,16 +17,68 @@ class HardwareShortcutRouterTest {
     }
 
     @Test
-    fun match_interceptsRegisteredShortcutsAndIgnoresPlainTyping() {
+    fun matchKey_interceptsRegisteredShortcutsAndIgnoresPlainTyping() {
         val router = HardwareShortcutRouter()
 
-        val ctrlP = KeyEvent(0L, 0L, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_P, 0, KeyEvent.META_CTRL_ON)
-        val matched = router.match(ctrlP)
-        assertNotNull(matched)
-        assertEquals("p", matched?.key)
-        assertEquals(true, matched?.ctrlKey)
+        val ctrlP = router.matchKey(
+            action = KeyEvent.ACTION_DOWN,
+            keyCode = KeyEvent.KEYCODE_P,
+            ctrl = true,
+            meta = false,
+            shift = false,
+            alt = false,
+        )
+        assertNotNull(ctrlP)
+        assertEquals("p", ctrlP?.key)
+        assertEquals("KeyP", ctrlP?.code)
+        assertEquals(true, ctrlP?.ctrlKey)
+        assertEquals(false, ctrlP?.shiftKey)
 
-        val plainP = KeyEvent(0L, 0L, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_P, 0, 0)
-        assertNull(router.match(plainP))
+        val ctrlShiftP = router.matchKey(
+            action = KeyEvent.ACTION_DOWN,
+            keyCode = KeyEvent.KEYCODE_P,
+            ctrl = true,
+            meta = false,
+            shift = true,
+            alt = false,
+        )
+        assertNotNull(ctrlShiftP)
+        assertEquals("P", ctrlShiftP?.key)
+        assertEquals(true, ctrlShiftP?.shiftKey)
+
+        // Plain typing without modifiers must pass straight through to WebView / IME
+        val plainP = router.matchKey(
+            action = KeyEvent.ACTION_DOWN,
+            keyCode = KeyEvent.KEYCODE_P,
+            ctrl = false,
+            meta = false,
+            shift = false,
+            alt = false,
+        )
+        assertNull(plainP)
+
+        // Key-up events must not fire duplicate shortcuts
+        val ctrlPUp = router.matchKey(
+            action = KeyEvent.ACTION_UP,
+            keyCode = KeyEvent.KEYCODE_P,
+            ctrl = true,
+            meta = false,
+            shift = false,
+            alt = false,
+        )
+        assertNull(ctrlPUp)
+    }
+
+    @Test
+    fun updateRegisteredShortcuts_restrictsInterceptedSet() {
+        val router = HardwareShortcutRouter()
+        router.updateRegisteredShortcuts("""["Ctrl+S","Alt+2"]""")
+
+        assertNotNull(
+            router.matchKey(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_S, ctrl = true, meta = false, shift = false, alt = false),
+        )
+        assertNull(
+            router.matchKey(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_P, ctrl = true, meta = false, shift = false, alt = false),
+        )
     }
 }
