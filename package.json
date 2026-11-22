@@ -1,12 +1,12 @@
 {
-  "name": "xr-acp-companion",
-  "version": "0.3.0",
-  "description": "XR-optimized AI agent control panel (ACP v1 client) for XREAL AURA (OST) and Meta Quest 3 (VST)",
+  "name": "xr-acp-workbench",
+  "version": "0.4.0",
+  "description": "Spatial Desktop IDE & ACP v1 AI Workbench engineered for XREAL AURA (Android XR / OST) and Meta Quest 3 (VST) with keyboard + mouse/trackpad",
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
     "start:mock": "DEFAULT_AGENT=mock node server.mjs",
-    "check": "node --check server.mjs scripts/mock-agent.mjs public/*.js",
+    "check": "node --check server.mjs lib/*.mjs scripts/mock-agent.mjs public/*.js",
     "test": "node --test test/*.test.mjs",
     "test:unit": "node --test test/bridge.test.mjs",
     "test:ui": "node --test test/ui-e2e.test.mjs"

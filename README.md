@@ -1,48 +1,38 @@
-# XR-ACP Companion
+# XR-ACP Workbench (Spatial Desktop IDE)
 
-XREAL AURA（Android XR / OST 光学シースルー）および Meta Quest 3（Horizon OS / VST ビデオパススルー）の空間マルチウィンドウ環境向けに最適化した、**ACP v1（Agent Client Protocol）クライアント & WebSocket ブリッジ**です。
+XREAL AURA（Android XR / OST 光学シースルー）および Meta Quest 3（Horizon OS / VST ビデオパススルー）などの **空間コンピューター** 向けに、**物理キーボード＋マウス／トラックパッド前提** で設計した **空間デスクトップ IDE ＆ ACP v1 AI ワークベンチ** です（スマホ・タブレット向けタッチ UI を想定しないデスクトップ設計）。
 
 - 仕様書: [spec.md](./spec.md)
+- Phase 2 Android 15 / Android XR ネイティブ化設計: [docs/android-xr-phase2.md](./docs/android-xr-phase2.md)
 - 実機検証チェックリスト（AURA / Quest 3）: [docs/device-verification.md](./docs/device-verification.md)
 - ストアパッケージ化ガイド（TWA / PWABuilder）: [docs/store-packaging.md](./docs/store-packaging.md)
 
-## 主な機能
+## 主な特徴
 
-- **疎結合パイプ設計 (`server.mjs`):** Node.js v20+ と `ws` のみ。WebSocket ⇔ ACP エージェント (`agy acp` 等) の stdio を NDJSON で素通ししつつ、切断後もデフォルト 5 分間プロセスを保持し、未応答の権限承認もバッファして再接続時に自動再送します。
-- **ビルド不要の PWA (`public/`):** Vanilla HTML / CSS / ES Modules。Termux 上で編集してブラウザをリロードするだけで即反映されます（オフライン時は Service Worker のシェルキャッシュで起動可能）。
-- **光学最適化テーマ (OST / VST):**
-  - **OST (XREAL AURA):** `#000000` 背景（Micro-OLED 発光オフ＝透過）・`18px / 1.6 / 500` の高視認性タイポグラフィ。
-  - **VST (Meta Quest 3):** 半透明ダークサーフェス・`15px / 1.5 / 400`。
-  - **非アクティブ自動減光:** `code-server` 等へフォーカスが移ると輝度を 50% に落とします（設定で切替可）。
-- **70° FOV 向け縦型 Unified Diff & キーボード承認:** `session/request_permission` を画面下部に固定表示し、`y` / `Enter`（許可）、`a`（常時許可）、`n` / `Esc`（拒否）で完結します。
-- **IME 安全送信 & Push-to-Talk 音声入力:** `Ctrl+Enter` 送信（日本語 IME 変換確定誤爆防止）、`Ctrl+Space` で Web Speech API (`ja-JP`) のトグル入力に対応。
-- **接続プロファイル管理 & ライブ診断 (v0.2):** 「AURA ローカル」「リモート PC (Tailscale)」「オフラインデモ」などの複数プロファイルを保存・切替でき、設定画面から `/api/health` レイテンシとトークン認証を診断可能。
-- **ローカルセッション履歴復元 (v0.2):** `IndexedDB`（`localStorage` フォールバック）に会話と Diff をキャッシュし、`session/resume` 時にリプレイしないエージェントでもリロード後に直前のタイムラインを即復元。「履歴」モーダルから切替・削除可能。
-- **オフラインデモモード & ストア対応資産 (v0.3):** `/?demo=1` またはプロファイル切替でバックエンド無しの ACP v1 デモが動作。192/512/maskable PNG アイコン、`privacy.html`、`.well-known/assetlinks.json`、`store/twa-manifest.json` を同梱。
+- **4 ペイン可変空間デスクトップ UI（ビルド不要・依存ゼロ Vanilla ES Modules）:**
+  - **左:** ファイルツリー（絞り込み・Git バッジ・右クリックコンテキストメニュー）
+  - **中央:** タブ式コード＆Markdown エディタ（行番号・シンタックスハイライト・`.md` ライブプレビュー・AI 編集のリアルタイム自動同期・選択範囲の AI 添付）
+  - **下:** エージェント連動の **軽量コマンドコンソール**（`node-pty` 不使用・ANSI カラー・`↑`/`↓` 履歴・`Ctrl+C` 中断・クリックで `file:line` ジャンプ）
+  - **右:** ACP v1 AI エージェントパネル（ストリーミング思考／プラン・縦型 Unified Diff 承認・IME 安全送信・Push-to-Talk 音声入力・ローカル履歴復元）
+- **デスクトップ級キーボード操作:** `Ctrl+P`（クイックオープン）、`Ctrl+Shift+P` / `F1`（コマンドパレット）、`Ctrl+Shift+F`（全文検索）、`Ctrl+S`（保存）、`Ctrl+B`（ツリー）、`Ctrl+J` / `` Ctrl+` ``（コンソール）、`Ctrl+L`（AI 添付＆フォーカス）、`Alt+1..4`（ペイン移動）。
+- **ゼロネイティブ依存バックエンド (`server.mjs`):** 外部依存は `ws` のみ。Android 15 Linux（AVF）・Alpine PRoot・リモート Linux/macOS（Tailscale）どこでもビルド不要で動作します。
+- **オフラインデモ仮想ワークスペース (`/?demo=1`):** バックエンド未接続でもファイルツリー・エディタ・Markdown プレビュー・コンソール・AI Diff 承認をすべて単体体験できます。
 
 ## クイックスタート
 
 ```bash
 npm install
-```
 
-### 1. XREAL AURA (Termux ローカル起動 / `agy acp`)
-```bash
-WORKSPACE_DIR=~/workspace npm start
-```
-ブラウザで `http://127.0.0.1:8765/` を開きます。
-
-### 2. 内蔵モックエージェントまたはオフラインデモで動作確認
-```bash
-# サーバー側 ACP v1 モックエージェントと接続
+# モック AI エージェント付きで起動（すぐ全機能を体験）
 npm run start:mock
 
-# ブラウザ内蔵オフラインデモ（サーバー未接続でも動作）
-# http://127.0.0.1:8765/?demo=1
+# 本番: agy acp へ接続
+WORKSPACE_DIR=~/workspace npm start
 ```
 
-### 3. Meta Quest 3 から Tailscale 経由でリモート接続
-非ループバックバインド時は `ACP_BRIDGE_TOKEN` が必須です（未設定の場合は起動拒否）。
+ブラウザで `http://127.0.0.1:8765/` を開きます（バックエンド無しデモは `http://127.0.0.1:8765/?demo=1`）。
+
+### Tailscale 経由のリモート起動（Meta Quest 3 / AURA リモート）
 
 ```bash
 BIND_HOST=0.0.0.0 \
@@ -51,26 +41,10 @@ WORKSPACE_DIR=~/workspace \
 ACP_BRIDGE_TOKEN="your-strong-secret-token" \
 npm start
 ```
-Meta Quest Browser で `http://<Tailscale-IP>:8765/` を開き、「設定」→「リモート PC (Tailscale / Quest 3)」へトークンを入力して「接続テスト」を実行してください。
-
-## 環境変数
-
-| 変数 | デフォルト | 説明 |
-| :--- | :--- | :--- |
-| `BIND_HOST` | `127.0.0.1` | バインドアドレス（非ループバック時は `ACP_BRIDGE_TOKEN` 必須） |
-| `PORT` | `8765` | HTTP / WebSocket 待ち受けポート |
-| `WORKSPACE_DIR` | `process.cwd()` | エージェントと `code-server` が共有するワークスペースの絶対パス |
-| `DEFAULT_AGENT` | `agy` | デフォルト起動エージェント (`agy` / `copilot` / `gemini` / `mock`) |
-| `KEEPALIVE_MS` | `300000` (5分) | WebSocket 切断後にエージェントプロセスを保持する時間（ms） |
-| `ACP_BRIDGE_TOKEN` | `""` | リモート接続用の共有認証トークン |
-| `ACP_AGENTS_JSON` | `""` | カスタムエージェント定義 JSON |
 
 ## テスト
 
 ```bash
-# 構文チェック
-npm run check
-
-# 全テスト実行（ユニット + ACP ブリッジ E2E + Headless Chromium UI E2E）
-npm test
+npm run check   # 全 JS/MJS 構文チェック
+npm test        # ユニット + FS/Git/Console/ACP 統合テスト + Headless Chromium UI E2E
 ```

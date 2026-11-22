@@ -22,6 +22,9 @@ import {
 } from '../public/profiles.js';
 import { createHistoryStore, deriveSessionTitle } from '../public/history-store.js';
 import { DemoAcpClient } from '../public/demo-client.js';
+import { renderAnsiToHtml } from '../public/console.js';
+import { highlightCode, detectLanguage } from '../public/editor.js';
+import { fuzzyScore } from '../public/palette.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -602,5 +605,159 @@ test('scripts/watch-ss.sh --once copies image safely (including spaces) and outp
     assert.equal(files.length, 2, `Expected 2 unique copied files, got ${files.join(', ')} (${stdout2})`);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// Spatial Desktop IDE v0.4 Tests: ANSI Console, Syntax HL, Fuzzy, FS Jail, /ws/console
+// ============================================================================
+
+test('renderAnsiToHtml, highlightCode, detectLanguage, and fuzzyScore work safely', () => {
+  const ansiHtml = renderAnsiToHtml('\x1b[32mPASS\x1b[0m public/app.js:42 <script>x</script>');
+  assert.ok(ansiHtml.includes('class="ansi-green"'));
+  assert.ok(ansiHtml.includes('data-jump-file="public/app.js"'));
+  assert.ok(ansiHtml.includes('data-jump-line="42"'));
+  assert.ok(!ansiHtml.includes('<script>'));
+
+  assert.equal(detectLanguage('src/main.ts'), 'TypeScript');
+  assert.equal(detectLanguage('posts/blog.md'), 'Markdown');
+
+  const hlJs = highlightCode('const x = "hi"; // comment', 'JavaScript');
+  assert.ok(hlJs.includes('tok-keyword'));
+  assert.ok(hlJs.includes('tok-string'));
+  assert.ok(hlJs.includes('tok-comment'));
+
+  assert.ok(fuzzyScore('app', 'public/app.js') > fuzzyScore('app', 'docs/a-p-p.md'));
+  assert.equal(fuzzyScore('zzz', 'public/app.js'), -1);
+});
+
+test('Workspace FS API supports CRUD, search, git status, and strictly blocks traversal/symlink escapes', async () => {
+  const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'xr-ws-'));
+  const outsideFile = path.join(os.tmpdir(), `xr-outside-${Date.now()}.txt`);
+  await fs.writeFile(outsideFile, 'TOP_SECRET', 'utf8');
+
+  const server = createBridgeServer({
+    bindHost: '127.0.0.1',
+    port: 0,
+    workspaceDir: tmpWorkspace,
+    defaultAgent: 'mock',
+    logger: silentLogger,
+  });
+
+  const { port } = await server.start();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    // Write file & read back
+    const putRes = await fetch(`${base}/api/fs/file`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: 'notes/hello.md', content: '# Spatial IDE\nHello XR\n' }),
+    });
+    assert.equal(putRes.status, 200);
+
+    const getRes = await fetch(`${base}/api/fs/file?path=notes/hello.md`);
+    assert.equal(getRes.status, 200);
+    const fileData = await getRes.json();
+    assert.equal(fileData.content, '# Spatial IDE\nHello XR\n');
+
+    // Tree listing
+    const treeRes = await fetch(`${base}/api/fs/tree`);
+    const treeData = await treeRes.json();
+    assert.equal(treeData.tree[0].name, 'notes');
+    assert.equal(treeData.tree[0].children[0].path, 'notes/hello.md');
+
+    // Workspace text search
+    const searchRes = await fetch(`${base}/api/fs/search?q=Spatial`);
+    const searchData = await searchRes.json();
+    assert.equal(searchData.results.length, 1);
+    assert.equal(searchData.results[0].line, 1);
+
+    // Rename & delete
+    const renRes = await fetch(`${base}/api/fs/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'notes/hello.md', to: 'notes/renamed.md' }),
+    });
+    assert.equal(renRes.status, 200);
+
+    const delRes = await fetch(`${base}/api/fs/entry?path=notes/renamed.md`, { method: 'DELETE' });
+    assert.equal(delRes.status, 200);
+
+    // Path traversal blocked (403)
+    const escRes = await fetch(`${base}/api/fs/file?path=../../etc/passwd`);
+    assert.equal(escRes.status, 403);
+
+    // Symlink escape blocked (403)
+    await fs.symlink(outsideFile, path.join(tmpWorkspace, 'evil-link.txt'));
+    const symRes = await fetch(`${base}/api/fs/file?path=evil-link.txt`);
+    assert.equal(symRes.status, 403);
+
+    // Git status on non-git dir returns isGitRepo: false gracefully
+    const gitRes = await fetch(`${base}/api/git/status`);
+    assert.equal(gitRes.status, 200);
+    const gitData = await gitRes.json();
+    assert.equal(gitData.isGitRepo, false);
+  } finally {
+    await server.close();
+    await fs.rm(tmpWorkspace, { recursive: true, force: true });
+    await fs.rm(outsideFile, { force: true });
+  }
+});
+
+test('/ws/console streams stdout/exit and interrupts running command on kill', async () => {
+  const server = createBridgeServer({
+    bindHost: '127.0.0.1',
+    port: 0,
+    defaultAgent: 'mock',
+    logger: silentLogger,
+  });
+
+  const { port } = await server.start();
+  try {
+    const ws = await openWs(`ws://127.0.0.1:${port}/ws/console`);
+    const events = [];
+
+    const waitEvent = (pred, timeoutMs = 4000) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Console event timeout')), timeoutMs);
+        const check = (msg) => {
+          if (pred(msg)) {
+            clearTimeout(timer);
+            ws.off('message', onMsg);
+            resolve(msg);
+          }
+        };
+        const onMsg = (raw) => {
+          const parsed = JSON.parse(raw.toString('utf8'));
+          events.push(parsed);
+          check(parsed);
+        };
+        ws.on('message', onMsg);
+      });
+
+    // 1. Run simple echo command
+    const exitP = waitEvent((m) => m.type === 'exit' && m.id === 'c1');
+    ws.send(JSON.stringify({ type: 'exec', id: 'c1', command: 'echo xr-console-ok' }));
+    const exitMsg = await exitP;
+    assert.equal(exitMsg.code, 0);
+    const combinedOut = events
+      .filter((e) => e.type === 'output' && e.id === 'c1')
+      .map((e) => e.data)
+      .join('');
+    assert.match(combinedOut, /xr-console-ok/);
+
+    // 2. Kill long-running sleep process via SIGINT
+    const startSleep = waitEvent((m) => m.type === 'started' && m.id === 'c2');
+    ws.send(JSON.stringify({ type: 'exec', id: 'c2', command: 'sleep 20' }));
+    await startSleep;
+
+    const killExit = waitEvent((m) => m.type === 'exit' && m.id === 'c2');
+    ws.send(JSON.stringify({ type: 'kill', id: 'c2', signal: 'SIGINT' }));
+    const killed = await killExit;
+    assert.ok(killed.signal === 'SIGINT' || killed.code !== 0);
+
+    ws.close();
+  } finally {
+    await server.close();
   }
 });

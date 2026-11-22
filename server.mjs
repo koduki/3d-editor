@@ -10,11 +10,25 @@
 
 import http from 'node:http';
 import fs from 'node:fs/promises';
+import { watch as fsWatch } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
+import {
+  listWorkspaceTree,
+  readWorkspaceFile,
+  writeWorkspaceFile,
+  createWorkspaceDir,
+  renameWorkspaceEntry,
+  deleteWorkspaceEntry,
+  searchWorkspaceText,
+  resolveWorkspacePath,
+  getGitStatus,
+  getGitDiff,
+} from './lib/workspace-fs.mjs';
+import { ConsoleRunner } from './lib/console-runner.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -400,6 +414,49 @@ export function createBridgeServer(options = {}) {
 
   const authRequired = !loopbackOnly || Boolean(bridgeToken);
   const pool = new Map(); // poolKey -> AgentProcessEntry
+  const consoleRunner = new ConsoleRunner({ workspaceDir, logger });
+  const sseClients = new Set();
+  let fsWatcher = null;
+  let watchDebounceTimer = null;
+  const pendingChangedPaths = new Set();
+
+  function ensureFsWatcher() {
+    if (fsWatcher) return;
+    try {
+      fsWatcher = fsWatch(workspaceDir, { recursive: true }, (_eventType, filename) => {
+        if (!filename) return;
+        const normalized = String(filename).replace(/\\/g, '/');
+        if (
+          normalized.startsWith('.git/') ||
+          normalized === '.git' ||
+          normalized.startsWith('node_modules/') ||
+          normalized === 'node_modules'
+        ) {
+          return;
+        }
+        pendingChangedPaths.add(normalized);
+        if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+        watchDebounceTimer = setTimeout(() => {
+          watchDebounceTimer = null;
+          const paths = [...pendingChangedPaths];
+          pendingChangedPaths.clear();
+          const payload = `data: ${JSON.stringify({ type: 'fs_changed', paths, ts: Date.now() })}\n\n`;
+          for (const clientRes of sseClients) {
+            try {
+              clientRes.write(payload);
+            } catch {
+              sseClients.delete(clientRes);
+            }
+          }
+        }, 200);
+      });
+      fsWatcher.on('error', () => {
+        // Non-recursive fallback platforms ignore watch errors gracefully
+      });
+    } catch {
+      fsWatcher = null;
+    }
+  }
 
   function removePoolEntry(key, entry) {
     if (pool.get(key) === entry) {
@@ -409,9 +466,51 @@ export function createBridgeServer(options = {}) {
 
   const API_CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
   };
+
+  function sendJson(res, statusCode, payload) {
+    res.writeHead(statusCode, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...API_CORS_HEADERS,
+    });
+    res.end(JSON.stringify(payload));
+  }
+
+  async function readJsonBody(req, maxBytes = 4 * 1024 * 1024) {
+    let total = 0;
+    const chunks = [];
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        const err = new Error('Request payload too large');
+        err.statusCode = 413;
+        throw err;
+      }
+      chunks.push(chunk);
+    }
+    const raw = Buffer.concat(chunks).toString('utf8').trim();
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      const err = new Error('Invalid JSON body');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  function checkApiAuth(req, res, urlObj) {
+    if (!authRequired) return true;
+    const provided = extractToken(req, urlObj);
+    if (!verifyToken(bridgeToken, provided)) {
+      sendJson(res, 401, { error: 'Unauthorized: valid token required' });
+      return false;
+    }
+    return true;
+  }
 
   async function serveStatic(res, pathname, method = 'GET') {
     const cleanPath = pathname === '/' ? '/index.html' : pathname;
@@ -461,65 +560,148 @@ export function createBridgeServer(options = {}) {
 
   const httpServer = http.createServer(async (req, res) => {
     const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const pathname = urlObj.pathname;
 
-    if (req.method === 'OPTIONS' && urlObj.pathname.startsWith('/api/')) {
+    if (req.method === 'OPTIONS' && pathname.startsWith('/api/')) {
       res.writeHead(204, API_CORS_HEADERS);
       res.end();
       return;
     }
 
-    if (urlObj.pathname === '/api/health') {
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        ...API_CORS_HEADERS,
+    if (pathname === '/api/health') {
+      sendJson(res, 200, {
+        ok: true,
+        name: 'xr-acp-workbench',
+        version: '0.4.0',
+        authRequired,
+        activeProcesses: pool.size,
+        capabilities: {
+          acp: true,
+          fs: true,
+          git: true,
+          console: true,
+        },
       });
-      res.end(
-        JSON.stringify({
-          ok: true,
-          name: 'xr-acp-companion',
-          version: '0.3.0',
-          authRequired,
-          activeProcesses: pool.size,
-        }),
-      );
       return;
     }
 
-    if (urlObj.pathname === '/api/config') {
-      if (authRequired) {
-        const provided = extractToken(req, urlObj);
-        if (!verifyToken(bridgeToken, provided)) {
-          res.writeHead(401, {
-            'Content-Type': 'application/json; charset=utf-8',
-            'Cache-Control': 'no-store',
-            ...API_CORS_HEADERS,
+    if (pathname.startsWith('/api/')) {
+      if (!checkApiAuth(req, res, urlObj)) return;
+
+      try {
+        if (pathname === '/api/config' && req.method === 'GET') {
+          const agentList = Object.entries(agents).map(([key, def]) => ({
+            key,
+            label: def.label,
+          }));
+          sendJson(res, 200, {
+            workspaceDir,
+            workspaceName: path.basename(workspaceDir) || workspaceDir,
+            defaultAgent: agents[defaultAgent] ? defaultAgent : Object.keys(agents)[0],
+            agents: agentList,
+            authRequired,
+            keepAliveMs,
+            capabilities: { acp: true, fs: true, git: true, console: true },
           });
-          res.end(JSON.stringify({ error: 'Unauthorized: valid token required' }));
           return;
         }
+
+        if (pathname === '/api/fs/events' && req.method === 'GET') {
+          ensureFsWatcher();
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            ...API_CORS_HEADERS,
+          });
+          res.write(`data: ${JSON.stringify({ type: 'connected', workspaceDir })}\n\n`);
+          sseClients.add(res);
+          const pingTimer = setInterval(() => {
+            try {
+              res.write(': ping\n\n');
+            } catch {
+              clearInterval(pingTimer);
+              sseClients.delete(res);
+            }
+          }, 25000);
+          pingTimer.unref?.();
+          req.on('close', () => {
+            clearInterval(pingTimer);
+            sseClients.delete(res);
+          });
+          return;
+        }
+
+        if (pathname === '/api/fs/tree' && req.method === 'GET') {
+          const rel = urlObj.searchParams.get('path') || '';
+          const depth = Math.min(8, Math.max(1, Number(urlObj.searchParams.get('depth') || 5)));
+          const tree = await listWorkspaceTree(workspaceDir, rel, { maxDepth: depth });
+          sendJson(res, 200, { workspaceDir, workspaceName: path.basename(workspaceDir), tree });
+          return;
+        }
+
+        if (pathname === '/api/fs/file' && req.method === 'GET') {
+          const rel = urlObj.searchParams.get('path') || '';
+          const file = await readWorkspaceFile(workspaceDir, rel);
+          sendJson(res, 200, file);
+          return;
+        }
+
+        if (pathname === '/api/fs/file' && req.method === 'PUT') {
+          const body = await readJsonBody(req);
+          const saved = await writeWorkspaceFile(workspaceDir, body.path, body.content);
+          sendJson(res, 200, saved);
+          return;
+        }
+
+        if (pathname === '/api/fs/mkdir' && req.method === 'POST') {
+          const body = await readJsonBody(req);
+          const created = await createWorkspaceDir(workspaceDir, body.path);
+          sendJson(res, 200, created);
+          return;
+        }
+
+        if (pathname === '/api/fs/rename' && req.method === 'POST') {
+          const body = await readJsonBody(req);
+          const renamed = await renameWorkspaceEntry(workspaceDir, body.from, body.to);
+          sendJson(res, 200, renamed);
+          return;
+        }
+
+        if (pathname === '/api/fs/entry' && req.method === 'DELETE') {
+          const rel = urlObj.searchParams.get('path') || '';
+          const deleted = await deleteWorkspaceEntry(workspaceDir, rel);
+          sendJson(res, 200, deleted);
+          return;
+        }
+
+        if (pathname === '/api/fs/search' && req.method === 'GET') {
+          const q = urlObj.searchParams.get('q') || '';
+          const results = await searchWorkspaceText(workspaceDir, q);
+          sendJson(res, 200, { query: q, results });
+          return;
+        }
+
+        if (pathname === '/api/git/status' && req.method === 'GET') {
+          const status = await getGitStatus(workspaceDir);
+          sendJson(res, 200, status);
+          return;
+        }
+
+        if (pathname === '/api/git/diff' && req.method === 'GET') {
+          const rel = urlObj.searchParams.get('path') || '';
+          const diff = await getGitDiff(workspaceDir, rel);
+          sendJson(res, 200, diff);
+          return;
+        }
+
+        sendJson(res, 404, { error: `Unknown API route: ${pathname}` });
+        return;
+      } catch (err) {
+        const status = err?.statusCode || 500;
+        sendJson(res, status, { error: err?.message || 'Internal server error' });
+        return;
       }
-
-      const agentList = Object.entries(agents).map(([key, def]) => ({
-        key,
-        label: def.label,
-      }));
-
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        ...API_CORS_HEADERS,
-      });
-      res.end(
-        JSON.stringify({
-          workspaceDir,
-          defaultAgent: agents[defaultAgent] ? defaultAgent : Object.keys(agents)[0],
-          agents: agentList,
-          authRequired,
-          keepAliveMs,
-        }),
-      );
-      return;
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -528,10 +710,91 @@ export function createBridgeServer(options = {}) {
       return;
     }
 
-    await serveStatic(res, urlObj.pathname, req.method);
+    await serveStatic(res, pathname, req.method);
   });
 
   const wss = new WebSocketServer({ noServer: true });
+
+  function attachConsoleSocket(ws) {
+    const ownedIds = new Set();
+
+    const sendMsg = (obj) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    };
+
+    sendMsg({
+      type: 'ready',
+      workspaceDir,
+      workspaceName: path.basename(workspaceDir),
+    });
+
+    ws.on('message', async (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(typeof data === 'string' ? data : data.toString('utf8'));
+      } catch {
+        return;
+      }
+
+      if (msg.type === 'exec' && typeof msg.command === 'string') {
+        const cmd = msg.command.trim();
+        if (!cmd) return;
+
+        let effectiveCwd = workspaceDir;
+        if (msg.cwd) {
+          try {
+            const resolved = await resolveWorkspacePath(workspaceDir, msg.cwd, { mustExist: true });
+            effectiveCwd = resolved.absPath;
+          } catch (err) {
+            sendMsg({ type: 'error', id: msg.id || null, message: err.message });
+            return;
+          }
+        }
+
+        const entry = consoleRunner.exec({
+          id: msg.id || null,
+          command: cmd,
+          cwd: effectiveCwd,
+          onOutput: ({ id, stream, data: chunk }) => {
+            sendMsg({ type: 'output', id, stream, data: chunk });
+          },
+          onExit: ({ id, code, signal, durationMs }) => {
+            ownedIds.delete(id);
+            consoleRunner.release(id);
+            sendMsg({ type: 'exit', id, code, signal, durationMs });
+          },
+        });
+
+        ownedIds.add(entry.id);
+        sendMsg({
+          type: 'started',
+          id: entry.id,
+          pid: entry.pid,
+          command: entry.command,
+          cwd: path.relative(workspaceDir, effectiveCwd) || '.',
+        });
+        return;
+      }
+
+      if (msg.type === 'stdin' && msg.id) {
+        consoleRunner.sendInput(msg.id, msg.data ?? '');
+        return;
+      }
+
+      if (msg.type === 'kill' && msg.id) {
+        consoleRunner.kill(msg.id, msg.signal || 'SIGINT');
+      }
+    });
+
+    ws.on('close', () => {
+      for (const id of ownedIds) {
+        consoleRunner.release(id);
+      }
+      ownedIds.clear();
+    });
+  }
 
   httpServer.on('upgrade', (req, socket, head) => {
     const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -543,6 +806,13 @@ export function createBridgeServer(options = {}) {
         socket.destroy();
         return;
       }
+    }
+
+    if (urlObj.pathname === '/ws/console') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        attachConsoleSocket(ws);
+      });
+      return;
     }
 
     const requestedAgent = urlObj.searchParams.get('agent') || defaultAgent;
@@ -588,7 +858,7 @@ export function createBridgeServer(options = {}) {
         const addr = httpServer.address();
         const actualPort = typeof addr === 'object' && addr ? addr.port : port;
         logger.log(
-          `[xr-acp-companion] Listening on http://${bindHost}:${actualPort} ` +
+          `[xr-acp-workbench] Listening on http://${bindHost}:${actualPort} ` +
             `(workspace=${workspaceDir}, defaultAgent=${defaultAgent}, auth=${authRequired ? 'token' : 'none'})`,
         );
         resolve({ host: bindHost, port: actualPort });
@@ -597,6 +867,27 @@ export function createBridgeServer(options = {}) {
   }
 
   function close() {
+    if (watchDebounceTimer) {
+      clearTimeout(watchDebounceTimer);
+      watchDebounceTimer = null;
+    }
+    if (fsWatcher) {
+      try {
+        fsWatcher.close();
+      } catch {
+        // ignore
+      }
+      fsWatcher = null;
+    }
+    for (const clientRes of [...sseClients]) {
+      try {
+        clientRes.end();
+      } catch {
+        // ignore
+      }
+    }
+    sseClients.clear();
+    consoleRunner.killAll();
     for (const entry of [...pool.values()]) {
       entry.destroy();
     }
@@ -612,6 +903,7 @@ export function createBridgeServer(options = {}) {
     httpServer,
     wss,
     pool,
+    consoleRunner,
     start,
     close,
   };

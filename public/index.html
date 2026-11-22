@@ -5,38 +5,52 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#000000">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="XR-optimized AI agent control panel (ACP v1 client) for XREAL AURA and Meta Quest 3">
-  <title>XR-ACP Companion</title>
+  <meta name="description" content="Spatial Desktop IDE & ACP v1 AI Workbench engineered for XREAL AURA (Android XR) and Meta Quest 3 with keyboard + mouse/trackpad.">
+  <title>XR-ACP Workbench</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div id="app" class="app-shell">
-    <!-- Top Header -->
+  <div id="app" class="workbench-shell">
+    <!-- Top Desktop Command Bar -->
     <header class="top-bar" role="banner">
       <div class="top-left">
         <span id="statusDot" class="status-dot status-disconnected" aria-hidden="true"></span>
-        <div class="title-group">
-          <span class="app-title">XR-ACP</span>
-          <span id="demoBadge" class="demo-badge hidden" title="バックエンド未接続のオフラインデモモード">DEMO</span>
-          <span id="statusText" class="status-text">未接続</span>
-        </div>
+        <span class="app-title">XR-ACP Workbench</span>
+        <span id="demoBadge" class="demo-badge hidden" title="バックエンド未接続のオフラインデモモード">DEMO</span>
+        <span id="statusText" class="status-text">未接続</span>
+      </div>
+
+      <div class="top-center">
+        <button id="quickOpenBtn" type="button" class="search-pill" title="ファイルを素早く開く (Ctrl+P)">
+          <span class="search-pill-label">ファイルを検索して開く…</span>
+          <kbd>Ctrl+P</kbd>
+        </button>
+        <button id="cmdPaletteBtn" type="button" class="ctrl-btn" title="コマンドパレット (Ctrl+Shift+P / F1)">
+          コマンド
+        </button>
+        <button id="globalSearchBtn" type="button" class="ctrl-btn" title="ワークスペース全文検索 (Ctrl+Shift+F)">
+          検索
+        </button>
       </div>
 
       <div class="top-controls">
-        <span id="usageBadge" class="usage-badge hidden" title="コンテキスト使用量"></span>
+        <div class="pane-toggle-group" role="group" aria-label="ペイン表示切替">
+          <button id="toggleExplorerBtn" type="button" class="ctrl-btn pane-toggle active" title="ファイルツリー切替 (Ctrl+B)" aria-pressed="true">
+            ツリー
+          </button>
+          <button id="toggleConsoleBtn" type="button" class="ctrl-btn pane-toggle active" title="軽量コマンドコンソール切替 (Ctrl+J / Ctrl+`)" aria-pressed="true">
+            コンソール
+          </button>
+          <button id="toggleAiBtn" type="button" class="ctrl-btn pane-toggle active" title="AI パネル切替 (Alt+3)" aria-pressed="true">
+            AI
+          </button>
+        </div>
 
         <label class="sr-only" for="profileQuickSelect">接続プロファイル</label>
         <select id="profileQuickSelect" class="ctrl-select profile-select" title="接続プロファイル切替"></select>
-
-        <label class="sr-only" for="modeSelect">実行モード</label>
-        <select id="modeSelect" class="ctrl-select" title="実行モード (session/set_mode)" disabled>
-          <option value="default">default</option>
-          <option value="accept-edits">accept-edits</option>
-          <option value="plan">plan</option>
-        </select>
 
         <button
           id="themeToggleBtn"
@@ -46,26 +60,6 @@
           aria-pressed="false"
         >
           OST
-        </button>
-
-        <button
-          id="historyBtn"
-          type="button"
-          class="ctrl-btn"
-          title="保存済みセッション履歴を表示"
-          aria-haspopup="dialog"
-          aria-controls="historyModal"
-        >
-          履歴
-        </button>
-
-        <button
-          id="newSessionBtn"
-          type="button"
-          class="ctrl-btn"
-          title="新規セッションを開始 (session/new)"
-        >
-          新規
         </button>
 
         <button
@@ -81,131 +75,323 @@
       </div>
     </header>
 
-    <!-- Live Notice Region -->
-    <div id="noticeRegion" class="notice-region" aria-live="polite"></div>
+    <!-- Main Spatial Desktop Workbench Grid -->
+    <div id="workbenchBody" class="workbench-body">
+      <!-- Left Pane: Workspace Explorer -->
+      <aside id="explorerPane" class="pane explorer-pane" aria-label="ワークスペースエクスプローラー">
+        <div class="pane-header">
+          <span id="workspaceNameLabel" class="pane-title">WORKSPACE</span>
+          <div class="pane-actions">
+            <button id="newFileBtn" type="button" class="mini-btn" title="新規ファイルを作成">＋File</button>
+            <button id="newDirBtn" type="button" class="mini-btn" title="新規フォルダを作成">＋Dir</button>
+            <button id="refreshTreeBtn" type="button" class="mini-btn" title="ファイル一覧と Git 状態を更新">↻</button>
+          </div>
+        </div>
+        <div class="explorer-filter-wrap">
+          <input
+            id="treeFilterInput"
+            type="text"
+            class="explorer-filter"
+            placeholder="ツリーを絞り込み…"
+            aria-label="ファイルツリー絞り込み"
+            autocomplete="off"
+          >
+        </div>
+        <div id="fileTree" class="file-tree" role="tree" aria-label="ファイルツリー"></div>
+      </aside>
 
-    <!-- Main Conversation Timeline -->
-    <main id="timeline" class="timeline" role="main" aria-label="エージェント対話ログ">
-      <section id="emptyState" class="empty-state">
-        <div class="empty-badge">ACP v1 / XR Companion</div>
-        <h1>空間マルチウィンドウ AI パネル</h1>
-        <p class="empty-desc">
-          編集・LSP・Git 確認は正面の <code>code-server</code> に委譲し、
-          このパネルで対話・縦型 Diff レビュー・権限承認・音声ラフ書きを完結させます。
-        </p>
+      <div id="explorerResizer" class="splitter splitter-v" role="separator" aria-orientation="vertical" title="ドラッグして幅を調整"></div>
 
-        <div id="demoQuickPrompts" class="demo-prompts hidden">
-          <div class="demo-prompts-title">オフラインデモ — ワンクリックで体験</div>
-          <div class="demo-prompt-list">
-            <button type="button" class="demo-chip" data-demo-prompt="ブログ記事に XR 音声入力の構成案を追記して">
-              記事ドラフト編集 (縦型 Diff 承認)
+      <!-- Center Column: Tabbed Code/Markdown Editor + Lightweight Command Console -->
+      <section id="centerColumn" class="center-column" aria-label="エディタとコマンドコンソール">
+        <!-- Editor Pane -->
+        <div id="editorPane" class="pane editor-pane">
+          <div class="editor-header">
+            <div id="editorTabs" class="editor-tabs" role="tablist" aria-label="開いているファイル"></div>
+            <div class="editor-header-actions">
+              <span id="editorToolbarPath" class="editor-breadcrumb">ファイル未選択</span>
+              <button id="editorAttachAiBtn" type="button" class="mini-btn" title="現在のファイル／選択範囲を AI へ添付 (Ctrl+L)">
+                AI添付
+              </button>
+              <button id="editorPreviewBtn" type="button" class="mini-btn hidden" title="Markdown ライブプレビュー切替" aria-pressed="false">
+                プレビュー
+              </button>
+              <button id="editorSaveBtn" type="button" class="mini-btn save-btn" title="保存 (Ctrl+S)" disabled>
+                保存
+              </button>
+            </div>
+          </div>
+
+          <div id="editorConflictBanner" class="conflict-banner hidden" role="status">
+            <span>このファイルはエージェントまたは外部で更新されました（未保存の編集あり）。</span>
+            <div class="conflict-actions">
+              <button id="editorConflictReloadBtn" type="button" class="mini-btn">最新を再読込</button>
+              <button id="editorConflictKeepBtn" type="button" class="mini-btn">現在の編集を維持</button>
+            </div>
+          </div>
+
+          <!-- Editor Empty State -->
+          <div id="editorEmptyState" class="editor-empty">
+            <div class="editor-empty-card">
+              <div class="empty-badge">Spatial Desktop IDE · Keyboard &amp; Mouse First</div>
+              <h1>XR-ACP Workbench</h1>
+              <p class="empty-desc">
+                XREAL AURA（Android XR / OST）および Meta Quest 3（VST）の空間マルチウィンドウ環境向けに、
+                キーボード＋マウス／トラックパッド操作へ最適化した開発ワークベンチです。
+              </p>
+              <div class="editor-empty-actions">
+                <button id="welcomeQuickOpenBtn" type="button" class="action-btn send-btn">ファイルを開く (Ctrl+P)</button>
+                <button id="welcomeCmdPaletteBtn" type="button" class="ctrl-btn">コマンドパレット (Ctrl+Shift+P)</button>
+                <button id="welcomeNewFileBtn" type="button" class="ctrl-btn">新規ファイル</button>
+              </div>
+              <div class="shortcut-grid shortcut-grid-2col">
+                <div class="shortcut-item"><kbd>Ctrl+P</kbd><span>クイックファイルオープン</span></div>
+                <div class="shortcut-item"><kbd>Ctrl+Shift+P</kbd><span>コマンドパレット</span></div>
+                <div class="shortcut-item"><kbd>Ctrl+S</kbd><span>ファイルを保存</span></div>
+                <div class="shortcut-item"><kbd>Ctrl+J</kbd> / <kbd>Ctrl+`</kbd><span>軽量コンソール切替</span></div>
+                <div class="shortcut-item"><kbd>Ctrl+L</kbd><span>AI エージェントへフォーカス</span></div>
+                <div class="shortcut-item"><kbd>Alt+1..4</kbd><span>ペイン間ダイレクト移動</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Editor Surface + Optional Live Markdown Preview -->
+          <div id="editorSurface" class="editor-surface hidden">
+            <div class="code-stage">
+              <pre id="editorGutter" class="editor-gutter" aria-hidden="true">1</pre>
+              <div class="code-layer-wrap">
+                <pre id="editorHighlight" class="editor-highlight" aria-hidden="true"></pre>
+                <textarea
+                  id="editorTextarea"
+                  class="editor-textarea"
+                  spellcheck="false"
+                  autocapitalize="off"
+                  autocomplete="off"
+                  autocorrect="off"
+                  aria-label="コードエディタ"
+                ></textarea>
+              </div>
+            </div>
+            <div id="editorPreview" class="editor-preview markdown-body hidden" aria-label="Markdown プレビュー"></div>
+          </div>
+        </div>
+
+        <div id="consoleResizer" class="splitter splitter-h" role="separator" aria-orientation="horizontal" title="ドラッグしてコンソール高さを調整"></div>
+
+        <!-- Bottom Lightweight Command Console -->
+        <section id="consolePane" class="pane console-pane" aria-label="軽量コマンドコンソール">
+          <div class="pane-header console-header">
+            <div class="console-header-left">
+              <span class="pane-title">CONSOLE</span>
+              <span id="consoleStatus" class="console-status console-status-muted">待機</span>
+              <div class="console-quick-cmds">
+                <button type="button" class="mini-btn" data-console-cmd="npm test">npm test</button>
+                <button type="button" class="mini-btn" data-console-cmd="git status">git status</button>
+                <button type="button" class="mini-btn" data-console-cmd="git diff --stat">git diff</button>
+              </div>
+            </div>
+            <div class="pane-actions">
+              <button id="consoleStopBtn" type="button" class="mini-btn danger-btn hidden" title="実行中コマンドを中断 (Ctrl+C)">■ 中断</button>
+              <button id="consoleCopyBtn" type="button" class="mini-btn" title="出力をクリップボードへコピー">コピー</button>
+              <button id="consoleClearBtn" type="button" class="mini-btn" title="出力をクリア">クリア</button>
+              <button id="consoleCloseBtn" type="button" class="mini-btn" title="コンソールを閉じる (Ctrl+J)">×</button>
+            </div>
+          </div>
+
+          <div id="consoleOutput" class="console-output" role="log" aria-live="polite"></div>
+
+          <div class="console-input-row">
+            <span class="console-prompt-char" aria-hidden="true">$</span>
+            <input
+              id="consoleInput"
+              type="text"
+              class="console-input"
+              placeholder="コマンドを実行… (例: npm test, git status / ↑↓ 履歴)"
+              aria-label="コマンド入力"
+              autocomplete="off"
+              spellcheck="false"
+            >
+          </div>
+        </section>
+      </section>
+
+      <div id="aiResizer" class="splitter splitter-v" role="separator" aria-orientation="vertical" title="ドラッグして AI パネル幅を調整"></div>
+
+      <!-- Right Pane: ACP v1 AI Agent Panel -->
+      <aside id="aiPane" class="pane ai-pane" aria-label="ACP AI エージェントパネル">
+        <div class="pane-header ai-header">
+          <div class="ai-header-left">
+            <span class="pane-title">AI AGENT</span>
+            <span id="usageBadge" class="usage-badge hidden" title="コンテキスト使用量"></span>
+          </div>
+          <div class="pane-actions">
+            <label class="sr-only" for="modeSelect">実行モード</label>
+            <select id="modeSelect" class="mini-select" title="実行モード (session/set_mode)" disabled>
+              <option value="default">default</option>
+              <option value="accept-edits">accept-edits</option>
+              <option value="plan">plan</option>
+            </select>
+            <button id="historyBtn" type="button" class="mini-btn" title="保存済みセッション履歴を表示" aria-haspopup="dialog" aria-controls="historyModal">
+              履歴
             </button>
-            <button type="button" class="demo-chip" data-demo-prompt="/code 非アクティブ時のパネル減光コードを改善して">
-              コード編集 Diff をレビュー
-            </button>
-            <button type="button" class="demo-chip" data-demo-prompt="/test テストを実行して結果を確認して">
-              コマンド実行の権限承認
-            </button>
-            <button type="button" class="demo-chip" data-demo-prompt="/plan AURA と Quest 3 の使い分けを整理して">
-              Plan モードで編集なし回答
+            <button id="newSessionBtn" type="button" class="mini-btn" title="新規セッションを開始 (session/new)">
+              新規
             </button>
           </div>
         </div>
 
-        <div class="shortcut-grid">
-          <div class="shortcut-item"><kbd>Ctrl</kbd>+<kbd>Enter</kbd><span>プロンプト送信（IME安全）</span></div>
-          <div class="shortcut-item"><kbd>Ctrl</kbd>+<kbd>Space</kbd><span>音声入力 ON / OFF</span></div>
-          <div class="shortcut-item"><kbd>y</kbd> / <kbd>Enter</kbd><span>承認待ちを許可（非入力時）</span></div>
-          <div class="shortcut-item"><kbd>n</kbd> / <kbd>Esc</kbd><span>拒否 / 実行中断</span></div>
-        </div>
-      </section>
-    </main>
+        <!-- Live Notice Region -->
+        <div id="noticeRegion" class="notice-region" aria-live="polite"></div>
 
-    <!-- Fixed Permission Approval Bar -->
-    <section
-      id="permissionBar"
-      class="permission-bar hidden"
-      role="region"
-      aria-label="権限承認リクエスト"
-      aria-live="assertive"
-    >
-      <div class="perm-header">
-        <div class="perm-title-row">
-          <span id="permKindBadge" class="perm-kind-badge">EDIT</span>
-          <strong id="permTitle" class="perm-title">ツール実行の承認</strong>
-        </div>
-        <span id="permQueueBadge" class="perm-queue-badge hidden"></span>
-      </div>
-      <div id="permMeta" class="perm-meta"></div>
-      <div id="permPreview" class="perm-preview"></div>
-      <div id="permActions" class="perm-actions"></div>
-      <div class="perm-hint">
-        非入力時キー操作: <kbd>y</kbd> / <kbd>Enter</kbd> 許可 ・ <kbd>a</kbd> 常時許可 ・ <kbd>n</kbd> / <kbd>Esc</kbd> 拒否
-      </div>
-    </section>
+        <!-- Conversation Timeline -->
+        <main id="timeline" class="timeline" role="main" aria-label="エージェント対話ログ">
+          <section id="emptyState" class="empty-state">
+            <div class="empty-badge">ACP v1 · Diff Review &amp; Voice</div>
+            <h2>AI エージェント対話</h2>
+            <p class="empty-desc">
+              ファイル編集の承認は縦型 Unified Diff で確認でき、承認すると中央エディタへ自動同期されます。
+            </p>
 
-    <!-- Bottom Composer -->
-    <footer class="composer-wrap">
-      <div id="slashBar" class="slash-bar hidden" aria-label="利用可能なスラッシュコマンド"></div>
+            <div id="demoQuickPrompts" class="demo-prompts hidden">
+              <div class="demo-prompts-title">オフラインデモ — ワンクリックで体験</div>
+              <div class="demo-prompt-list">
+                <button type="button" class="demo-chip" data-demo-prompt="ブログ記事に XR 音声入力の構成案を追記して">
+                  記事ドラフト編集 (縦型 Diff 承認)
+                </button>
+                <button type="button" class="demo-chip" data-demo-prompt="/code 非アクティブ時のパネル減光コードを改善して">
+                  コード編集 Diff をレビュー
+                </button>
+                <button type="button" class="demo-chip" data-demo-prompt="/test テストを実行して結果を確認して">
+                  コマンド実行の権限承認
+                </button>
+                <button type="button" class="demo-chip" data-demo-prompt="/plan AURA と Quest 3 の使い分けを整理して">
+                  Plan モードで編集なし回答
+                </button>
+              </div>
+            </div>
 
-      <div id="voiceBanner" class="voice-banner hidden" aria-live="polite">
-        <span class="voice-dot" aria-hidden="true"></span>
-        <span id="voiceBannerText">音声認識中 (ja-JP)…</span>
-      </div>
+            <div class="shortcut-grid">
+              <div class="shortcut-item"><kbd>Ctrl+Enter</kbd><span>プロンプト送信（IME安全）</span></div>
+              <div class="shortcut-item"><kbd>Ctrl+Space</kbd><span>音声入力 ON / OFF</span></div>
+              <div class="shortcut-item"><kbd>y</kbd> / <kbd>Enter</kbd><span>承認待ちを許可（非入力時）</span></div>
+              <div class="shortcut-item"><kbd>n</kbd> / <kbd>Esc</kbd><span>拒否 / 実行中断</span></div>
+            </div>
+          </section>
+        </main>
 
-      <div class="composer">
-        <button
-          id="voiceBtn"
-          type="button"
-          class="icon-btn voice-btn"
-          title="Push-to-Talk 音声入力 (Ctrl+Space)"
-          aria-pressed="false"
+        <!-- Fixed Permission Approval Bar -->
+        <section
+          id="permissionBar"
+          class="permission-bar hidden"
+          role="region"
+          aria-label="権限承認リクエスト"
+          aria-live="assertive"
         >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="9" y="2" width="6" height="12" rx="3"></rect>
-            <path d="M5 10a7 7 0 0 0 14 0"></path>
-            <line x1="12" y1="17" x2="12" y2="21"></line>
-            <line x1="8" y1="21" x2="16" y2="21"></line>
-          </svg>
-        </button>
+          <div class="perm-header">
+            <div class="perm-title-row">
+              <span id="permKindBadge" class="perm-kind-badge">EDIT</span>
+              <strong id="permTitle" class="perm-title">ツール実行の承認</strong>
+            </div>
+            <span id="permQueueBadge" class="perm-queue-badge hidden"></span>
+          </div>
+          <div id="permMeta" class="perm-meta"></div>
+          <div id="permPreview" class="perm-preview"></div>
+          <div id="permActions" class="perm-actions"></div>
+          <div class="perm-hint">
+            非入力時キー操作: <kbd>y</kbd> / <kbd>Enter</kbd> 許可 ・ <kbd>a</kbd> 常時許可 ・ <kbd>n</kbd> / <kbd>Esc</kbd> 拒否
+          </div>
+        </section>
 
-        <textarea
-          id="promptInput"
-          class="prompt-input"
-          rows="1"
-          placeholder="エージェントへ指示… (Ctrl+Enter 送信)"
-          aria-label="プロンプト入力"
-        ></textarea>
+        <!-- Bottom Composer -->
+        <footer class="composer-wrap">
+          <div id="aiContextBar" class="ai-context-bar hidden" aria-label="添付コンテキスト"></div>
+          <div id="slashBar" class="slash-bar hidden" aria-label="利用可能なスラッシュコマンド"></div>
 
-        <div class="composer-actions">
-          <button
-            id="cancelBtn"
-            type="button"
-            class="action-btn cancel-btn hidden"
-            title="現在の実行を中断 (Esc)"
-          >
-            中断
-          </button>
-          <button
-            id="sendBtn"
-            type="button"
-            class="action-btn send-btn"
-            title="送信 (Ctrl+Enter / Cmd+Enter)"
-          >
-            送信
-          </button>
-        </div>
+          <div id="voiceBanner" class="voice-banner hidden" aria-live="polite">
+            <span class="voice-dot" aria-hidden="true"></span>
+            <span id="voiceBannerText">音声認識中 (ja-JP)…</span>
+          </div>
+
+          <div class="composer">
+            <button
+              id="voiceBtn"
+              type="button"
+              class="icon-btn voice-btn"
+              title="Push-to-Talk 音声入力 (Ctrl+Space)"
+              aria-pressed="false"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+                <path d="M5 10a7 7 0 0 0 14 0"></path>
+                <line x1="12" y1="17" x2="12" y2="21"></line>
+                <line x1="8" y1="21" x2="16" y2="21"></line>
+              </svg>
+            </button>
+
+            <textarea
+              id="promptInput"
+              class="prompt-input"
+              rows="1"
+              placeholder="AI へ指示…"
+              aria-label="プロンプト入力"
+            ></textarea>
+
+            <div class="composer-actions">
+              <button id="cancelBtn" type="button" class="action-btn cancel-btn hidden" title="現在の実行を中断 (Esc)">
+                中断
+              </button>
+              <button id="sendBtn" type="button" class="action-btn send-btn" title="送信 (Ctrl+Enter / Cmd+Enter)">
+                送信
+              </button>
+            </div>
+          </div>
+
+          <div class="composer-foot">
+            <span id="sessionLabel" class="meta-chip">Session: -</span>
+            <span id="imeIndicator" class="meta-chip ime-chip hidden">IME 変換中</span>
+            <span class="meta-chip foot-shortcut">Ctrl+Enter 送信 · Ctrl+Space 音声</span>
+          </div>
+        </footer>
+      </aside>
+    </div>
+
+    <!-- Bottom Desktop Status Bar -->
+    <footer class="status-bar" role="contentinfo">
+      <div class="status-bar-left">
+        <span id="statusBranch" class="status-item">⎇ -</span>
+        <span id="statusFileLang" class="status-item">-</span>
+        <span id="statusCursor" class="status-item">Ln 1, Col 1</span>
+        <span class="status-item">UTF-8</span>
       </div>
-
-      <div class="composer-foot">
-        <span id="sessionLabel" class="meta-chip">Session: -</span>
-        <span id="imeIndicator" class="meta-chip ime-chip hidden">IME 変換中</span>
-        <span class="meta-chip foot-shortcut">Ctrl+Enter 送信 ・ Ctrl+Space 音声</span>
+      <div class="status-bar-right">
+        <span id="statusHostBadge" class="status-item">Web Spatial</span>
+        <span class="status-item status-hints">Ctrl+P 開く · Ctrl+Shift+P コマンド · Ctrl+S 保存 · Ctrl+J コンソール · Ctrl+L AI</span>
       </div>
     </footer>
   </div>
 
-  <!-- Session History Modal (v0.2) -->
+  <!-- Custom Desktop Right-Click Context Menu -->
+  <div id="contextMenu" class="context-menu hidden" role="menu"></div>
+
+  <!-- Quick Open / Command Palette / Workspace Search Modal -->
+  <div id="paletteModal" class="modal-backdrop palette-backdrop hidden" role="dialog" aria-modal="true" aria-label="コマンドパレット">
+    <div class="palette-card">
+      <div class="palette-header">
+        <span id="paletteModeBadge" class="palette-mode-badge">クイックファイル開く</span>
+        <input
+          id="paletteInput"
+          type="text"
+          class="palette-input"
+          placeholder="ファイル名で絞り込み…"
+          autocomplete="off"
+          spellcheck="false"
+        >
+      </div>
+      <div id="paletteList" class="palette-list" role="listbox"></div>
+    </div>
+  </div>
+
+  <!-- Session History Modal -->
   <div id="historyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="historyModalTitle">
     <div class="modal-card modal-card-wide">
       <div class="modal-header">
@@ -228,7 +414,7 @@
     </div>
   </div>
 
-  <!-- Settings & Profile Modal (v0.2 / v0.3) -->
+  <!-- Settings & Profile Modal -->
   <div id="settingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
     <div class="modal-card modal-card-wide">
       <div class="modal-header">
@@ -237,7 +423,6 @@
       </div>
 
       <form id="settingsForm" class="modal-body">
-        <!-- Profile Manager Row -->
         <div class="profile-bar">
           <div class="field profile-select-field">
             <label for="profileEditSelect">編集するプロファイル</label>
@@ -283,7 +468,7 @@
               placeholder="例: ws://100.64.0.10:8765"
               autocomplete="off"
             >
-            <small class="field-help">Meta Quest 3 から Tailscale 経由でリモート接続する場合に指定します。</small>
+            <small class="field-help">Android 15 ローカル (127.0.0.1) は空欄、Tailscale リモート接続時は ws://&lt;IP&gt;:8765 を指定。</small>
           </div>
 
           <div class="field">
@@ -326,7 +511,7 @@
         <div class="field field-toggle">
           <label for="dimOnBlurToggle">
             <span>非アクティブ時に自動減光（輝度 50%）</span>
-            <small class="field-help">code-server へフォーカス移動した際、視界の邪魔を抑えます。</small>
+            <small class="field-help">他ウィンドウへフォーカス移動した際、視界の邪魔を抑えます。</small>
           </label>
           <input id="dimOnBlurToggle" type="checkbox" checked>
         </div>

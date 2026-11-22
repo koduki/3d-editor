@@ -2,7 +2,7 @@
 // - Online: always hits the network first so Termux edit -> browser reload is instantaneous.
 // - Offline: falls back to precached shell so Demo Mode & TWA / Meta Horizon Store launch cleanly.
 
-const CACHE_NAME = 'xr-acp-companion-v3';
+const CACHE_NAME = 'xr-acp-workbench-v4';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -12,6 +12,11 @@ const SHELL_ASSETS = [
   '/demo-client.js',
   '/profiles.js',
   '/history-store.js',
+  '/workspace-client.js',
+  '/editor.js',
+  '/console.js',
+  '/palette.js',
+  '/xr-host.js',
   '/diff.js',
   '/markdown.js',
   '/manifest.json',

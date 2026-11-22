@@ -10,7 +10,7 @@ export function createDefaultProfiles() {
   return [
     {
       id: 'local-aura',
-      name: 'AURA ローカル (127.0.0.1)',
+      name: 'Android 15 / ローカル (127.0.0.1)',
       mode: 'bridge',
       wsUrl: '',
       agent: '',

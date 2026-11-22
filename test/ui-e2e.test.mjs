@@ -32,7 +32,7 @@ async function launchHeadlessChrome(userDataDir) {
       '--disable-dev-shm-usage',
       '--remote-debugging-port=0',
       `--user-data-dir=${userDataDir}`,
-      '--window-size=680,960',
+      '--window-size=1440,900',
       'about:blank',
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
@@ -56,7 +56,6 @@ async function launchHeadlessChrome(userDataDir) {
     });
   });
 
-  // Fetch page target WebSocket URL
   const debugOrigin = new URL(wsUrl).origin.replace(/^ws:/, 'http:');
   const targetsRes = await fetch(`${debugOrigin}/json/list`);
   const targets = await targetsRes.json();
@@ -124,9 +123,9 @@ async function launchHeadlessChrome(userDataDir) {
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Emulation.setDeviceMetricsOverride', {
-    width: 680,
-    height: 960,
-    deviceScaleFactor: 2,
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1.5,
     mobile: false,
   });
 
@@ -159,12 +158,28 @@ async function launchHeadlessChrome(userDataDir) {
 }
 
 test(
-  'Headless Chromium UI E2E: OST/VST, IME safety, Diff keyboard approval, history restore on reload, diagnostics & offline demo',
+  'Headless Chromium Spatial Desktop IDE E2E: Explorer, Editor+Save+MD Preview, QuickOpen, Console, AI Diff Approval, Reload History & Demo',
   { skip: !CHROME_BIN && 'Chromium/Chrome binary not available in this environment' },
   async () => {
+    // Seed an isolated temporary workspace so Ctrl+S edits don't dirty the repo
+    const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'xr-ide-ws-'));
+    await fs.mkdir(path.join(tmpWorkspace, 'posts'), { recursive: true });
+    await fs.mkdir(path.join(tmpWorkspace, 'src'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpWorkspace, 'posts', 'xr-notes.md'),
+      '# XR Spatial Workbench\n\n- Keyboard + Mouse/Trackpad first\n- OST `#000000` black\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(tmpWorkspace, 'src', 'app.js'),
+      'export function greet(name) {\n  return `Hello ${name}`;\n}\n',
+      'utf8',
+    );
+
     const server = createBridgeServer({
       bindHost: '127.0.0.1',
       port: 0,
+      workspaceDir: tmpWorkspace,
       defaultAgent: 'mock',
       keepAliveMs: 15000,
       logger: silentLogger,
@@ -177,162 +192,168 @@ test(
       const baseUrl = `http://127.0.0.1:${port}/`;
       await chrome.send('Page.navigate', { url: baseUrl });
 
-      // 1. Wait for WebSocket ACP mock agent ready
+      // 1. Wait for ACP agent + Explorer tree + Console ready
       await chrome.waitFor(
-        `document.getElementById('statusDot')?.classList.contains('status-ready')`,
+        `document.getElementById('statusDot')?.classList.contains('status-ready') && document.querySelectorAll('#fileTree .tree-row').length >= 2`,
         8000,
-        'status-ready on initial boot',
+        'ACP ready and file tree loaded',
       );
 
-      // 2. Verify OST default & OST/VST toggle persistence
-      const initialTheme = await chrome.evaluate(`document.documentElement.dataset.theme`);
-      assert.equal(initialTheme, 'ost');
+      // 2. Open posts/xr-notes.md via Quick Open (Ctrl+P)
+      await chrome.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`);
+      await chrome.waitFor(`!document.getElementById('paletteModal').classList.contains('hidden')`, 3000, 'Quick Open modal');
+      await chrome.evaluate(`(() => {
+        const inp = document.getElementById('paletteInput');
+        inp.value = 'xr-notes';
+        inp.dispatchEvent(new Event('input'));
+        inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      })()`);
 
-      await chrome.evaluate(`document.getElementById('themeToggleBtn').click()`);
-      assert.equal(await chrome.evaluate(`document.documentElement.dataset.theme`), 'vst');
-      assert.equal(await chrome.evaluate(`document.getElementById('themeToggleBtn').textContent`), 'VST');
+      await chrome.waitFor(
+        `document.getElementById('editorToolbarPath')?.textContent === 'posts/xr-notes.md' && !document.getElementById('editorSurface').classList.contains('hidden')`,
+        4000,
+        'posts/xr-notes.md opened in editor',
+      );
 
-      // Switch back to OST
-      await chrome.evaluate(`document.getElementById('themeToggleBtn').click()`);
-      assert.equal(await chrome.evaluate(`document.documentElement.dataset.theme`), 'ost');
+      // 3. Toggle live Markdown preview & edit + save with Ctrl+S
+      await chrome.evaluate(`document.getElementById('editorPreviewBtn').click()`);
+      assert.equal(await chrome.evaluate(`!document.getElementById('editorPreview').classList.contains('hidden')`), true);
 
-      // 3. Verify blur 50% dimming toggle
-      await chrome.evaluate(`window.dispatchEvent(new Event('blur'))`);
-      assert.equal(await chrome.evaluate(`document.body.classList.contains('window-dimmed')`), true);
-      await chrome.evaluate(`window.dispatchEvent(new Event('focus'))`);
-      assert.equal(await chrome.evaluate(`document.body.classList.contains('window-dimmed')`), false);
+      await chrome.evaluate(`(() => {
+        const ta = document.getElementById('editorTextarea');
+        ta.value += '\\n- Saved via Ctrl+S\\n';
+        ta.dispatchEvent(new Event('input'));
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }));
+      })()`);
 
-      // 4. Strict IME safety: Ctrl+Enter while composing must NOT send
+      await chrome.waitFor(`document.getElementById('editorSaveBtn').disabled === true`, 4000, 'file saved cleanly');
+      const diskContent = await fs.readFile(path.join(tmpWorkspace, 'posts', 'xr-notes.md'), 'utf8');
+      assert.match(diskContent, /Saved via Ctrl\+S/);
+
+      // 4. Run a real command in the bottom Lightweight Command Console
+      await chrome.waitFor(`document.getElementById('consoleStatus')?.textContent === 'Ready'`, 4000, 'console WS ready');
+      await chrome.evaluate(`(() => {
+        const inp = document.getElementById('consoleInput');
+        inp.value = 'echo spatial-console-verified';
+        inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      })()`);
+      await chrome.waitFor(
+        `document.getElementById('consoleOutput')?.textContent.includes('spatial-console-verified')`,
+        5000,
+        'console output rendered',
+      );
+
+      // 5. Attach active file context to AI panel (Ctrl+L / AI添付 button)
+      await chrome.evaluate(`document.getElementById('editorAttachAiBtn').click()`);
+      assert.equal(
+        await chrome.evaluate(`!document.getElementById('aiContextBar').classList.contains('hidden')`),
+        true,
+        'Expected active file context chip attached to AI panel',
+      );
+
+      // 6. Strict IME safety in AI composer
       await chrome.evaluate(`(() => {
         const ta = document.getElementById('promptInput');
         ta.focus();
-        ta.value = '日本語変換テスト';
+        ta.value = '変換中テスト';
         ta.dispatchEvent(new CompositionEvent('compositionstart'));
-        const ev = new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true });
-        ta.dispatchEvent(ev);
+        ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }));
       })()`);
-      assert.equal(
-        await chrome.evaluate(`document.querySelectorAll('.msg-user').length`),
-        0,
-        'Prompt must not submit during IME composition',
-      );
-      assert.equal(
-        await chrome.evaluate(`!document.getElementById('imeIndicator').classList.contains('hidden')`),
-        true,
-      );
+      assert.equal(await chrome.evaluate(`document.querySelectorAll('.msg-user').length`), 0);
 
-      // End composition, wait past 60ms Safari/Android guard window, then submit with Ctrl+Enter
-      await chrome.evaluate(`(() => {
-        const ta = document.getElementById('promptInput');
-        ta.dispatchEvent(new CompositionEvent('compositionend'));
-      })()`);
+      await chrome.evaluate(`document.getElementById('promptInput').dispatchEvent(new CompositionEvent('compositionend'))`);
       await new Promise((r) => setTimeout(r, 90));
       await chrome.evaluate(`(() => {
         const ta = document.getElementById('promptInput');
-        ta.value = 'XR空間執筆のドラフトを更新して';
+        ta.value = 'この記事ドラフトに構成案を追記して';
         ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }));
       })()`);
 
-      // 5. Wait for fixed permission approval bar with vertical Unified Diff
+      // 7. Wait for fixed permission approval bar with Unified Diff
       await chrome.waitFor(
         `!document.getElementById('permissionBar').classList.contains('hidden') && document.querySelectorAll('#permPreview .diff-block').length > 0`,
         8000,
-        'permission bar with Unified Diff',
+        'AI Unified Diff approval bar',
       );
 
-      // Optional screenshot capture if XR_SCREENSHOT_DIR is provided
       if (process.env.XR_SCREENSHOT_DIR) {
         await fs.mkdir(process.env.XR_SCREENSHOT_DIR, { recursive: true });
         const ostShot = await chrome.send('Page.captureScreenshot', { format: 'png' });
         await fs.writeFile(
-          path.join(process.env.XR_SCREENSHOT_DIR, 'ost-diff-approval.png'),
+          path.join(process.env.XR_SCREENSHOT_DIR, 'workbench-ost-1440.png'),
           Buffer.from(ostShot.data, 'base64'),
         );
       }
 
-      // 6. Approve with keyboard 'y' (input blurred)
+      // 8. Approve permission via keyboard 'y'
       await chrome.evaluate(`(() => {
         document.activeElement?.blur?.();
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', bubbles: true, cancelable: true }));
       })()`);
 
-      // Wait for permission bar to hide and turn to complete with Markdown & usage badge
       await chrome.waitFor(
         `document.getElementById('permissionBar').classList.contains('hidden') && document.querySelector('.msg-agent .turn-state')?.textContent === '完了'`,
         8000,
-        'agent turn completion after y approval',
+        'AI turn completed after approval',
       );
-      assert.equal(await chrome.evaluate(`!document.getElementById('usageBadge').classList.contains('hidden')`), true);
 
-      // Allow debounced history persistence (180ms) to flush
       await new Promise((r) => setTimeout(r, 300));
 
-      // 7. Reload page -> verify session/resume + local history timeline & Diff restoration (#8)
+      // 9. Reload -> verify cached AI session history restores automatically
       await chrome.send('Page.reload', { ignoreCache: true });
       await chrome.waitFor(
         `document.getElementById('statusDot')?.classList.contains('status-ready') && document.querySelectorAll('.msg-user').length >= 1 && document.querySelectorAll('.diff-block').length >= 1`,
         8000,
-        'cached timeline and diff restored after reload',
+        'cached session history restored after reload',
       );
 
-      // 8. Open History modal and verify saved session appears (#8)
-      await chrome.evaluate(`document.getElementById('historyBtn').click()`);
-      await chrome.waitFor(
-        `document.querySelectorAll('#historyList .history-item').length >= 1`,
-        4000,
-        'saved session in history modal',
-      );
-      await chrome.evaluate(`document.getElementById('closeHistoryBtn').click()`);
+      // 10. Command Palette (Ctrl+Shift+P) -> toggle OST -> VST & switch to Offline Demo
+      await chrome.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'P', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }))`);
+      await chrome.waitFor(`!document.getElementById('paletteModal').classList.contains('hidden')`, 3000, 'Command Palette open');
+      await chrome.evaluate(`(() => {
+        const inp = document.getElementById('paletteInput');
+        inp.value = 'VST';
+        inp.dispatchEvent(new Event('input'));
+        inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      })()`);
+      assert.equal(await chrome.evaluate(`document.documentElement.dataset.theme`), 'vst');
 
-      // 9. Open Settings modal and run live connection diagnostics (#7)
-      await chrome.evaluate(`document.getElementById('settingsBtn').click()`);
-      await chrome.evaluate(`document.getElementById('testConnectionBtn').click()`);
-      await chrome.waitFor(
-        `document.getElementById('diagResult')?.classList.contains('diag-ok')`,
-        5000,
-        'connection diagnostic OK',
-      );
-      await chrome.evaluate(`document.getElementById('closeSettingsBtn').click()`);
-
-      // 10. Switch to Offline Demo Mode + VST theme and run a quick demo prompt (#9)
-      await chrome.evaluate(`document.getElementById('themeToggleBtn').click()`);
+      // Switch to Offline Demo profile -> virtual workspace README.md opens automatically
       await chrome.evaluate(`(() => {
         const sel = document.getElementById('profileQuickSelect');
         sel.value = 'offline-demo';
         sel.dispatchEvent(new Event('change'));
       })()`);
       await chrome.waitFor(
-        `!document.getElementById('demoBadge').classList.contains('hidden') && document.getElementById('statusDot')?.classList.contains('status-ready')`,
-        5000,
-        'offline demo mode ready',
+        `!document.getElementById('demoBadge').classList.contains('hidden') && document.getElementById('editorToolbarPath')?.textContent === 'README.md'`,
+        6000,
+        'Offline Demo virtual workspace ready',
       );
 
-      // Click first offline demo prompt chip
+      // Open src/xr-panel-layout.js in demo editor + run demo npm test in console
+      await chrome.evaluate(`(() => {
+        const row = [...document.querySelectorAll('#fileTree .tree-row')].find((r) => r.dataset.treePath === 'src/xr-panel-layout.js');
+        row?.click();
+      })()`);
+      await chrome.waitFor(`document.getElementById('editorToolbarPath')?.textContent === 'src/xr-panel-layout.js'`, 3000, 'demo code file opened');
+      await chrome.evaluate(`document.querySelector('[data-console-cmd="npm test"]')?.click()`);
+      await chrome.waitFor(`document.getElementById('consoleOutput')?.textContent.includes('spatial-panel-luminance')`, 3000, 'demo console test run');
+
+      // Trigger a Demo AI prompt for VST screenshot
       await chrome.evaluate(`document.querySelector('[data-demo-prompt]')?.click()`);
       await chrome.waitFor(
         `!document.getElementById('permissionBar').classList.contains('hidden') && document.querySelectorAll('#permPreview .diff-block').length > 0`,
         6000,
-        'offline demo Diff permission bar',
+        'demo Diff approval bar',
       );
 
       if (process.env.XR_SCREENSHOT_DIR) {
         const vstShot = await chrome.send('Page.captureScreenshot', { format: 'png' });
         await fs.writeFile(
-          path.join(process.env.XR_SCREENSHOT_DIR, 'vst-demo-approval.png'),
+          path.join(process.env.XR_SCREENSHOT_DIR, 'workbench-vst-1440.png'),
           Buffer.from(vstShot.data, 'base64'),
         );
       }
-
-      // Approve demo edit with keyboard 'y'
-      await chrome.evaluate(`(() => {
-        document.activeElement?.blur?.();
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', bubbles: true, cancelable: true }));
-      })()`);
-      await chrome.waitFor(
-        `document.getElementById('permissionBar').classList.contains('hidden') && document.querySelector('.msg-agent .turn-state')?.textContent === '完了'`,
-        6000,
-        'offline demo completion',
-      );
 
       assert.deepEqual(chrome.pageErrors, [], `Unexpected page errors: ${chrome.pageErrors.join('; ')}`);
       assert.deepEqual(chrome.consoleErrors, [], `Unexpected console errors: ${chrome.consoleErrors.join('; ')}`);
@@ -340,6 +361,7 @@ test(
       await chrome.close();
       await server.close();
       await fs.rm(userDataDir, { recursive: true, force: true });
+      await fs.rm(tmpWorkspace, { recursive: true, force: true });
     }
   },
 );
