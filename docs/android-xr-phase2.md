@@ -46,7 +46,7 @@ interface XRHostBridge {
 
 ## 3. Android 15 (API 35) 実装チェックリスト
 
-- [ ] `compileSdk = 35`, `targetSdk = 35`, `minSdk = 34`（Android XR / Android 15 対応）
+- [x] `compileSdk = 36`, `targetSdk = 35`, `minSdk = 34`（Jetpack XR 1.0.0 / Android 15+ 対応）
 - [ ] `AndroidManifest.xml` に `android:resizeableActivity="true"` および `PROPERTY_XR_ACTIVITY_START_MODE` を設定
 - [ ] `dispatchKeyEvent` で `Ctrl+P / S / W / L / J / B / Shift+P` を WebView へ優先転送
 - [ ] ローカル実行モード時、`127.0.0.1:8765/api/health` をヘルスチェックし、未起動ならローカルランタイム（AVF / 内蔵 PRoot）起動または Tailscale プロファイル選択へ誘導

@@ -35,7 +35,10 @@ async function launchHeadlessChrome(userDataDir) {
       '--window-size=1440,900',
       'about:blank',
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    },
   );
 
   const wsUrl = await new Promise((resolve, reject) => {
@@ -135,22 +138,31 @@ async function launchHeadlessChrome(userDataDir) {
     } catch {
       // ignore
     }
-    if (proc.exitCode === null) {
-      const exited = new Promise((resolve) => proc.once('exit', resolve));
+    const signalChrome = (sig) => {
+      if (process.platform !== 'win32' && proc.pid) {
+        try {
+          process.kill(-proc.pid, sig);
+          return;
+        } catch {
+          // fallback to direct kill
+        }
+      }
       try {
-        proc.kill('SIGTERM');
+        proc.kill(sig);
       } catch {
         // ignore
       }
+    };
+    if (proc.exitCode === null) {
+      const exited = new Promise((resolve) => proc.once('exit', resolve));
+      signalChrome('SIGTERM');
       await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))]);
       if (proc.exitCode === null) {
-        try {
-          proc.kill('SIGKILL');
-        } catch {
-          // ignore
-        }
+        signalChrome('SIGKILL');
         await Promise.race([exited, new Promise((r) => setTimeout(r, 500))]);
       }
+    } else {
+      signalChrome('SIGKILL');
     }
   }
 
@@ -366,8 +378,8 @@ test(
     } finally {
       await chrome.close();
       await server.close();
-      await fs.rm(userDataDir, { recursive: true, force: true });
-      await fs.rm(tmpWorkspace, { recursive: true, force: true });
+      await fs.rm(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 }).catch(() => {});
+      await fs.rm(tmpWorkspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   },
 );

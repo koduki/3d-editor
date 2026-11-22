@@ -39,12 +39,12 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Accept Android SDK Licenses & Ensure API 35 Platform
+      - name: Accept Android SDK Licenses & Ensure API 36 Platform
         run: |
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort -V | tail -n 1)"
           echo "Using sdkmanager: $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+          "$SDKMANAGER" "platforms;android-36" "build-tools;35.0.0"
 
       - uses: gradle/actions/setup-gradle@v4
         with:

@@ -21,7 +21,7 @@ XREAL AURA（Android XR / Android 15 API 35）および Android 15 Desktop Windo
    ```bash
    npm run android:sync
    ```
-2. Android Studio（Android SDK API 35 + JDK 17）で `android/` フォルダを開く。
+2. Android Studio（Android SDK API 36 + JDK 17、Jetpack XR 1.0.0 の `compileSdk = 36` 要件）で `android/` フォルダを開く。
 3. デバッグ APK をビルド、または XREAL AURA（USB デバッグ有効）へ直接インストール:
    ```bash
    cd android

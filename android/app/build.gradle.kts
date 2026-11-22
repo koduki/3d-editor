@@ -12,7 +12,7 @@ val syncWebAssets by tasks.registering(Sync::class) {
 
 android {
     namespace = "dev.koduki.xracp"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "dev.koduki.xracpcompanion"
