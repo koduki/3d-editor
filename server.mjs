@@ -892,9 +892,17 @@ export function createBridgeServer(options = {}) {
       entry.destroy();
     }
     pool.clear();
+    for (const client of wss.clients) {
+      try {
+        client.terminate();
+      } catch {
+        // ignore
+      }
+    }
     return new Promise((resolve) => {
       wss.close(() => {
         httpServer.close(() => resolve());
+        httpServer.closeAllConnections?.();
       });
     });
   }
