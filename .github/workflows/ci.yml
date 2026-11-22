@@ -62,7 +62,7 @@ jobs:
           retention-days: 30
 
       - name: Build Signed Release APK & AAB (when signing secrets are configured)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        id: release_build
         working-directory: android
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -70,14 +70,20 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No signing keystore secret configured; skipping signed release build."
+            echo "has_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/release.keystore" gradle :app:assembleRelease :app:bundleRelease --stacktrace
           rm -f "$RUNNER_TEMP/release.keystore"
           cp app/build/outputs/apk/release/app-release.apk ../dist-apk/xr-acp-workbench-release.apk
           cp app/build/outputs/bundle/release/app-release.aab ../dist-apk/xr-acp-workbench-release.aab
+          echo "has_release=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload Signed Release Artifact
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: steps.release_build.outputs.has_release == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: xr-acp-workbench-release-bundle
