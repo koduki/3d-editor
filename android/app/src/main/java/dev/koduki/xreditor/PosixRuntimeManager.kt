@@ -316,11 +316,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val proc = serverProcess
         if (proc != null && proc.isAlive) {
             appendLog("[runtime] Stopping openvscode-server...")
-            proc.destroy()
-            if (!proc.waitFor(2, TimeUnit.SECONDS)) {
-                proc.destroyForcibly()
-                proc.waitFor()
-            }
+            terminateServer(proc)
         }
         serverProcess = null
         editorToken = null
@@ -538,35 +534,32 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             }
         }
 
-        // Wait up to 45s for HTTP readiness on 127.0.0.1:<port>
-        val deadline = System.currentTimeMillis() + 45_000L
-        while (System.currentTimeMillis() < deadline) {
-            if (!proc.isAlive) {
-                val exitCode = runCatching { proc.exitValue() }.getOrDefault(-1)
-                if (allowSeccompRetry && !disableSeccomp) {
-                    appendLog("[runtime] Early exit ($exitCode); retrying with PROOT_NO_SECCOMP=1...")
-                    disableSeccomp = true
-                    launchOpenVsCodeServer(paths, allowSeccompRetry = false)
-                    return
-                }
-                stopInternal()
-                updateStatus(State.ERROR, "openvscode-server の起動に失敗しました (exit=$exitCode)", 0)
-                return
-            }
-            if (announced.get() && editorAccessVerified(port, token)) {
+        val startup = awaitServerStartup(proc, 45_000L) { announced.get() && editorAccessVerified(port, token) }
+        when (startup) {
+            ServerStartup.READY -> {
                 if (!paths.versionMarker.exists()) {
                     writePrivateFile(paths.versionMarker, PosixRuntimeConfig.RUNTIME_VERSION)
                 }
                 editorToken = token
                 updateStatus(State.READY, "起動完了 (127.0.0.1:$port)", 100)
                 appendLog("[runtime] openvscode-server is READY at http://127.0.0.1:$port")
-                return
             }
-            delay(350)
+            ServerStartup.EXITED -> {
+                val exitCode = proc.exitValue()
+                if (allowSeccompRetry && !disableSeccomp) {
+                    appendLog("[runtime] Early exit ($exitCode); retrying with PROOT_NO_SECCOMP=1...")
+                    disableSeccomp = true
+                    launchOpenVsCodeServer(paths, allowSeccompRetry = false)
+                } else {
+                    stopInternal()
+                    updateStatus(State.ERROR, "openvscode-server の起動に失敗しました (exit=$exitCode)", 0)
+                }
+            }
+            ServerStartup.TIMED_OUT -> {
+                stopInternal()
+                updateStatus(State.ERROR, "openvscode-server 応答タイムアウト (45s)", 0)
+            }
         }
-
-        stopInternal()
-        updateStatus(State.ERROR, "openvscode-server 応答タイムアウト (45s)", 0)
     }
 
     private fun isServerProcessAlive(): Boolean = serverProcess?.isAlive == true
@@ -649,5 +642,26 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 instance ?: PosixRuntimeManager(context.applicationContext).also { instance = it }
             }
         }
+    }
+}
+
+internal enum class ServerStartup { READY, EXITED, TIMED_OUT }
+
+internal suspend fun awaitServerStartup(process: Process, timeoutMs: Long, isReady: () -> Boolean): ServerStartup {
+    val start = System.nanoTime()
+    while (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < timeoutMs) {
+        if (!process.isAlive) return ServerStartup.EXITED
+        if (isReady() && process.isAlive) return ServerStartup.READY
+        delay(350)
+    }
+    terminateServer(process)
+    return ServerStartup.TIMED_OUT
+}
+
+private fun terminateServer(process: Process) {
+    process.destroy()
+    if (!process.waitFor(2, TimeUnit.SECONDS)) {
+        process.destroyForcibly()
+        process.waitFor()
     }
 }
