@@ -1,11 +1,13 @@
 # KuCode
 
-**空間に、書く。**
+**空間で、書く。**
 *Code in the space. — A self-contained code editor for spatial computing.*
 
-> **APK 1 本で完結する、空間コンピューティング（Android XR / XREAL AURA 等）のためのコードエディタ。**
+XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエディタ。
 
-外部サーバーの構築・起動や Termux の別途導入は不要です。APK をインストールして起動するだけで、内蔵の **`openvscode-server` + Debian 12 minimal (`arm64`)** がローカルで自動起動し、物理キーボード＋マウス／トラックパッドですぐにコードを書き始められます。
+物理キーボードとマウスを想定して、vscode−serverの構築・起動や Termuxなどの別途導入は不要で、単一のAPKをインストールだけで動作します。
+
+内蔵の **`openvscode-server` + Debian 12 minimal (`arm64`)** がローカルで自動起動し、キーボード＋マウス／トラックパッドですぐにコードを書き始められます。
 
 ---
 
@@ -14,31 +16,25 @@
 **KuCode**（読み：**くうこーど** / 英: *"koo-code"*）は、**空（くう）** に二つの意味を重ねています。
 
 - **空間** — Android XR の空間デスクトップに浮かび、目の前の空間にそのまま書けるコードエディタ。
-- **空海** — 日本を代表する能書家。「弘法筆を選ばず」のとおり、場所や端末を選ばず自在に書ける道具でありたいという思い。
+- **空海** — 日本を代表する能書家。「弘法筆を選ばず」のとおり、場所を選ばず自在に書ける道具でありたいという想い。
 
-そこにコードエディタとしての系譜（`openvscode-server`）と、AI コーディング時代における開発体験を重ねて **KuCode** と名付けています（[ADR-0009](docs/adr/0009-brand-naming-kucode.md)）。
+当面はシンプルな2Dベースのエディタですが、将来的にはより空間コンピューティングに最適化したUXを目指します。
 
 ---
 
 ## コンセプト
 
-### 3 本柱
-
 1. **APK 1 本で完結**
-   `PRoot`・`Debian 12 (bookworm-slim, arm64)`・`openvscode-server`・ライセンス一式を約 109 MiB の APK に同梱。初回起動時に自動展開・自動起動するため、サーバー構築も Termux の別途導入も不要です（[ADR-0001](docs/adr/0001-self-contained-apk-pivot.md), [ADR-0003](docs/adr/0003-debian-minimal-and-openvscode-server.md)）。
+   `PRoot`・`Debian 12 (bookworm-slim, arm64)`・`openvscode-server`・ライセンス一式を約 109 MiB の APK に同梱。初回起動時に自動展開・自動起動するため、vscode−server構築も Termux の別途導入も不要.
 2. **空間デスクトップ最適化**
-   物理キーボード＋マウス／トラックパッド前提で設計し、スマホ向け仮想キーや過剰な独自 UI は持ちません。実 `KeyEvent` パススルー、光学シースルー（OST）向け純黒 `#000000` 高コントラスト表示、非フォーカス自動減光、左 Activity Bar メニューに集中しています（[ADR-0006](docs/adr/0006-xr-spatial-desktop-ux-and-builtin-extension.md)）。
+   物理キーボード＋マウス／トラックパッド前提で設計し、スマホ向け仮想キーや過剰な独自 UI は持ちません。
 3. **Android 標準準拠でクリーン**
-   `targetSdk = 35` を維持し、分離ローダー型 PRoot（16KB ページ対応）と Android 標準 SDK によるクリーンな Kotlin 実装（Termux GPL ソース非流用）で構成。ライセンス全文と Debian パッケージマニフェストも APK に自動同梱します（[ADR-0002](docs/adr/0002-proot-unbundled-loader-targetsdk35.md), [ADR-0008](docs/adr/0008-oss-license-compliance-and-manifest-bundling.md)）。
+   `targetSdk = 35` を維持し、分離ローダー型 PRoot（16KB ページ対応）と Android 標準 SDK によるクリーンな Kotlin 実装
 
-### 将来像
+## 開発方針
 
 - **AI エージェントに強く** — 内蔵 Debian POSIX 環境上で CLI 系 AI エージェントがそのまま動き、人と AI が同じ `/workspace` で協働して書く体験を目指します。
 - **空間コンピューティング最適化をさらに** — マルチウィンドウ／空間配置、視線・ハンドトラッキングなど、XR ならではの操作体験へと発展させていきます。
-
-### つくった背景
-
-XREAL AURA（Android XR）を使ってみると、動画視聴やハンドトラッキングの体験は素晴らしい一方で、プログラミング用途のエコシステムはまだ十分ではありませんでした（既存エディタで日本語入力ができない、Chrome 上のエディタは重い、UI がタブレット向けなど）。その穴を自分で埋めて、空間デスクトップ上で普通に開発できる道具を作るために KuCode を開発しました。
 
 ---
 
@@ -150,18 +146,6 @@ flowchart TB
 ## 設計判断（Architecture Decision Records）
 
 主要な技術選定・命名・設計理由・トレードオフは [`docs/adr/`](docs/adr/README.md) に決定事項ごとに記録しています。
-
-| ADR | 決定内容の要点 |
-| --- | --- |
-| [ADR-0001](docs/adr/0001-self-contained-apk-pivot.md) | 単体完結 APK による最小構成アーキテクチャの採用 |
-| [ADR-0002](docs/adr/0002-proot-unbundled-loader-targetsdk35.md) | `targetSdk = 35`（W^X）と 16KB ページ対応を維持するため、分離ローダー型 PRoot を `jniLibs` 同梱 |
-| [ADR-0003](docs/adr/0003-debian-minimal-and-openvscode-server.md) | Debian 12 minimal (`glibc`/`apt`) + `openvscode-server` を採用し、AGP 対策で `.tgz` (`noCompress`) 同梱 |
-| [ADR-0004](docs/adr/0004-decoupled-persistent-storage-and-documents-provider.md) | `/workspace`・`/root` を `rootfs/` 外へ永続分離し、`KuCodeDocumentsProvider` で双方向ファイル共有 |
-| [ADR-0005](docs/adr/0005-fixed-port-and-isolated-security-boundaries.md) | 優先固定ポート `18765`・`KuCodeHost` 隔離・トークン認証ループバック管理 API（`X-KuCode-Token`） |
-| [ADR-0006](docs/adr/0006-xr-spatial-desktop-ux-and-builtin-extension.md) | 実 `KeyEvent` パススルー・OST/フォーカス減光 UX・左 Activity Bar 内蔵拡張 `kucode-tools` |
-| [ADR-0007](docs/adr/0007-on-device-diagnostics-and-non-pty-fallback.md) | 並列実行する実機診断チェッカー（自動クリップボードコピー）と非 PTY フォールバック CLI の内蔵 |
-| [ADR-0008](docs/adr/0008-oss-license-compliance-and-manifest-bundling.md) | 本体 MIT 化、結合ライセンス表記・パッチ明示、ライセンス全文 & Debian マニフェストの APK 自動同梱 |
-| [ADR-0009](docs/adr/0009-brand-naming-kucode.md) | プロダクト名称・由来・衝突調査・識別子体系を **KuCode** に統一 |
 
 ---
 
