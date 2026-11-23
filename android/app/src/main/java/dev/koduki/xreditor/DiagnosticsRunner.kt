@@ -283,7 +283,7 @@ object DiagnosticsRunner {
     private fun queryInputDevices(context: Context): String {
         return runCatching {
             val im = context.getSystemService(Context.INPUT_SERVICE) as? InputManager ?: return "unavailable"
-            val names = im.inputDeviceIds.mapNotNull { id ->
+            val names = im.inputDeviceIds.toList().mapNotNull { id ->
                 val dev = im.getInputDevice(id) ?: return@mapNotNull null
                 if (dev.isVirtual) return@mapNotNull null
                 val src = dev.sources
