@@ -1,5 +1,8 @@
 package dev.koduki.xreditor
 
+import java.nio.file.Files
+import java.util.UUID
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -35,15 +38,29 @@ class DiagnosticsRunnerTest {
     }
 
     @Test
-    fun probeCommands_referenceBundledOpenVsCodeAndNetworkEndpoints() {
-        val ptyCmd = DiagnosticsRunner.buildNodePtyProbeCommand()
-        assertTrue(ptyCmd.contains("/opt/openvscode-server/node"))
-        assertTrue(ptyCmd.contains("node-pty"))
-        assertTrue(ptyCmd.contains("NODE_PTY_SPAWN_OK"))
+    fun workspaceExchangeRequiresTheAndroidPayloadBeforeOverwriting() {
+        val id = UUID.randomUUID()
+        val dir = Files.createTempDirectory("xr-files-test").toFile()
+        try {
+            val file = dir.resolve(".xr-files-$id")
+            val command = DiagnosticsRunner.workspaceExchangeCommand(id).replace("/workspace/", "./")
+            fun run() = ProcessBuilder("sh", "-c", command).directory(dir).start().waitFor()
+            file.writeText("unchanged")
+            assertTrue(run() != 0)
+            assertEquals("unchanged", file.readText())
+            file.writeText("android-$id")
+            assertEquals(0, run())
+            assertEquals("guest-$id", file.readText())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 
-        val watcherCmd = DiagnosticsRunner.buildWatcherProbeCommand()
-        assertTrue(watcherCmd.contains("@parcel/watcher"))
-        assertTrue(watcherCmd.contains("max_user_watches"))
+    @Test
+    fun probeCommands_referenceBundledOpenVsCodeAndNetworkEndpoints() {
+        val command = DiagnosticsRunner.nativeProbeCommand("pty", "console.log(process.argv)")
+        assertTrue(command.startsWith("/opt/openvscode-server/node - pty <<'XR_PROBE_JS'"))
+        assertTrue(command.endsWith("\nXR_PROBE_JS"))
 
         val checks = DiagnosticsRunner.networkChecks()
         assertTrue(checks.getValue("DNS (deb.debian.org)").contains("getent hosts"))
