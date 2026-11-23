@@ -8,10 +8,13 @@ import java.io.File
  * Generates and installs the tiny built-in VS Code extension (`xr-editor-tools`)
  * directly into `/opt/openvscode-server/extensions/xr-editor-tools/`.
  *
- * Exposes an easy-to-hit left Activity Bar menu (`XR-Editor` sidebar view),
- * right-click context menus (`editor/context`, `explorer/context`), editor title icon,
- * left status bar item, and Command Palette commands so the user never has to hunt
- * for the bottom-right corner in XR space.
+ * Exposes an easy-to-hit left Activity Bar menu (`XR-Editor` sidebar view) and
+ * context menus with:
+ * - On-device diagnostics & log viewer (with auto-clipboard copy)
+ * - 1-click Terminal toggle (friendly for JIS keyboards where Ctrl+` is awkward)
+ * - 1-click Spatial display scale selector (Standard / Large / XL)
+ * - 1-click Optical theme switcher (OST Pure Black #000000 / VST Dark Slate)
+ * - Storage permission & fallback CLI manager screen switcher
  */
 object VsCodeExtensionAsset {
 
@@ -43,6 +46,21 @@ object VsCodeExtensionAsset {
                 JSONObject()
                     .put("command", "xrEditor.openLogs")
                     .put("title", "XR-Editor: 起動・エラーログを開く"),
+            )
+            .put(
+                JSONObject()
+                    .put("command", "xrEditor.toggleTerminal")
+                    .put("title", "XR-Editor: 統合ターミナルを開閉"),
+            )
+            .put(
+                JSONObject()
+                    .put("command", "xrEditor.selectDisplayScale")
+                    .put("title", "XR-Editor: 表示サイズ・ズームを変更（標準 / 大 / 特大）"),
+            )
+            .put(
+                JSONObject()
+                    .put("command", "xrEditor.selectOpticalTheme")
+                    .put("title", "XR-Editor: 光学テーマを切替（OST 純黒 / VST 暗灰）"),
             )
             .put(
                 JSONObject()
@@ -101,7 +119,7 @@ object VsCodeExtensionAsset {
                 JSONArray().put(
                     JSONObject()
                         .put("id", "xrEditor.menuView")
-                        .put("name", "実機チェック & 管理"),
+                        .put("name", "実機チェック & XR表示"),
                 ),
             )
 
@@ -114,8 +132,8 @@ object VsCodeExtensionAsset {
         val pkg = JSONObject()
             .put("name", "xr-editor-tools")
             .put("displayName", "XR-Editor Diagnostics & Tools")
-            .put("description", "Built-in Android XR diagnostics, log viewer, and storage menu")
-            .put("version", "0.5.1")
+            .put("description", "Built-in Android XR diagnostics, optical presets, log viewer, and storage menu")
+            .put("version", "0.5.2")
             .put("publisher", "koduki")
             .put("engines", JSONObject().put("vscode", "^1.80.0"))
             .put("categories", JSONArray().put("Other"))
@@ -130,6 +148,70 @@ object VsCodeExtensionAsset {
         'use strict';
         const vscode = require('vscode');
         const http = require('http');
+
+        const OST_COLORS = {
+          'editor.background': '#000000',
+          'editor.foreground': '#f3f4f6',
+          'editorGutter.background': '#000000',
+          'editorLineNumber.foreground': '#6b7280',
+          'editorLineNumber.activeForeground': '#f9fafb',
+          'editorCursor.foreground': '#38bdf8',
+          'sideBar.background': '#050505',
+          'sideBar.foreground': '#e5e7eb',
+          'sideBar.border': '#1f2937',
+          'sideBarSectionHeader.background': '#0a0a0c',
+          'activityBar.background': '#000000',
+          'activityBar.foreground': '#f3f4f6',
+          'activityBar.activeBorder': '#38bdf8',
+          'panel.background': '#000000',
+          'panel.border': '#1f2937',
+          'terminal.background': '#000000',
+          'terminal.foreground': '#f3f4f6',
+          'terminalCursor.foreground': '#38bdf8',
+          'titleBar.activeBackground': '#000000',
+          'titleBar.inactiveBackground': '#000000',
+          'statusBar.background': '#08080a',
+          'statusBar.foreground': '#e5e7eb',
+          'statusBar.border': '#1f2937',
+          'tab.activeBackground': '#0d1117',
+          'tab.activeForeground': '#ffffff',
+          'tab.activeBorderTop': '#38bdf8',
+          'tab.inactiveBackground': '#000000',
+          'tab.inactiveForeground': '#9ca3af',
+          'editorGroupHeader.tabsBackground': '#000000'
+        };
+
+        const VST_COLORS = {
+          'editor.background': '#12141a',
+          'editor.foreground': '#f3f4f6',
+          'editorGutter.background': '#12141a',
+          'editorLineNumber.foreground': '#64748b',
+          'editorLineNumber.activeForeground': '#f8fafc',
+          'editorCursor.foreground': '#38bdf8',
+          'sideBar.background': '#171a22',
+          'sideBar.foreground': '#e2e8f0',
+          'sideBar.border': '#283040',
+          'sideBarSectionHeader.background': '#1c202b',
+          'activityBar.background': '#0f1117',
+          'activityBar.foreground': '#f1f5f9',
+          'activityBar.activeBorder': '#38bdf8',
+          'panel.background': '#14171f',
+          'panel.border': '#283040',
+          'terminal.background': '#12141a',
+          'terminal.foreground': '#f3f4f6',
+          'terminalCursor.foreground': '#38bdf8',
+          'titleBar.activeBackground': '#0f1117',
+          'titleBar.inactiveBackground': '#0f1117',
+          'statusBar.background': '#171a22',
+          'statusBar.foreground': '#e2e8f0',
+          'statusBar.border': '#283040',
+          'tab.activeBackground': '#1e2430',
+          'tab.activeForeground': '#ffffff',
+          'tab.activeBorderTop': '#38bdf8',
+          'tab.inactiveBackground': '#12141a',
+          'tab.inactiveForeground': '#94a3b8',
+          'editorGroupHeader.tabsBackground': '#12141a'
+        };
 
         function callHost(method, path, body) {
           return new Promise((resolve, reject) => {
@@ -221,6 +303,54 @@ object VsCodeExtensionAsset {
           }
         }
 
+        async function toggleTerminalCommand() {
+          await vscode.commands.executeCommand('workbench.action.terminal.toggleTerminal');
+        }
+
+        async function selectDisplayScaleCommand() {
+          const presets = [
+            { label: '標準（情報量重視）', description: 'zoom 0 / font 15px', zoom: 0, font: 15, line: 24, term: 14 },
+            { label: '大（XREAL AURA 推奨）', description: 'zoom 0.5 / font 16px', zoom: 0.5, font: 16, line: 26, term: 15 },
+            { label: '特大（遠距離・高視認性）', description: 'zoom 1.0 / font 18px', zoom: 1.0, font: 18, line: 29, term: 16 },
+          ];
+          const picked = await vscode.window.showQuickPick(presets, {
+            title: 'XR-Editor 表示サイズ・ズーム',
+            placeHolder: 'XR 空間での見やすいサイズを選択してください',
+          });
+          if (!picked) return;
+          const cfg = vscode.workspace.getConfiguration();
+          await cfg.update('window.zoomLevel', picked.zoom, vscode.ConfigurationTarget.Global);
+          await cfg.update('editor.fontSize', picked.font, vscode.ConfigurationTarget.Global);
+          await cfg.update('editor.lineHeight', picked.line, vscode.ConfigurationTarget.Global);
+          await cfg.update('terminal.integrated.fontSize', picked.term, vscode.ConfigurationTarget.Global);
+          vscode.window.showInformationMessage('表示サイズを「' + picked.label + '」に変更しました');
+        }
+
+        async function selectOpticalThemeCommand() {
+          const themes = [
+            {
+              label: '$(eye) OST 純黒モード（XREAL AURA 光学シースルー向け）',
+              description: '#000000 背景透過 + 高コントラスト枠線',
+              colors: OST_COLORS,
+              name: 'OST 純黒モード',
+            },
+            {
+              label: '$(device-camera-video) VST 暗灰モード（パススルー・暗室向け）',
+              description: '#12141a 不透明ダークスレート背景',
+              colors: VST_COLORS,
+              name: 'VST 暗灰モード',
+            },
+          ];
+          const picked = await vscode.window.showQuickPick(themes, {
+            title: 'XR-Editor 光学テーマ切替',
+            placeHolder: 'デバイスの光学方式に合わせて選択してください',
+          });
+          if (!picked) return;
+          const cfg = vscode.workspace.getConfiguration();
+          await cfg.update('workbench.colorCustomizations', picked.colors, vscode.ConfigurationTarget.Global);
+          vscode.window.showInformationMessage('光学テーマを「' + picked.name + '」に切り替えました');
+        }
+
         async function openManagerCommand() {
           try {
             await callHost('POST', '/open-boot');
@@ -248,12 +378,27 @@ object VsCodeExtensionAsset {
               action: runDiagnosticsCommand,
             },
             {
+              label: '$(terminal) 統合ターミナルを開閉',
+              description: 'Debian POSIX bash / apt / git / gh（JISキーボード補助）',
+              action: toggleTerminalCommand,
+            },
+            {
+              label: '$(zoom-in) 表示サイズ・ズームを変更（標準 / 大 / 特大）',
+              description: 'XREAL AURA 70° FOV 向け文字サイズ調整',
+              action: selectDisplayScaleCommand,
+            },
+            {
+              label: '$(color-mode) 光学テーマを切替（OST 純黒 / VST 暗灰）',
+              description: 'シースルー透過黒と不透明ダークをワンクリック切替',
+              action: selectOpticalThemeCommand,
+            },
+            {
               label: '$(output) 起動・エラーログを開く（自動コピー）',
               description: 'openvscode-server と PRoot の最新ログを表示',
               action: openLogsCommand,
             },
             {
-              label: '$(terminal) 管理画面を開く（ミニCLI / 再起動）',
+              label: '$(tools) 管理画面を開く（ミニCLI / 再起動）',
               description: '非PTYフォールバックターミナル・進捗・サーバー再起動画面へ切替',
               action: openManagerCommand,
             },
@@ -264,7 +409,7 @@ object VsCodeExtensionAsset {
             },
           ];
           const picked = await vscode.window.showQuickPick(items, {
-            title: 'XR-Editor 実機チェック & 管理メニュー',
+            title: 'XR-Editor 実機チェック & XR設定メニュー',
             placeHolder: '実行する項目を選択してください',
           });
           if (picked) {
@@ -281,6 +426,24 @@ object VsCodeExtensionAsset {
               command: 'xrEditor.runDiagnostics',
             },
             {
+              label: 'ターミナル開閉',
+              description: 'POSIX bash / gh',
+              icon: 'terminal',
+              command: 'xrEditor.toggleTerminal',
+            },
+            {
+              label: '表示サイズ変更',
+              description: '標準 / 大 / 特大',
+              icon: 'zoom-in',
+              command: 'xrEditor.selectDisplayScale',
+            },
+            {
+              label: '光学テーマ切替',
+              description: 'OST 純黒 / VST 暗灰',
+              icon: 'color-mode',
+              command: 'xrEditor.selectOpticalTheme',
+            },
+            {
               label: '起動・エラーログを開く',
               description: '自動コピー',
               icon: 'output',
@@ -289,7 +452,7 @@ object VsCodeExtensionAsset {
             {
               label: '管理画面を開く',
               description: 'ミニCLI / 再起動',
-              icon: 'terminal',
+              icon: 'tools',
               command: 'xrEditor.openManager',
             },
             {
@@ -319,15 +482,17 @@ object VsCodeExtensionAsset {
             vscode.commands.registerCommand('xrEditor.openMenu', openMenuCommand),
             vscode.commands.registerCommand('xrEditor.runDiagnostics', runDiagnosticsCommand),
             vscode.commands.registerCommand('xrEditor.openLogs', openLogsCommand),
+            vscode.commands.registerCommand('xrEditor.toggleTerminal', toggleTerminalCommand),
+            vscode.commands.registerCommand('xrEditor.selectDisplayScale', selectDisplayScaleCommand),
+            vscode.commands.registerCommand('xrEditor.selectOpticalTheme', selectOpticalThemeCommand),
             vscode.commands.registerCommand('xrEditor.openManager', openManagerCommand),
             vscode.commands.registerCommand('xrEditor.requestStorage', requestStorageCommand),
             vscode.window.registerTreeDataProvider('xrEditor.menuView', createSidebarMenuProvider())
           );
 
-          // Place status bar shortcut on the easier-to-reach left side instead of bottom-right
           const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-          statusItem.text = '$(pulse) XRチェック';
-          statusItem.tooltip = 'XR-Editor 実機チェック・エラーログ・管理画面メニューを開く';
+          statusItem.text = '$(pulse) XRメニュー';
+          statusItem.tooltip = 'XR-Editor 実機チェック・表示サイズ・光学テーマ・管理画面を開く';
           statusItem.command = 'xrEditor.openMenu';
           statusItem.show();
           context.subscriptions.push(statusItem);

@@ -102,6 +102,7 @@ object DiagnosticsRunner {
             deviceInfo["Memory"] = queryMemorySummary(context)
             deviceInfo["Runtime State"] = "${status.state} (port=${status.port}, msg=${status.message})"
             deviceInfo["Workspace Path"] = paths.workspaceDir.absolutePath
+            deviceInfo["Home Path (/root)"] = paths.homeDir.absolutePath
             deviceInfo["NativeLibDir"] = paths.nativeLibDir.absolutePath
 
             val checks = mutableListOf<CheckItem>()

@@ -28,6 +28,9 @@ class VsCodeExtensionAssetTest {
             assertTrue(commandIds.contains("xrEditor.openMenu"))
             assertTrue(commandIds.contains("xrEditor.runDiagnostics"))
             assertTrue(commandIds.contains("xrEditor.openLogs"))
+            assertTrue(commandIds.contains("xrEditor.toggleTerminal"))
+            assertTrue(commandIds.contains("xrEditor.selectDisplayScale"))
+            assertTrue(commandIds.contains("xrEditor.selectOpticalTheme"))
             assertTrue(commandIds.contains("xrEditor.openManager"))
 
             val menus = contributes.getJSONObject("menus")
@@ -41,6 +44,8 @@ class VsCodeExtensionAssetTest {
             assertTrue(js.contains("XR_ADMIN_TOKEN"))
             assertTrue(js.contains("registerTreeDataProvider"))
             assertTrue(js.contains("StatusBarAlignment.Left"))
+            assertTrue(js.contains("OST_COLORS"))
+            assertTrue(js.contains("VST_COLORS"))
         } finally {
             dir.deleteRecursively()
         }

@@ -6,8 +6,8 @@ import java.io.File
 
 /**
  * Pure-JVM configuration builder for PRoot + Debian minimal + embedded openvscode-server.
- * Kept free of Android framework dependencies so every flag, bind mount, fake /proc file,
- * DNS formatter, and initial VS Code OST settings.json can be unit-tested on JVM.
+ * Kept free of Android framework dependencies so every flag, bind mount, routing guard,
+ * DNS formatter, and OST/VST VS Code settings preset can be unit-tested on JVM.
  */
 object PosixRuntimeConfig {
 
@@ -18,6 +18,7 @@ object PosixRuntimeConfig {
     const val PREFERRED_SERVER_PORT = 18765
 
     const val GUEST_WORKSPACE = "/workspace"
+    const val GUEST_HOME = "/root"
     const val GUEST_OPENVSCODE_DIR = "/opt/openvscode-server"
     const val GUEST_OPENVSCODE_BIN = "$GUEST_OPENVSCODE_DIR/bin/openvscode-server"
     const val GUEST_VSCODE_DATA = "/var/lib/xr-vscode"
@@ -25,6 +26,7 @@ object PosixRuntimeConfig {
     data class Paths(
         val runtimeRoot: File,
         val workspaceDir: File,
+        val homeDir: File,
         val nativeLibDir: File,
         val androidSharedDir: File,
         val androidSdcardDir: File? = null,
@@ -32,6 +34,7 @@ object PosixRuntimeConfig {
         val rootfsDir: File get() = File(runtimeRoot, "rootfs")
         val stagingDir: File get() = File(runtimeRoot, "staging")
         val legacyRootfsWorkspaceDir: File get() = File(rootfsDir, "workspace")
+        val legacyRootfsHomeDir: File get() = File(rootfsDir, "root")
         val openvscodeDir: File get() = File(rootfsDir, "opt/openvscode-server")
         val sysdataDir: File get() = File(runtimeRoot, "sysdata")
         val shmDir: File get() = File(runtimeRoot, "shm")
@@ -41,6 +44,23 @@ object PosixRuntimeConfig {
 
         val prootBin: File get() = File(nativeLibDir, "libproot.so")
         val prootLoader: File get() = File(nativeLibDir, "libproot-loader.so")
+    }
+
+    /**
+     * Decides whether a URL navigation stays inside the editor WebView or should open in
+     * an external Android XR browser window (e.g. a dev server on 127.0.0.1:3000 or GitHub auth).
+     */
+    fun shouldKeepInsideWebView(
+        scheme: String?,
+        host: String?,
+        port: Int,
+        editorServerPort: Int,
+    ): Boolean {
+        if (scheme == "file") return true
+        if ((host == "127.0.0.1" || host == "localhost") && editorServerPort > 0 && port == editorServerPort) {
+            return true
+        }
+        return false
     }
 
     fun buildProotCommand(
@@ -66,6 +86,7 @@ object PosixRuntimeConfig {
             "-b", "${paths.shmDir.absolutePath}:/dev/shm",
             "-b", "${paths.tmpDir.absolutePath}:/tmp",
             "-b", "${paths.workspaceDir.absolutePath}:$GUEST_WORKSPACE",
+            "-b", "${paths.homeDir.absolutePath}:$GUEST_HOME",
             "-b", "${paths.vscodeDataDir.absolutePath}:$GUEST_VSCODE_DATA",
             "-b", "${paths.androidSharedDir.absolutePath}:/android/shared",
         )
@@ -89,7 +110,7 @@ object PosixRuntimeConfig {
         val env = linkedMapOf(
             "PROOT_LOADER" to paths.prootLoader.absolutePath,
             "PROOT_TMP_DIR" to paths.tmpDir.absolutePath,
-            "HOME" to "/root",
+            "HOME" to GUEST_HOME,
             "USER" to "root",
             "TERM" to "xterm-256color",
             "COLORTERM" to "truecolor",
@@ -129,24 +150,46 @@ object PosixRuntimeConfig {
     )
 
     /**
-     * Minimal spatial OST (#000000) VS Code settings:
-     * focuses on Open / Close / Edit / Save + stable DOM-rendered integrated terminal.
+     * OST (#000000 optical see-through) high-contrast developer preset for Android XR glasses:
+     * - Pure black background (zero Micro-OLED glow) with clear borders & active indicators
+     * - Medium font weight (500), 16px editor font, 0.5 zoom for 70° FOV legibility
+     * - Thick solid cursor (3px) and brightened comments so text survives real-world ambient light
+     * - DOM-rendered integrated terminal (`gpuAcceleration: "off"`) for WebView stability
      */
     fun buildMinimalVsCodeSettingsObject(): JSONObject {
         val colorCustomizations = JSONObject()
             .put("editor.background", "#000000")
+            .put("editor.foreground", "#f3f4f6")
             .put("editorGutter.background", "#000000")
+            .put("editorLineNumber.foreground", "#6b7280")
+            .put("editorLineNumber.activeForeground", "#f9fafb")
+            .put("editorCursor.foreground", "#38bdf8")
             .put("sideBar.background", "#050505")
-            .put("sideBarSectionHeader.background", "#0a0a0a")
+            .put("sideBar.foreground", "#e5e7eb")
+            .put("sideBar.border", "#1f2937")
+            .put("sideBarSectionHeader.background", "#0a0a0c")
             .put("activityBar.background", "#000000")
+            .put("activityBar.foreground", "#f3f4f6")
+            .put("activityBar.activeBorder", "#38bdf8")
             .put("panel.background", "#000000")
+            .put("panel.border", "#1f2937")
             .put("terminal.background", "#000000")
+            .put("terminal.foreground", "#f3f4f6")
+            .put("terminalCursor.foreground", "#38bdf8")
             .put("titleBar.activeBackground", "#000000")
             .put("titleBar.inactiveBackground", "#000000")
-            .put("statusBar.background", "#080808")
-            .put("tab.activeBackground", "#0c0c0c")
+            .put("statusBar.background", "#08080a")
+            .put("statusBar.foreground", "#e5e7eb")
+            .put("statusBar.border", "#1f2937")
+            .put("tab.activeBackground", "#0d1117")
+            .put("tab.activeForeground", "#ffffff")
+            .put("tab.activeBorderTop", "#38bdf8")
             .put("tab.inactiveBackground", "#000000")
+            .put("tab.inactiveForeground", "#9ca3af")
             .put("editorGroupHeader.tabsBackground", "#000000")
+
+        val tokenColorCustomizations = JSONObject()
+            .put("comments", "#8da2be")
 
         val bashProfile = JSONObject()
             .put("path", "/bin/bash")
@@ -155,13 +198,18 @@ object PosixRuntimeConfig {
         return JSONObject()
             .put("workbench.colorTheme", "Default Dark Modern")
             .put("workbench.colorCustomizations", colorCustomizations)
+            .put("editor.tokenColorCustomizations", tokenColorCustomizations)
             .put("workbench.startupEditor", "readme")
             .put("workbench.tips.enabled", false)
             .put("workbench.welcomePage.walkthroughs.openOnInstall", false)
             .put("workbench.secondarySideBar.defaultVisibility", "hidden")
+            .put("window.zoomLevel", 0.5)
             .put("editor.minimap.enabled", false)
-            .put("editor.fontSize", 15)
-            .put("editor.lineHeight", 24)
+            .put("editor.fontSize", 16)
+            .put("editor.lineHeight", 26)
+            .put("editor.fontWeight", "500")
+            .put("editor.cursorWidth", 3)
+            .put("editor.cursorBlinking", "solid")
             .put("breadcrumbs.enabled", false)
             .put("files.autoSave", "off")
             .put("security.workspace.trust.enabled", false)
@@ -169,6 +217,7 @@ object PosixRuntimeConfig {
             .put("extensions.ignoreRecommendations", true)
             // Disable WebGL terminal renderer to avoid black/garbled text on Android WebView
             .put("terminal.integrated.gpuAcceleration", "off")
+            .put("terminal.integrated.fontSize", 15)
             .put("terminal.integrated.defaultProfile.linux", "bash")
             .put("terminal.integrated.profiles.linux", JSONObject().put("bash", bashProfile))
     }
@@ -229,6 +278,17 @@ object PosixRuntimeConfig {
         return servers.joinToString("\n", postfix = "\n") { "nameserver $it" }
     }
 
+    fun buildDefaultBashrc(): String = """
+        # XR-Editor persistent Debian shell config (/root is mounted outside rootfs)
+        export LANG=C.UTF-8
+        export LC_ALL=C.UTF-8
+        export HISTCONTROL=ignoredups:erasedups
+        export HISTSIZE=2000
+        alias ls='ls --color=auto'
+        alias ll='ls -la'
+        PS1='\[\e[36m\]xr\[\e[0m\]:\[\e[32m\]\w\[\e[0m\]\$ '
+    """.trimIndent() + "\n"
+
     fun buildWelcomeReadme(): String = """
 # XR-Editor Workspace (`/workspace`)
 
@@ -238,16 +298,17 @@ Android XR 向けの単体完結エディタ（Debian minimal + 内蔵 `openvsco
 - **ファイルを開く**: 左サイドバーをクリック、または `Ctrl+P` / `Ctrl+O`
 - **保存する**: `Ctrl+S`
 - **タブを閉じる**: `Ctrl+W`
-- **ターミナル開閉**: `Ctrl+` `（バッククォート）
-- **実機チェック / 管理画面**: 左端 Activity Bar の **XR-Editor** アイコン、または `Ctrl+Alt+D`
+- **ターミナル開閉**: `Ctrl+J` または左端 **XR-Editor** メニューの「ターミナル開閉」
+- **実機チェック / 表示サイズ / OST・VST切替**: 左端 Activity Bar の **XR-Editor** アイコン（または `Ctrl+Alt+D`）
 
-## Android ↔ POSIX ファイル共有
+## Android ↔ POSIX ファイル共有 & 永続領域
 - **POSIX → Android**: `/workspace/android`（`/android/shared` および全ファイルアクセス許可時は `/android/sdcard`）
 - **Android → POSIX**: Android XR の「Files」アプリから **XR-Editor** を開くと、この `/workspace` が通常のフォルダとして直接読み書きできます。
+- **永続ホーム (`/root`)**: `~/.ssh`, `~/.gitconfig`, `~/.config/gh` は rootfs 外に分離保存されるため、アプリ更新後も引き継がれます。
 
 ## `gh` / `git` などの CLI 導入（POSIX ターミナル内）
 ```bash
-apt update && apt install -y ca-certificates git gh
+apt update && apt install -y ca-certificates git gh curl openssh-client
 gh --version
 ```
 """.trimIndent() + "\n"

@@ -12,10 +12,12 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.KeyEvent
+import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
@@ -26,11 +28,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Single-window Android XR Activity hosting:
  * 1. Pure-black boot/diagnostics page (`file:///android_asset/boot.html`) with isolated `XREditorHost` bridge
- * 2. Embedded `openvscode-server` (`http://127.0.0.1:18765/?folder=/workspace`) with `XREditorHost` removed
- *    and native trusted KeyEvents flowing directly to Monaco / xterm.js
+ * 2. Embedded `openvscode-server` (`http://127.0.0.1:18765/?folder=/workspace`) with `XREditorHost` removed,
+ *    native trusted KeyEvents flowing directly to Monaco / xterm.js, and XR multi-window focus dimming
  */
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var rootFrame: FrameLayout
     private lateinit var webView: WebView
     private lateinit var runtimeManager: PosixRuntimeManager
     private lateinit var bootBridge: BootHostBridge
@@ -89,6 +92,11 @@ class MainActivity : AppCompatActivity() {
                 allowContentAccess = false
                 useWideViewPort = true
                 loadWithOverviewMode = true
+                // Prevent accidental trackpad pinch-zoom from breaking VS Code layout;
+                // UI scaling is controlled cleanly via VS Code `window.zoomLevel`.
+                setSupportZoom(false)
+                builtInZoomControls = false
+                displayZoomControls = false
                 // Desktop user agent ensures VS Code Web treats XR monitor as full desktop
                 userAgentString = settings.userAgentString
                     .replace("Mobile", "")
@@ -101,11 +109,11 @@ class MainActivity : AppCompatActivity() {
                     request: WebResourceRequest,
                 ): Boolean {
                     val uri = request.url
-                    // Keep localhost openvscode-server & local boot page inside WebView
-                    if (uri.scheme == "file" || uri.host == "127.0.0.1" || uri.host == "localhost") {
+                    val editorPort = runtimeManager.getStatus().port
+                    if (PosixRuntimeConfig.shouldKeepInsideWebView(uri.scheme, uri.host, uri.port, editorPort)) {
                         return false
                     }
-                    // Open external URLs (e.g. GitHub auth device URL) in XR browser
+                    // Open external URLs AND dev servers on other localhost ports (e.g. :3000) in XR browser
                     runCatching {
                         startActivity(Intent(Intent.ACTION_VIEW, uri))
                     }
@@ -116,7 +124,19 @@ class MainActivity : AppCompatActivity() {
             webChromeClient = WebChromeClient()
         }
 
-        setContentView(webView)
+        val borderPx = (resources.displayMetrics.density * 1.5f).toInt().coerceAtLeast(1)
+        rootFrame = FrameLayout(this).apply {
+            setBackgroundColor(COLOR_BORDER_FOCUSED)
+            setPadding(borderPx, borderPx, borderPx, borderPx)
+            addView(
+                webView,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
+        }
+        setContentView(rootFrame)
 
         // Prevent stray Back/Esc gestures in XR from accidentally killing the editor & server
         onBackPressedDispatcher.addCallback(
@@ -156,6 +176,15 @@ class MainActivity : AppCompatActivity() {
         loadBootPage()
         ServerKeepAliveService.start(this)
         runtimeManager.startIfNeeded()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (::webView.isInitialized && ::rootFrame.isInitialized) {
+            // Clear visual cue for keyboard focus + lower OST glare when looking at sibling XR windows
+            webView.alpha = if (hasFocus) 1.0f else 0.55f
+            rootFrame.setBackgroundColor(if (hasFocus) COLOR_BORDER_FOCUSED else COLOR_BORDER_UNFOCUSED)
+        }
     }
 
     override fun onResume() {
@@ -270,5 +299,10 @@ class MainActivity : AppCompatActivity() {
         }
         latch.await(3, TimeUnit.SECONDS)
         return result.get()
+    }
+
+    companion object {
+        private const val COLOR_BORDER_FOCUSED = 0xFF38BDF8.toInt()
+        private const val COLOR_BORDER_UNFOCUSED = 0xFF18181B.toInt()
     }
 }

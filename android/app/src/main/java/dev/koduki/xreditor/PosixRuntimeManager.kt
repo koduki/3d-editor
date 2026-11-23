@@ -128,6 +128,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     fun getPaths(): PosixRuntimeConfig.Paths {
         val runtimeRoot = File(appContext.filesDir, "runtime")
         val workspaceDir = File(appContext.filesDir, "workspace")
+        val homeDir = File(appContext.filesDir, "home")
         val nativeLibDir = File(appContext.applicationInfo.nativeLibraryDir)
         val sharedDir = appContext.getExternalFilesDir("shared")
             ?: File(appContext.filesDir, "shared")
@@ -142,6 +143,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         return PosixRuntimeConfig.Paths(
             runtimeRoot = runtimeRoot,
             workspaceDir = workspaceDir,
+            homeDir = homeDir,
             nativeLibDir = nativeLibDir,
             androidSharedDir = sharedDir,
             androidSdcardDir = sdcardDir,
@@ -319,16 +321,20 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
      * inside `runtime/rootfs/workspace` instead of decoupled `filesDir/workspace`.
      */
     private fun migrateLegacyWorkspaceIfNeeded(paths: PosixRuntimeConfig.Paths) {
-        val legacy = paths.legacyRootfsWorkspaceDir
+        migrateLegacyDirectory(paths.legacyRootfsWorkspaceDir, paths.workspaceDir, "workspace")
+        migrateLegacyDirectory(paths.legacyRootfsHomeDir, paths.homeDir, "home (/root)")
+    }
+
+    private fun migrateLegacyDirectory(legacy: File, destDir: File, label: String) {
         if (!legacy.exists() || !legacy.isDirectory) return
         val legacyEntries = legacy.listFiles() ?: return
         val realEntries = legacyEntries.filter { !Files.isSymbolicLink(it.toPath()) }
         if (realEntries.isEmpty()) return
 
-        paths.workspaceDir.mkdirs()
+        destDir.mkdirs()
         var migrated = 0
         for (item in realEntries) {
-            val dest = File(paths.workspaceDir, item.name)
+            val dest = File(destDir, item.name)
             if (!dest.exists()) {
                 if (!item.renameTo(dest)) {
                     runCatching { item.copyRecursively(dest, overwrite = false) }
@@ -337,7 +343,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             }
         }
         if (migrated > 0) {
-            appendLog("[runtime] Migrated $migrated item(s) from legacy rootfs/workspace to decoupled workspace")
+            appendLog("[runtime] Migrated $migrated item(s) from legacy $label to decoupled storage")
         }
     }
 
@@ -385,7 +391,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             appendLog("[runtime] openvscode-server extracted: $stats")
         }
 
-        // Atomic swap of rootfs only — user filesDir/workspace is untouched
+        // Atomic swap of rootfs only — user filesDir/workspace and filesDir/home are untouched
         if (paths.rootfsDir.exists()) {
             paths.rootfsDir.deleteRecursively()
         }
@@ -404,6 +410,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         paths.tmpDir.mkdirs()
         paths.vscodeDataDir.mkdirs()
         paths.workspaceDir.mkdirs()
+        paths.homeDir.mkdirs()
         paths.androidSharedDir.mkdirs()
 
         // Ensure mount target directories exist inside rootfs
@@ -429,6 +436,12 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val readme = File(paths.workspaceDir, "README.md")
         if (!readme.exists()) {
             readme.writeText(PosixRuntimeConfig.buildWelcomeReadme())
+        }
+
+        // Seed persistent .bashrc in decoupled /root if absent
+        val bashrc = File(paths.homeDir, ".bashrc")
+        if (!bashrc.exists()) {
+            bashrc.writeText(PosixRuntimeConfig.buildDefaultBashrc())
         }
 
         // Write fake /proc files to avoid Android SELinux denials in Node.js / Linux tools

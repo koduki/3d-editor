@@ -10,10 +10,11 @@ import java.io.File
 class PosixRuntimeConfigTest {
 
     @Test
-    fun buildProotCommand_includesDecoupledWorkspaceAndAndroidMounts() {
+    fun buildProotCommand_includesDecoupledWorkspaceHomeAndAndroidMounts() {
         val paths = PosixRuntimeConfig.Paths(
             runtimeRoot = File("/data/user/0/dev.koduki.xreditor/files/runtime"),
             workspaceDir = File("/data/user/0/dev.koduki.xreditor/files/workspace"),
+            homeDir = File("/data/user/0/dev.koduki.xreditor/files/home"),
             nativeLibDir = File("/data/app/xreditor/lib/arm64"),
             androidSharedDir = File("/sdcard/Android/data/dev.koduki.xreditor/files/shared"),
             androidSdcardDir = File("/storage/emulated/0"),
@@ -27,6 +28,7 @@ class PosixRuntimeConfigTest {
         assertTrue(cmd.contains("--link2symlink"))
         assertTrue(cmd.contains("--kill-on-exit"))
         assertTrue(cmd.contains("/data/user/0/dev.koduki.xreditor/files/workspace:/workspace"))
+        assertTrue(cmd.contains("/data/user/0/dev.koduki.xreditor/files/home:/root"))
         assertTrue(cmd.contains("/sdcard/Android/data/dev.koduki.xreditor/files/shared:/android/shared"))
         assertTrue(cmd.contains("/storage/emulated/0:/android/sdcard"))
         assertTrue(cmd.contains("--without-connection-token"))
@@ -45,7 +47,19 @@ class PosixRuntimeConfigTest {
     }
 
     @Test
-    fun buildMinimalVsCodeSettingsJson_setsOstBlackAndDisablesTerminalGpu() {
+    fun shouldKeepInsideWebView_routesOtherLocalhostPortsToExternalBrowser() {
+        assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("file", "", -1, 18765))
+        assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 18765, 18765))
+        assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 18765, 18765))
+
+        // Dev servers on other ports and external websites must open in sibling XR browser
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 3000, 18765))
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 5173, 18765))
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("https", "github.com", -1, 18765))
+    }
+
+    @Test
+    fun buildMinimalVsCodeSettingsJson_setsOstHighContrastCursorZoomAndTerminalDom() {
         val json = JSONObject(PosixRuntimeConfig.buildMinimalVsCodeSettingsJson())
         assertEquals(false, json.getBoolean("editor.minimap.enabled"))
         assertEquals(false, json.getBoolean("breadcrumbs.enabled"))
@@ -53,11 +67,16 @@ class PosixRuntimeConfigTest {
         assertEquals("off", json.getString("telemetry.telemetryLevel"))
         assertEquals("off", json.getString("files.autoSave"))
         assertEquals("off", json.getString("terminal.integrated.gpuAcceleration"))
+        assertEquals("500", json.getString("editor.fontWeight"))
+        assertEquals(3, json.getInt("editor.cursorWidth"))
+        assertEquals("solid", json.getString("editor.cursorBlinking"))
+        assertEquals(0.5, json.getDouble("window.zoomLevel"), 0.001)
         assertEquals("bash", json.getString("terminal.integrated.defaultProfile.linux"))
 
         val colors = json.getJSONObject("workbench.colorCustomizations")
         assertEquals("#000000", colors.getString("editor.background"))
         assertEquals("#000000", colors.getString("terminal.background"))
+        assertEquals("#38bdf8", colors.getString("tab.activeBorderTop"))
     }
 
     @Test
@@ -67,6 +86,8 @@ class PosixRuntimeConfigTest {
         assertEquals(20, merged.getInt("editor.fontSize"))
         assertEquals(true, merged.getBoolean("custom.flag"))
         assertEquals("off", merged.getString("terminal.integrated.gpuAcceleration"))
+        assertEquals("500", merged.getString("editor.fontWeight"))
+        assertEquals(3, merged.getInt("editor.cursorWidth"))
     }
 
     @Test
