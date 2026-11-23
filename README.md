@@ -4,12 +4,11 @@
 
 # KuCode
 
-**空間に、書く。**
 *A code editor for spatial computing.*
 
-XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエディタ。
+XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエディタです。
 
-物理キーボードとマウスを想定して、`openvscode-server` の構築・起動や Termux などの別途導入は不要で、単一の APK をインストールするだけで動作します。
+AndroidXRで物理キーボードとマウスを想定して、`openvscode-server` の構築・起動や Termux などのターミナルを別途導入は不要で、単一の APK をインストールするだけで動作します。
 
 内蔵の **`openvscode-server` + Debian 12 minimal (`arm64`)** がローカルで自動起動し、キーボード＋マウス／トラックパッドですぐにコードを書き始められます。
 
@@ -20,7 +19,7 @@ XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエデ
 **KuCode**（読み：**くうこーど** / 英: *"koo-code"*）は、**空（くう）** に二つの意味を重ねています。
 
 - **空間** — Android XR の空間コンピューティング環境に浮かび、目の前の空間でそのまま書けるエディタ。
-- **空海** — 日本を代表する能書家。「弘法筆を選ばず」のとおり、何処でも使える良い文書を書きたいという想い。
+- **空海** — 「弘法は筆を選ばず」でお馴染みの日本を代表する能筆家にして、スーパー僧侶。何処でも空海パワーで素敵な文章を！
 
 当面はシンプルな2Dベースのエディタですが、将来的にはより空間コンピューティングに最適化したUXを目指します。
 
