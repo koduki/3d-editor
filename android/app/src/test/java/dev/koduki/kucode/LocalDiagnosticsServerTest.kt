@@ -33,7 +33,8 @@ class LocalDiagnosticsServerTest {
         assertTrue(server.isTokenAuthorized(server.authToken))
         assertFalse(server.isTokenAuthorized(null))
         assertFalse(server.isTokenAuthorized(""))
-        assertFalse(server.isTokenAuthorized(server.authToken.dropLast(1) + "0"))
+        val flippedLastChar = if (server.authToken.last() == '0') '1' else '0'
+        assertFalse(server.isTokenAuthorized(server.authToken.dropLast(1) + flippedLastChar))
 
         val port = server.start()
         try {
