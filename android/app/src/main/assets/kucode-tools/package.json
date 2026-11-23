@@ -2,7 +2,7 @@
   "name": "kucode-tools",
   "displayName": "KuCode Diagnostics & Tools",
   "description": "Built-in Android XR diagnostics, optical presets, log viewer, and storage menu for KuCode",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "publisher": "koduki",
   "engines": {
     "vscode": "^1.80.0"
