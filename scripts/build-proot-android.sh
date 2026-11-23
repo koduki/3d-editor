@@ -13,10 +13,32 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/android/app/src/main/jniLibs/arm64-v8a}"
 
 PROOT_VERSION="${PROOT_VERSION:-5.1.107.102}"
+PROOT_SHA256="${PROOT_SHA256:-36fb68838d86e491bc577064e23d365ea936e03ded4e90f62dc540907c04f385}"
 PROOT_URL="https://github.com/termux/proot/archive/refs/tags/v${PROOT_VERSION}.tar.gz"
+
 TALLOC_VERSION="${TALLOC_VERSION:-2.5.0}"
+TALLOC_SHA256="${TALLOC_SHA256:-912afa237510ae542a7733998eb18a12bcda35ab6729c8e2ddb43e8d0ebab007}"
 TALLOC_URL="https://www.samba.org/ftp/talloc/talloc-${TALLOC_VERSION}.tar.gz"
+
 ANDROID_API="${ANDROID_API:-34}"
+
+verify_sha256() {
+  local file="$1"
+  local expected="$2"
+  local actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "ERROR: SHA-256 mismatch for $file" >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    exit 1
+  fi
+  echo "[proot] Verified SHA-256 ($(basename "$file")): $actual"
+}
 
 if [[ -f "$OUT_DIR/libproot.so" && -f "$OUT_DIR/libproot-loader.so" && "${FORCE_REBUILD:-0}" != "1" ]]; then
   echo "[proot] Already built in $OUT_DIR (set FORCE_REBUILD=1 to rebuild)"
@@ -50,15 +72,16 @@ OBJCOPY="$TOOLCHAIN/bin/llvm-objcopy"
 OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
 READELF="$TOOLCHAIN/bin/llvm-readelf"
 
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/xr-proot-build-XXXXXX")"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kucode-proot-build-XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 echo "[proot] Using NDK: $NDK_DIR"
 echo "[proot] Building in: $WORK_DIR"
 
-# 1. Fetch and cross-build Samba talloc as static libtalloc.a
+# 1. Fetch, verify SHA-256, and cross-build Samba talloc as static libtalloc.a
 echo "[proot] Downloading talloc ${TALLOC_VERSION}..."
 curl -fSL "$TALLOC_URL" -o "$WORK_DIR/talloc.tar.gz"
+verify_sha256 "$WORK_DIR/talloc.tar.gz" "$TALLOC_SHA256"
 tar -xzf "$WORK_DIR/talloc.tar.gz" -C "$WORK_DIR"
 TALLOC_SRC="$WORK_DIR/talloc-${TALLOC_VERSION}"
 TALLOC_PREFIX="$WORK_DIR/talloc-install"
@@ -111,9 +134,10 @@ echo "[proot] Configuring & building static libtalloc.a..."
   "$RANLIB" "$TALLOC_PREFIX/lib/libtalloc.a"
 )
 
-# 2. Fetch and cross-build Termux PRoot with unbundled loader
+# 2. Fetch, verify SHA-256, and cross-build Termux PRoot with unbundled loader
 echo "[proot] Downloading termux/proot v${PROOT_VERSION}..."
 curl -fSL "$PROOT_URL" -o "$WORK_DIR/proot.tar.gz"
+verify_sha256 "$WORK_DIR/proot.tar.gz" "$PROOT_SHA256"
 tar -xzf "$WORK_DIR/proot.tar.gz" -C "$WORK_DIR"
 PROOT_SRC="$WORK_DIR/proot-${PROOT_VERSION}"
 

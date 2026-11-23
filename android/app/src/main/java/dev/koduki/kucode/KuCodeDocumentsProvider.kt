@@ -1,4 +1,4 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
@@ -11,9 +11,8 @@ import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
 import android.webkit.MimeTypeMap
 import java.io.File
-import java.io.FileNotFoundException
-import java.io.IOException
-import java.util.ArrayDeque
+import java.nio.file.Files
+import java.nio.file.LinkOption
 
 /**
  * Clean Android Storage Access Framework (DocumentsProvider) implementation
@@ -21,10 +20,10 @@ import java.util.ArrayDeque
  * in the Android XR Files app and other document pickers.
  *
  * Security & correctness guarantees:
- * - Strictly confined to `/workspace` via canonicalPath checks (blocks symlink escapes into /android or /)
- * - Supports create, write, rename, recursive directory delete, and safe search
+ * - Strictly confined to `/workspace` via NOFOLLOW_LINKS path checks (blocks symlink escapes & loops)
+ * - Supports create, write, rename, symlink-safe recursive directory delete, and cycle-safe search
  */
-class XrDocumentsProvider : DocumentsProvider() {
+class KuCodeDocumentsProvider : DocumentsProvider() {
 
     private val defaultRootProjection = arrayOf(
         Root.COLUMN_ROOT_ID,
@@ -60,12 +59,12 @@ class XrDocumentsProvider : DocumentsProvider() {
     override fun queryRoots(projection: Array<out String>?): Cursor {
         val baseDir = workspaceBaseDir()
         val result = MatrixCursor(projection ?: defaultRootProjection)
-        val appName = context?.getString(R.string.app_name) ?: "XR-Editor"
+        val appName = context?.getString(R.string.app_name) ?: "KuCode"
         val summary = context?.getString(R.string.documents_root_summary) ?: "POSIX /workspace"
 
         result.newRow().apply {
-            add(Root.COLUMN_ROOT_ID, ROOT_ID)
-            add(Root.COLUMN_DOCUMENT_ID, docIdForFile(baseDir, baseDir))
+            add(Root.COLUMN_ROOT_ID, WorkspaceDocumentStore.ROOT_ID)
+            add(Root.COLUMN_DOCUMENT_ID, WorkspaceDocumentStore.docIdForFile(baseDir, baseDir))
             add(Root.COLUMN_TITLE, appName)
             add(Root.COLUMN_SUMMARY, summary)
             add(
@@ -84,7 +83,7 @@ class XrDocumentsProvider : DocumentsProvider() {
 
     override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
         val baseDir = workspaceBaseDir()
-        val target = fileForDocId(baseDir, documentId)
+        val target = WorkspaceDocumentStore.fileForDocId(baseDir, documentId)
         val result = MatrixCursor(projection ?: defaultDocumentProjection)
         includeFile(result, baseDir, target)
         return result
@@ -96,12 +95,9 @@ class XrDocumentsProvider : DocumentsProvider() {
         sortOrder: String?,
     ): Cursor {
         val baseDir = workspaceBaseDir()
-        val parent = fileForDocId(baseDir, parentDocumentId)
+        val parent = WorkspaceDocumentStore.fileForDocId(baseDir, parentDocumentId)
         val result = MatrixCursor(projection ?: defaultDocumentProjection)
-        val children = parent.listFiles() ?: return result
-        for (child in children.sortedBy { it.name.lowercase() }) {
-            // Skip symlinks pointing outside /workspace (e.g. /workspace/android -> /android)
-            if (!isWithinBase(baseDir, child)) continue
+        for (child in WorkspaceDocumentStore.listChildren(baseDir, parent)) {
             includeFile(result, baseDir, child)
         }
         return result
@@ -113,7 +109,7 @@ class XrDocumentsProvider : DocumentsProvider() {
         signal: CancellationSignal?,
     ): ParcelFileDescriptor {
         val baseDir = workspaceBaseDir()
-        val file = fileForDocId(baseDir, documentId)
+        val file = WorkspaceDocumentStore.fileForDocId(baseDir, documentId)
         return ParcelFileDescriptor.open(file, ParcelFileDescriptor.parseMode(mode))
     }
 
@@ -123,7 +119,7 @@ class XrDocumentsProvider : DocumentsProvider() {
         signal: CancellationSignal?,
     ): AssetFileDescriptor {
         val baseDir = workspaceBaseDir()
-        val file = fileForDocId(baseDir, documentId)
+        val file = WorkspaceDocumentStore.fileForDocId(baseDir, documentId)
         val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         return AssetFileDescriptor(pfd, 0, file.length())
     }
@@ -134,64 +130,36 @@ class XrDocumentsProvider : DocumentsProvider() {
         displayName: String,
     ): String {
         val baseDir = workspaceBaseDir()
-        val parent = fileForDocId(baseDir, parentDocumentId)
-        val safeName = sanitizeDisplayName(displayName)
-        var target = File(parent, safeName)
-        var suffix = 2
-        while (target.exists()) {
-            target = File(parent, "$safeName ($suffix)")
-            suffix++
-        }
-        if (!isWithinBase(baseDir, target)) {
-            throw FileNotFoundException("Invalid path: $displayName")
-        }
-        try {
-            val created = if (Document.MIME_TYPE_DIR == mimeType) {
-                target.mkdir()
-            } else {
-                target.createNewFile()
-            }
-            if (!created) {
-                throw FileNotFoundException("Failed to create: ${target.name}")
-            }
-        } catch (e: IOException) {
-            throw FileNotFoundException("Failed to create ${target.name}: ${e.message}")
-        }
-        return docIdForFile(baseDir, target)
+        val parent = WorkspaceDocumentStore.fileForDocId(baseDir, parentDocumentId)
+        val target = WorkspaceDocumentStore.create(
+            baseDir = baseDir,
+            parent = parent,
+            isDirectory = Document.MIME_TYPE_DIR == mimeType,
+            displayName = displayName,
+        )
+        return WorkspaceDocumentStore.docIdForFile(baseDir, target)
     }
 
     override fun renameDocument(documentId: String, displayName: String): String {
         val baseDir = workspaceBaseDir()
-        val source = fileForDocId(baseDir, documentId)
-        val parent = source.parentFile ?: throw FileNotFoundException("Cannot rename root")
-        val target = File(parent, sanitizeDisplayName(displayName))
-        if (!isWithinBase(baseDir, target) || target.exists() || !source.renameTo(target)) {
-            throw FileNotFoundException("Failed to rename ${source.name} to $displayName")
-        }
-        return docIdForFile(baseDir, target)
+        val source = WorkspaceDocumentStore.fileForDocId(baseDir, documentId)
+        val target = WorkspaceDocumentStore.rename(baseDir, source, displayName)
+        return WorkspaceDocumentStore.docIdForFile(baseDir, target)
     }
 
     override fun deleteDocument(documentId: String) {
         val baseDir = workspaceBaseDir()
-        val target = fileForDocId(baseDir, documentId)
-        if (target.canonicalFile == baseDir) {
-            throw FileNotFoundException("Cannot delete workspace root")
-        }
-        val deleted = if (target.isDirectory) target.deleteRecursively() else target.delete()
-        if (!deleted) {
-            throw FileNotFoundException("Failed to delete $documentId")
-        }
+        val target = WorkspaceDocumentStore.fileForDocId(baseDir, documentId)
+        WorkspaceDocumentStore.delete(baseDir, target)
     }
 
     override fun getDocumentType(documentId: String): String {
         val baseDir = workspaceBaseDir()
-        return mimeTypeForFile(fileForDocId(baseDir, documentId))
+        return mimeTypeForFile(WorkspaceDocumentStore.fileForDocId(baseDir, documentId))
     }
 
-    override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean {
-        val normalizedParent = parentDocumentId.trimEnd('/')
-        return documentId == normalizedParent || documentId.startsWith("$normalizedParent/")
-    }
+    override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean =
+        WorkspaceDocumentStore.isChildDocument(parentDocumentId, documentId)
 
     override fun querySearchDocuments(
         rootId: String,
@@ -200,30 +168,18 @@ class XrDocumentsProvider : DocumentsProvider() {
     ): Cursor {
         val baseDir = workspaceBaseDir()
         val result = MatrixCursor(projection ?: defaultDocumentProjection)
-        val needle = query.lowercase()
-        val queue = ArrayDeque<File>()
-        queue.add(baseDir)
-
-        while (queue.isNotEmpty() && result.count < MAX_SEARCH_RESULTS) {
-            val current = queue.removeFirst()
-            val children = current.listFiles() ?: continue
-            for (child in children) {
-                if (!isWithinBase(baseDir, child)) continue
-                if (child.isDirectory) {
-                    queue.add(child)
-                } else if (child.name.lowercase().contains(needle)) {
-                    includeFile(result, baseDir, child)
-                    if (result.count >= MAX_SEARCH_RESULTS) break
-                }
-            }
+        for (match in WorkspaceDocumentStore.search(baseDir, query)) {
+            includeFile(result, baseDir, match)
         }
         return result
     }
 
     private fun includeFile(cursor: MatrixCursor, baseDir: File, file: File) {
-        val isRoot = file.canonicalFile == baseDir
+        val path = file.toPath()
+        val isDir = Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+        val isRoot = path.toAbsolutePath().normalize() == baseDir.toPath().toRealPath()
         var flags = 0
-        if (file.isDirectory) {
+        if (isDir) {
             if (file.canWrite()) flags = flags or Document.FLAG_DIR_SUPPORTS_CREATE
         } else if (file.canWrite()) {
             flags = flags or Document.FLAG_SUPPORTS_WRITE
@@ -237,9 +193,9 @@ class XrDocumentsProvider : DocumentsProvider() {
         }
 
         cursor.newRow().apply {
-            add(Document.COLUMN_DOCUMENT_ID, docIdForFile(baseDir, file))
+            add(Document.COLUMN_DOCUMENT_ID, WorkspaceDocumentStore.docIdForFile(baseDir, file))
             add(Document.COLUMN_DISPLAY_NAME, if (isRoot) "workspace" else file.name)
-            add(Document.COLUMN_SIZE, if (file.isDirectory) 0L else file.length())
+            add(Document.COLUMN_SIZE, if (isDir) 0L else file.length())
             add(Document.COLUMN_MIME_TYPE, mimeType)
             add(Document.COLUMN_LAST_MODIFIED, file.lastModified())
             add(Document.COLUMN_FLAGS, flags)
@@ -247,60 +203,13 @@ class XrDocumentsProvider : DocumentsProvider() {
         }
     }
 
-    private fun docIdForFile(baseDir: File, file: File): String {
-        val basePath = baseDir.canonicalPath
-        val filePath = file.canonicalPath
-        if (filePath == basePath) return ROOT_DOC_ID
-        val rel = filePath.removePrefix("$basePath/")
-        return "$ROOT_DOC_ID/$rel"
-    }
-
-    private fun fileForDocId(baseDir: File, docId: String): File {
-        val target = if (docId == ROOT_DOC_ID || docId == ROOT_ID) {
-            baseDir
-        } else if (docId.startsWith("$ROOT_DOC_ID/")) {
-            val rel = docId.removePrefix("$ROOT_DOC_ID/")
-            File(baseDir, rel)
-        } else {
-            throw FileNotFoundException("Unknown documentId: $docId")
-        }
-        if (!target.exists() || !isWithinBase(baseDir, target)) {
-            throw FileNotFoundException("Document not found: $docId")
-        }
-        return target
-    }
-
-    private fun isWithinBase(baseDir: File, candidate: File): Boolean {
-        return try {
-            val basePath = baseDir.canonicalPath
-            val targetPath = candidate.canonicalPath
-            targetPath == basePath || targetPath.startsWith("$basePath${File.separator}")
-        } catch (_: IOException) {
-            false
-        }
-    }
-
-    private fun sanitizeDisplayName(raw: String): String {
-        val trimmed = raw.trim().replace('/', '_').replace('\\', '_')
-        if (trimmed.isEmpty() || trimmed == "." || trimmed == "..") {
-            throw FileNotFoundException("Invalid display name: $raw")
-        }
-        return trimmed
-    }
-
     private fun mimeTypeForFile(file: File): String {
-        if (file.isDirectory) return Document.MIME_TYPE_DIR
+        if (Files.isDirectory(file.toPath(), LinkOption.NOFOLLOW_LINKS)) return Document.MIME_TYPE_DIR
         val ext = file.extension.lowercase()
         if (ext == "md" || ext == "markdown") return "text/markdown"
         if (ext in setOf("txt", "json", "yml", "yaml", "kt", "js", "ts", "py", "sh", "xml", "css", "html")) {
             return "text/plain"
         }
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
-    }
-
-    companion object {
-        private const val ROOT_ID = "xr_workspace"
-        private const val ROOT_DOC_ID = "workspace"
-        private const val MAX_SEARCH_RESULTS = 50
     }
 }

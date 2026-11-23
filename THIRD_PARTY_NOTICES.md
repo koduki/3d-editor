@@ -1,14 +1,14 @@
 # Third-Party Notices & Open Source Compliance
 
-XR-Editor's own original Android/Kotlin host application, web boot UI, built-in `xr-editor-tools` extension, and build scripts are licensed under the **MIT License** (see `LICENSE`).
+KuCode's own original Android/Kotlin host application, web boot UI, built-in `kucode-tools` extension, and build scripts are licensed under the **MIT License** (see `LICENSE`).
 
-XR-Editor distributes the following third-party open-source components inside its Android APK as separate executables, runtime archives, or linked Android libraries. Each component retains its own copyright and license terms. Complete license texts are included in `LICENSES/` (and bundled inside the APK under `assets/licenses/`).
+KuCode distributes the following third-party open-source components inside its Android APK as separate executables, runtime archives, or linked Android libraries. Each component retains its own copyright and license terms. Complete license texts are included in `LICENSES/` (and bundled inside the APK under `assets/licenses/`).
 
 ---
 
 ## 1. Separate Executables & Bundled Runtime Archives (Process-Isolated Aggregate)
 
-The components below are executed as separate child processes via `ProcessBuilder` (`execve`) and communicate with the Android host strictly over local HTTP/WebSocket or standard I/O. They are not linked into the XR-Editor Android/JVM application code.
+The components below are executed as separate child processes via `ProcessBuilder` (`execve`) and communicate with the Android host strictly over local HTTP/WebSocket or standard I/O. They are not linked into the KuCode Android/JVM application code.
 
 ### 1.1 PRoot (Termux fork) + Samba talloc (`libproot.so`, `libproot-loader.so`)
 - **PRoot Upstream:** https://github.com/termux/proot (`v5.1.107.102`)
@@ -29,7 +29,7 @@ The components below are executed as separate child processes via `ProcessBuilde
 - **Version:** `openvscode-server-v1.109.5` (`linux-arm64`)
 - **Copyright:** Copyright (c) 2015 - present Microsoft Corporation; Gitpod contributors
 - **License:** MIT License (see `LICENSES/MIT-OpenVSCode.txt`; full `LICENSE.txt` and `ThirdPartyNotices.txt` are preserved verbatim inside `/opt/openvscode-server/`).
-- **Modifications:** Unmodified official release archive. XR-Editor installs its own MIT-licensed helper extension (`xr-editor-tools`) alongside it at runtime.
+- **Modifications:** Unmodified official release archive. KuCode installs its own MIT-licensed helper extension (`kucode-tools`) alongside it at runtime.
 
 ### 1.3 Debian GNU/Linux (`debian-arm64-rootfs.tgz`)
 - **Upstream:** https://www.debian.org/ (`debian:bookworm-slim`, `linux/arm64`)
@@ -55,7 +55,7 @@ The following libraries are linked into the Android host APK under the **Apache 
 
 ## 3. Corresponding Source Code & Written Offer (GPL / LGPL Compliance)
 
-In accordance with GNU GPL v2 (§3), GNU GPL v3 (§6), and GNU LGPL v3 (§4), the complete Corresponding Source for all GPL/LGPL binaries distributed in XR-Editor APK builds is available as follows:
+In accordance with GNU GPL v2 (§3), GNU GPL v3 (§6), and GNU LGPL v3 (§4), the complete Corresponding Source for all GPL/LGPL binaries distributed in KuCode APK builds is available as follows:
 
 1. **PRoot + Samba talloc (`libproot.so`, `libproot-loader.so`):**
    - Exact source archives, 1-line patch, and reproducible cross-compilation script:
@@ -66,14 +66,14 @@ In accordance with GNU GPL v2 (§3), GNU GPL v3 (§6), and GNU LGPL v3 (§4), th
    - The exact binary and source package names and versions bundled in each APK are recorded in `assets/licenses/debian-manifest.txt` (and attached to GitHub Releases).
    - Matching Debian source packages (`.dsc`, `.orig.tar.*`, `.debian.tar.*`) can be retrieved from Debian's official archive (`https://snapshot.debian.org/package/<source_package>/<source_version>/` or `apt-get source <package>=<version>`).
 3. **Three-Year Written Offer:**
-   - For at least **three (3) years** following the distribution of any XR-Editor binary release, upon request via a GitHub Issue at https://github.com/koduki/3d-editor/issues (specifying the APK version / release tag), the project maintainer will provide a complete, machine-readable copy of the Corresponding Source code (including patches and build scripts) for all bundled GPL/LGPL components at no charge via electronic download (or for no more than the physical cost of distribution).
+   - For at least **three (3) years** following the distribution of any KuCode binary release, upon request via a GitHub Issue at https://github.com/koduki/3d-editor/issues (specifying the APK version / release tag), the project maintainer will provide a complete, machine-readable copy of the Corresponding Source code (including patches and build scripts) for all bundled GPL/LGPL components at no charge via electronic download (or for no more than the physical cost of distribution).
 
 ---
 
 ## 4. Trademark Notice
 
-- **"Visual Studio Code"** and **"VS Code"** are registered trademarks of Microsoft Corporation. XR-Editor uses the MIT-licensed OpenVSCode Server project and is not affiliated with, endorsed by, or sponsored by Microsoft Corporation.
+- **"Visual Studio Code"** and **"VS Code"** are registered trademarks of Microsoft Corporation. KuCode uses the MIT-licensed OpenVSCode Server project and is not affiliated with, endorsed by, or sponsored by Microsoft Corporation.
 - **"Debian"** is a registered trademark of Software in the Public Interest, Inc.
 - **"Android"** and **"Android XR"** are trademarks of Google LLC.
-- **"Termux"** is the name of the Termux project; XR-Editor does not bundle Termux's Android app source code.
+- **"Termux"** is the name of the Termux project; KuCode does not bundle Termux's Android app source code.
 - **"XREAL"** is a trademark of XREAL Inc.

@@ -25,7 +25,7 @@
         android:requestLegacyExternalStorage="true"
         android:resizeableActivity="true"
         android:supportsRtl="true"
-        android:theme="@style/Theme.XrEditor">
+        android:theme="@style/Theme.KuCode">
 
         <!-- Launch cleanly in Android XR Home Space alongside other spatial windows -->
         <property
@@ -51,7 +51,7 @@
 
         <!-- Exposes POSIX /workspace as a normal folder in Android XR Files app -->
         <provider
-            android:name=".XrDocumentsProvider"
+            android:name=".KuCodeDocumentsProvider"
             android:authorities="${applicationId}.documents"
             android:exported="true"
             android:grantUriPermissions="true"

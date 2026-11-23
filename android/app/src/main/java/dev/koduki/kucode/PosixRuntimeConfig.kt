@@ -1,4 +1,4 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import org.json.JSONArray
 import org.json.JSONObject
@@ -21,7 +21,7 @@ object PosixRuntimeConfig {
     const val GUEST_HOME = "/root"
     const val GUEST_OPENVSCODE_DIR = "/opt/openvscode-server"
     const val GUEST_OPENVSCODE_BIN = "$GUEST_OPENVSCODE_DIR/bin/openvscode-server"
-    const val GUEST_VSCODE_DATA = "/var/lib/xr-vscode"
+    const val GUEST_VSCODE_DATA = "/var/lib/kucode-vscode"
 
     data class Paths(
         val runtimeRoot: File,
@@ -38,7 +38,9 @@ object PosixRuntimeConfig {
         val shmDir: File get() = File(runtimeRoot, "shm")
         val tmpDir: File get() = File(runtimeRoot, "tmp")
         val vscodeDataDir: File get() = File(runtimeRoot, "vscode-data")
-        val versionMarker: File get() = File(runtimeRoot, ".runtime-version")
+        val machineSettingsFile: File get() = File(vscodeDataDir, "data/Machine/settings.json")
+        val versionMarker: File get() = File(rootfsDir, ".kucode-runtime-version")
+        val backupRootfsDir: File get() = File(runtimeRoot, "rootfs.previous")
 
         val prootBin: File get() = File(nativeLibDir, "libproot.so")
         val prootLoader: File get() = File(nativeLibDir, "libproot-loader.so")
@@ -121,8 +123,8 @@ object PosixRuntimeConfig {
             env["PROOT_NO_SECCOMP"] = "1"
         }
         if (adminPort > 0 && adminToken.isNotEmpty()) {
-            env["XR_ADMIN_PORT"] = adminPort.toString()
-            env["XR_ADMIN_TOKEN"] = adminToken
+            env["KUCODE_ADMIN_PORT"] = adminPort.toString()
+            env["KUCODE_ADMIN_TOKEN"] = adminToken
         }
         return env
     }
@@ -226,22 +228,100 @@ object PosixRuntimeConfig {
     /**
      * Merges missing default keys into an existing settings.json without overwriting
      * values the user has already customized.
+     *
+     * Returns `null` if [existingJson] is non-blank and cannot be parsed as strict JSON
+     * (for example, JSONC with comments or trailing commas) so callers preserve the file
+     * untouched instead of overwriting user settings.
      */
-    fun mergeDefaultVsCodeSettings(existingJson: String?): String {
+    fun mergeDefaultVsCodeSettings(existingJson: String?): String? {
         val defaults = buildMinimalVsCodeSettingsObject()
         if (existingJson.isNullOrBlank()) {
             return defaults.toString(2) + "\n"
         }
+        if (hasJsoncSyntaxOrTrailingContent(existingJson)) {
+            return null
+        }
         val merged = runCatching { JSONObject(existingJson) }.getOrNull()
-            ?: return defaults.toString(2) + "\n"
+            ?: return null
+        var changed = false
         val keys = defaults.keys()
         while (keys.hasNext()) {
             val key = keys.next()
             if (!merged.has(key)) {
                 merged.put(key, defaults.get(key))
+                changed = true
             }
         }
-        return merged.toString(2) + "\n"
+        return if (changed) merged.toString(2) + "\n" else existingJson
+    }
+
+    private fun hasJsoncSyntaxOrTrailingContent(raw: String): Boolean {
+        var i = 0
+        val len = raw.length
+        var inString = false
+        var escaped = false
+        var depth = 0
+        var rootClosed = false
+
+        while (i < len) {
+            val c = raw[i]
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (c == '\\') {
+                    escaped = true
+                } else if (c == '"') {
+                    inString = false
+                }
+                i++
+                continue
+            }
+
+            if (c.isWhitespace()) {
+                i++
+                continue
+            }
+
+            if (rootClosed) return true
+
+            if (c == '"') {
+                if (depth == 0) return true
+                inString = true
+                i++
+                continue
+            }
+
+            if (c == '/' && i + 1 < len && (raw[i + 1] == '/' || raw[i + 1] == '*')) {
+                return true
+            }
+
+            if (c == '{' || c == '[') {
+                if (depth == 0 && c != '{') return true
+                depth++
+                i++
+                continue
+            }
+
+            if (c == '}' || c == ']') {
+                depth--
+                if (depth < 0) return true
+                if (depth == 0) rootClosed = true
+                i++
+                continue
+            }
+
+            if (c == ',') {
+                var j = i + 1
+                while (j < len && raw[j].isWhitespace()) j++
+                if (j < len && (raw[j] == '}' || raw[j] == ']')) {
+                    return true
+                }
+            }
+
+            i++
+        }
+
+        return inString || !rootClosed || depth != 0
     }
 
     fun buildFakeSysdataFiles(cpuCount: Int = 4): Map<String, String> {
@@ -257,7 +337,7 @@ object PosixRuntimeConfig {
             "stat" to statBuilder.toString(),
             "loadavg" to "0.10 0.08 0.05 1/120 100\n",
             "uptime" to "3600.00 7200.00\n",
-            "version" to "Linux version 6.6.0-android-xr (xr-editor) #1 SMP PREEMPT aarch64\n",
+            "version" to "Linux version 6.6.0-android-xr (kucode) #1 SMP PREEMPT aarch64\n",
             "vmstat" to "nr_free_pages 262144\nnr_active_anon 65536\npgpgin 1024\npgpgout 512\n",
         )
     }
@@ -277,31 +357,31 @@ object PosixRuntimeConfig {
     }
 
     fun buildDefaultBashrc(): String = """
-        # XR-Editor persistent Debian shell config (/root is mounted outside rootfs)
+        # KuCode persistent Debian shell config (/root is mounted outside rootfs)
         export LANG=C.UTF-8
         export LC_ALL=C.UTF-8
         export HISTCONTROL=ignoredups:erasedups
         export HISTSIZE=2000
         alias ls='ls --color=auto'
         alias ll='ls -la'
-        PS1='\[\e[36m\]xr\[\e[0m\]:\[\e[32m\]\w\[\e[0m\]\$ '
+        PS1='\[\e[36m\]kucode\[\e[0m\]:\[\e[32m\]\w\[\e[0m\]\$ '
     """.trimIndent() + "\n"
 
     fun buildWelcomeReadme(): String = """
-# XR-Editor Workspace (`/workspace`)
+# KuCode Workspace (`/workspace`)
 
-Android XR 向けの単体完結エディタ（Debian minimal + 内蔵 `openvscode-server`）です。
+**空間に、書く。** — APK 1 本で完結する、空間コンピューティングのためのコードエディタ（Debian minimal + 内蔵 `openvscode-server`）です。
 
 ## 基本操作（物理キーボード）
 - **ファイルを開く**: 左サイドバーをクリック、または `Ctrl+P` / `Ctrl+O`
 - **保存する**: `Ctrl+S`
 - **タブを閉じる**: `Ctrl+W`
-- **ターミナル開閉**: `Ctrl+J` または左端 **XR-Editor** メニューの「ターミナル開閉」
-- **実機チェック / 表示サイズ / OST・VST切替**: 左端 Activity Bar の **XR-Editor** アイコン（または `Ctrl+Alt+D`）
+- **ターミナル開閉**: `Ctrl+J` または左端 **KuCode** メニューの「ターミナル開閉」
+- **実機チェック / 表示サイズ / OST・VST切替**: 左端 Activity Bar の **KuCode** アイコン（または `Ctrl+Alt+D`）
 
 ## Android ↔ POSIX ファイル共有 & 永続領域
 - **POSIX → Android**: `/workspace/android`（`/android/shared` および全ファイルアクセス許可時は `/android/sdcard`）
-- **Android → POSIX**: Android XR の「Files」アプリから **XR-Editor** を開くと、この `/workspace` が通常のフォルダとして直接読み書きできます。
+- **Android → POSIX**: Android XR の「Files」アプリから **KuCode** を開くと、この `/workspace` が通常のフォルダとして直接読み書きできます。
 - **永続ホーム (`/root`)**: `~/.ssh`, `~/.gitconfig`, `~/.config/gh` は rootfs 外に分離保存されるため、アプリ更新後も引き継がれます。
 
 ## `gh` / `git` などの CLI 導入（POSIX ターミナル内）

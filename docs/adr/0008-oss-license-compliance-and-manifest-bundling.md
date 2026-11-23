@@ -17,7 +17,7 @@
 
 ## 決定事項（Decision）
 
-1. **XR-Editor 本体のライセンス**：ルートに [LICENSE](../../LICENSE)（**MIT License**）を配置し、同梱サードパーティは各自のライセンスを維持する構造を明示する。
+1. **KuCode 本体のライセンス**：ルートに [LICENSE](../../LICENSE)（**MIT License**）を配置し、同梱サードパーティは各自のライセンスを維持する構造を明示する。
 2. **ライセンス全文の一元管理と APK 自動同梱**：
    - 公式ライセンス全文（`Apache-2.0.txt`, `GPL-2.0.txt`, `GPL-3.0.txt`, `LGPL-2.1.txt`, `LGPL-3.0.txt`, `MIT-OpenVSCode.txt`）を `LICENSES/` に配置する。
    - `scripts/fetch-runtime-assets.sh` で `debian-arm64-rootfs.tgz` 内の `var/lib/dpkg/status` を直接解析（x86_64 CI でもエミュレーション不要）し、イメージダイジェスト・SHA-256・全バイナリ/ソースパッケージ対応表を `debian-manifest.txt` として自動生成する。
@@ -32,7 +32,7 @@
 - **代替案 A：リポジトリのルートにだけ `THIRD_PARTY_NOTICES.md` を置き、APK 内には入れない**
   - バイナリ単体（APK）を受け取ったユーザーにライセンス本文・著作権表示が渡らず、MIT / Apache-2.0 / GPL のバイナリ配布要件を満たさないため不採用。
 - **代替案 B：Debian / OpenVSCode を APK 同梱せず初回オンラインダウンロード方式へ切り替える**
-  - Debian の再配布義務自体は消滅するが、v0.5.0 の「APK 1 本で完結」という中核コンセプト（ADR-0001 / ADR-0003）を優先し、今回はマニフェスト自動生成＋同梱＋書面提供オファーで適法性を担保した。
+  - Debian の再配布義務自体は消滅するが、KuCode の「APK 1 本で完結」という中核コンセプト（ADR-0001 / ADR-0003）を優先し、今回はマニフェスト自動生成＋同梱＋書面提供オファーで適法性を担保した。
 
 ## 影響とトレードオフ（Consequences）
 
@@ -46,6 +46,6 @@
 - [LICENSES/](../../LICENSES/)
 - [scripts/fetch-runtime-assets.sh](../../scripts/fetch-runtime-assets.sh)
 - [android/app/build.gradle.kts](../../android/app/build.gradle.kts)
-- [BootHostBridge.kt](../../android/app/src/main/java/dev/koduki/xreditor/BootHostBridge.kt)
+- [BootHostBridge.kt](../../android/app/src/main/java/dev/koduki/kucode/BootHostBridge.kt)
 - [android/app/src/main/assets/boot.html](../../android/app/src/main/assets/boot.html)
 - [.github/workflows/ci.yml](../../.github/workflows/ci.yml)

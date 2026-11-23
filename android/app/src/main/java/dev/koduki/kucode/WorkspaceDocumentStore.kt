@@ -1,0 +1,235 @@
+package dev.koduki.kucode
+
+import java.io.File
+import java.io.FileNotFoundException
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
+import java.util.ArrayDeque
+
+/**
+ * Pure-JVM filesystem layer for [KuCodeDocumentsProvider] enforcing strict confinement
+ * to `/workspace` without following symbolic links during listing, search, or deletion.
+ */
+internal object WorkspaceDocumentStore {
+
+    const val ROOT_ID = "kucode_workspace"
+    const val ROOT_DOC_ID = "workspace"
+    const val MAX_SEARCH_RESULTS = 50
+
+    fun docIdForFile(baseDir: File, file: File): String {
+        val baseReal = baseDir.toPath().toRealPath()
+        val normalized = normalizeWithinBase(baseReal, file.toPath())
+            ?: throw FileNotFoundException("Path outside workspace: $file")
+        if (normalized == baseReal) return ROOT_DOC_ID
+        val rel = baseReal.relativize(normalized).toString().replace(File.separatorChar, '/')
+        return "$ROOT_DOC_ID/$rel"
+    }
+
+    fun fileForDocId(baseDir: File, docId: String): File {
+        val baseReal = baseDir.toPath().toRealPath()
+        val candidate = when {
+            docId == ROOT_DOC_ID || docId == ROOT_ID -> baseReal
+            docId.startsWith("$ROOT_DOC_ID/") -> {
+                val rel = docId.removePrefix("$ROOT_DOC_ID/")
+                if (rel.isEmpty()) throw FileNotFoundException("Empty relative documentId: $docId")
+                baseReal.resolve(rel).normalize()
+            }
+            else -> throw FileNotFoundException("Unknown documentId: $docId")
+        }
+        if (!isSafeDescendantNoSymlinks(baseReal, candidate) ||
+            !Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            throw FileNotFoundException("Document not found: $docId")
+        }
+        return candidate.toFile()
+    }
+
+    fun listChildren(baseDir: File, parent: File): List<File> {
+        val baseReal = baseDir.toPath().toRealPath()
+        val parentPath = parent.toPath().toAbsolutePath().normalize()
+        if (!isSafeDescendantNoSymlinks(baseReal, parentPath) ||
+            !Files.isDirectory(parentPath, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            return emptyList()
+        }
+        val children = mutableListOf<File>()
+        try {
+            Files.newDirectoryStream(parentPath).use { stream ->
+                for (child in stream) {
+                    if (Files.isSymbolicLink(child)) continue
+                    if (!isSafeDescendantNoSymlinks(baseReal, child)) continue
+                    children.add(child.toFile())
+                }
+            }
+        } catch (_: IOException) {
+            return emptyList()
+        }
+        children.sortBy { it.name.lowercase() }
+        return children
+    }
+
+    fun search(baseDir: File, query: String, maxResults: Int = MAX_SEARCH_RESULTS): List<File> {
+        val baseReal = baseDir.toPath().toRealPath()
+        val needle = query.lowercase()
+        val matches = mutableListOf<File>()
+        val queue = ArrayDeque<Path>()
+        val visited = HashSet<Path>()
+        queue.add(baseReal)
+        visited.add(baseReal)
+
+        while (queue.isNotEmpty() && matches.size < maxResults) {
+            val current = queue.removeFirst()
+            try {
+                Files.newDirectoryStream(current).use { stream ->
+                    for (child in stream) {
+                        if (Files.isSymbolicLink(child)) continue
+                        val attrs = try {
+                            Files.readAttributes(child, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                        } catch (_: IOException) {
+                            continue
+                        }
+                        if (attrs.isSymbolicLink) continue
+                        if (attrs.isDirectory) {
+                            val realChild = try {
+                                child.toRealPath()
+                            } catch (_: IOException) {
+                                continue
+                            }
+                            if (!realChild.startsWith(baseReal)) continue
+                            if (visited.add(realChild)) {
+                                queue.add(child)
+                            }
+                        } else if (attrs.isRegularFile) {
+                            if (child.fileName.toString().lowercase().contains(needle)) {
+                                matches.add(child.toFile())
+                                if (matches.size >= maxResults) break
+                            }
+                        }
+                    }
+                }
+            } catch (_: IOException) {
+                continue
+            }
+        }
+        return matches
+    }
+
+    fun create(baseDir: File, parent: File, isDirectory: Boolean, displayName: String): File {
+        val baseReal = baseDir.toPath().toRealPath()
+        val parentPath = parent.toPath().toAbsolutePath().normalize()
+        if (!isSafeDescendantNoSymlinks(baseReal, parentPath) ||
+            !Files.isDirectory(parentPath, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            throw FileNotFoundException("Invalid parent directory")
+        }
+        val safeName = sanitizeDisplayName(displayName)
+        var target = parentPath.resolve(safeName)
+        var suffix = 2
+        while (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            target = parentPath.resolve("$safeName ($suffix)")
+            suffix++
+        }
+        if (!isSafeDescendantNoSymlinks(baseReal, target)) {
+            throw FileNotFoundException("Invalid path: $displayName")
+        }
+        try {
+            if (isDirectory) {
+                Files.createDirectory(target)
+            } else {
+                Files.createFile(target)
+            }
+        } catch (e: IOException) {
+            throw FileNotFoundException("Failed to create ${target.fileName}: ${e.message}")
+        }
+        return target.toFile()
+    }
+
+    fun rename(baseDir: File, source: File, displayName: String): File {
+        val baseReal = baseDir.toPath().toRealPath()
+        val sourcePath = source.toPath().toAbsolutePath().normalize()
+        if (sourcePath == baseReal || !isSafeDescendantNoSymlinks(baseReal, sourcePath)) {
+            throw FileNotFoundException("Cannot rename ${source.name}")
+        }
+        val parentPath = sourcePath.parent ?: throw FileNotFoundException("Cannot rename root")
+        val targetPath = parentPath.resolve(sanitizeDisplayName(displayName)).normalize()
+        if (!isSafeDescendantNoSymlinks(baseReal, targetPath) ||
+            Files.exists(targetPath, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            throw FileNotFoundException("Failed to rename ${source.name} to $displayName")
+        }
+        try {
+            Files.move(sourcePath, targetPath)
+        } catch (e: IOException) {
+            throw FileNotFoundException("Failed to rename ${source.name} to $displayName: ${e.message}")
+        }
+        return targetPath.toFile()
+    }
+
+    fun delete(baseDir: File, target: File) {
+        val baseReal = baseDir.toPath().toRealPath()
+        val targetPath = target.toPath().toAbsolutePath().normalize()
+        if (targetPath == baseReal) {
+            throw FileNotFoundException("Cannot delete workspace root")
+        }
+        if (!hasSafeAncestorsNoSymlinks(baseReal, targetPath) ||
+            !Files.exists(targetPath, LinkOption.NOFOLLOW_LINKS)
+        ) {
+            throw FileNotFoundException("Cannot delete path outside workspace: $target")
+        }
+        try {
+            deleteTreeNoFollow(targetPath)
+        } catch (e: IOException) {
+            throw FileNotFoundException("Failed to delete ${target.name}: ${e.message}")
+        }
+    }
+
+    fun isChildDocument(parentDocumentId: String, documentId: String): Boolean {
+        val normalizedParent = parentDocumentId.trimEnd('/')
+        return documentId == normalizedParent || documentId.startsWith("$normalizedParent/")
+    }
+
+    fun sanitizeDisplayName(raw: String): String {
+        val trimmed = raw.trim().replace('/', '_').replace('\\', '_')
+        if (trimmed.isEmpty() || trimmed == "." || trimmed == "..") {
+            throw FileNotFoundException("Invalid display name: $raw")
+        }
+        return trimmed
+    }
+
+    private fun normalizeWithinBase(baseReal: Path, candidate: Path): Path? {
+        val normalized = candidate.toAbsolutePath().normalize()
+        return if (normalized.startsWith(baseReal)) normalized else null
+    }
+
+    /**
+     * Checks that [candidate] is inside [baseReal] and that neither any ancestor under
+     * [baseReal] nor [candidate] itself is a symbolic link.
+     */
+    internal fun isSafeDescendantNoSymlinks(baseReal: Path, candidate: Path): Boolean {
+        val normalized = normalizeWithinBase(baseReal, candidate) ?: return false
+        if (normalized == baseReal) return true
+        val relative = baseReal.relativize(normalized)
+        var current = baseReal
+        for (segment in relative) {
+            if (segment.toString() == "..") return false
+            current = current.resolve(segment)
+            if (Files.isSymbolicLink(current)) return false
+        }
+        return true
+    }
+
+    /**
+     * Checks that [target] is strictly under [baseReal] and no ancestor directory
+     * between [baseReal] and [target] is a symbolic link (allowing [target] itself
+     * to be unlinked safely if it is a symbolic link).
+     */
+    private fun hasSafeAncestorsNoSymlinks(baseReal: Path, target: Path): Boolean {
+        val normalized = normalizeWithinBase(baseReal, target) ?: return false
+        if (normalized == baseReal) return false
+        val parent = normalized.parent ?: return false
+        return isSafeDescendantNoSymlinks(baseReal, parent)
+    }
+}

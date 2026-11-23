@@ -1,0 +1,107 @@
+{
+  "name": "kucode-tools",
+  "displayName": "KuCode Diagnostics & Tools",
+  "description": "Built-in Android XR diagnostics, optical presets, log viewer, and storage menu for KuCode",
+  "version": "0.5.2",
+  "publisher": "koduki",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kucode.openMenu",
+        "title": "KuCode: チェック & 管理メニューを開く",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "kucode.runDiagnostics",
+        "title": "KuCode: 実機チェックを実行（レポートを開く & コピー）"
+      },
+      {
+        "command": "kucode.openLogs",
+        "title": "KuCode: 起動・エラーログを開く"
+      },
+      {
+        "command": "kucode.toggleTerminal",
+        "title": "KuCode: 統合ターミナルを開閉"
+      },
+      {
+        "command": "kucode.selectDisplayScale",
+        "title": "KuCode: 表示サイズ・ズームを変更（標準 / 大 / 特大）"
+      },
+      {
+        "command": "kucode.selectOpticalTheme",
+        "title": "KuCode: 光学テーマを切替（OST 純黒 / VST 暗灰）"
+      },
+      {
+        "command": "kucode.openManager",
+        "title": "KuCode: 管理画面を開く（ミニCLI / ストレージ許可 / 再起動）"
+      },
+      {
+        "command": "kucode.requestStorage",
+        "title": "KuCode: Android ストレージアクセスを許可"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "kucode.openMenu",
+          "group": "navigation@999"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "kucode.runDiagnostics",
+          "group": "z_kucode@1"
+        },
+        {
+          "command": "kucode.openLogs",
+          "group": "z_kucode@2"
+        },
+        {
+          "command": "kucode.openManager",
+          "group": "z_kucode@3"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "kucode.runDiagnostics",
+          "group": "z_kucode@1"
+        },
+        {
+          "command": "kucode.openLogs",
+          "group": "z_kucode@2"
+        },
+        {
+          "command": "kucode.openManager",
+          "group": "z_kucode@3"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kucode",
+          "title": "KuCode",
+          "icon": "icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "kucode": [
+        {
+          "id": "kucode.menuView",
+          "name": "実機チェック & 空間表示"
+        }
+      ]
+    }
+  }
+}

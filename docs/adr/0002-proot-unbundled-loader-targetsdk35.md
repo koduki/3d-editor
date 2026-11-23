@@ -39,6 +39,6 @@ Termux はこれを回避するため `targetSdk = 28` に留める戦略を採�
 
 - [scripts/build-proot-android.sh](../../scripts/build-proot-android.sh)
 - [android/app/build.gradle.kts](../../android/app/build.gradle.kts)
-- [PosixRuntimeConfig.kt](../../android/app/src/main/java/dev/koduki/xreditor/PosixRuntimeConfig.kt)
-- [PosixRuntimeManager.kt](../../android/app/src/main/java/dev/koduki/xreditor/PosixRuntimeManager.kt)
-- [ServerKeepAliveService.kt](../../android/app/src/main/java/dev/koduki/xreditor/ServerKeepAliveService.kt)
+- [PosixRuntimeConfig.kt](../../android/app/src/main/java/dev/koduki/kucode/PosixRuntimeConfig.kt)
+- [PosixRuntimeManager.kt](../../android/app/src/main/java/dev/koduki/kucode/PosixRuntimeManager.kt)
+- [ServerKeepAliveService.kt](../../android/app/src/main/java/dev/koduki/kucode/ServerKeepAliveService.kt)

@@ -1,4 +1,4 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -44,7 +44,7 @@ object TarGzExtractor {
             linkPath.parentFile?.mkdirs()
             try {
                 Files.createLink(linkPath.toPath(), existingTarget.toPath())
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 existingTarget.copyTo(linkPath, overwrite = true)
                 linkPath.setExecutable(existingTarget.canExecute(), false)
             }
@@ -65,7 +65,7 @@ object TarGzExtractor {
             if ((perm and 0b000_000_001) != 0) perms.add(PosixFilePermission.OTHERS_EXECUTE)
             try {
                 Files.setPosixFilePermissions(file.toPath(), perms)
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 file.setReadable((perm and 0b100_000_000) != 0, (perm and 0b000_100_100) == 0)
                 file.setWritable((perm and 0b010_000_000) != 0, (perm and 0b000_010_010) == 0)
                 file.setExecutable((perm and 0b001_000_000) != 0, (perm and 0b000_001_001) == 0)

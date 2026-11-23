@@ -1,4 +1,4 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -16,33 +16,51 @@ import androidx.core.app.NotificationCompat
  * Keeps the embedded PRoot + openvscode-server process alive while the user
  * focuses sibling windows in Android XR Home Space.
  *
+ * Uses `START_NOT_STICKY` so a process kill does not resurrect a ghost service
+ * with a misleading "running" notification when no server process exists.
  * Implements Android 15 (API 35) `onTimeout` for `dataSync` FGS so exceeding
  * the OS 6-hour daily quota degrades gracefully instead of crashing the app.
  */
 class ServerKeepAliveService : Service() {
 
+    internal enum class KeepAliveAction {
+        START_FOREGROUND_AND_RUNTIME,
+        STOP_RUNTIME_AND_SERVICE,
+        STOP_SERVICE_ONLY,
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            PosixRuntimeManager.getInstance(this).stop()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
-        }
+        when (resolveAction(intent?.action, hasIntent = intent != null)) {
+            KeepAliveAction.STOP_RUNTIME_AND_SERVICE -> {
+                PosixRuntimeManager.getInstance(this).stop()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
 
-        ensureNotificationChannel()
-        val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+            KeepAliveAction.STOP_SERVICE_ONLY -> {
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+
+            KeepAliveAction.START_FOREGROUND_AND_RUNTIME -> {
+                ensureNotificationChannel()
+                val notification = buildNotification()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+                PosixRuntimeManager.getInstance(this).startIfNeeded()
+                return START_NOT_STICKY
+            }
         }
-        return START_STICKY
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
@@ -96,9 +114,15 @@ class ServerKeepAliveService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "xr_editor_server"
+        private const val CHANNEL_ID = "kucode_server"
         private const val NOTIFICATION_ID = 2050
-        private const val ACTION_STOP = "dev.koduki.xreditor.action.STOP_SERVER"
+        internal const val ACTION_STOP = "dev.koduki.kucode.action.STOP_SERVER"
+
+        internal fun resolveAction(intentAction: String?, hasIntent: Boolean): KeepAliveAction = when {
+            !hasIntent -> KeepAliveAction.STOP_SERVICE_ONLY
+            intentAction == ACTION_STOP -> KeepAliveAction.STOP_RUNTIME_AND_SERVICE
+            else -> KeepAliveAction.START_FOREGROUND_AND_RUNTIME
+        }
 
         fun start(context: Context) {
             runCatching {

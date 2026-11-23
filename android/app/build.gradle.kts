@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.koduki.xreditor"
+    namespace = "dev.koduki.kucode"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "dev.koduki.xreditor"
+        applicationId = "dev.koduki.kucode"
         minSdk = 34
         targetSdk = 35
         versionCode = 5
@@ -109,6 +109,31 @@ tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("Assets")) {
         dependsOn(syncLicenseAssets)
     }
+}
+
+tasks.withType<Test>().configureEach {
+    if (name == "testDebugUnitTest" || name == "testReleaseUnitTest") {
+        useJUnit {
+            excludeCategories("dev.koduki.kucode.MediumTest")
+        }
+    }
+}
+
+val testDebugMediumUnitTest by tasks.registering(Test::class) {
+    description = "Runs medium unit tests (subprocesses, loopback sockets, bundled archives) for the debug build."
+    group = "verification"
+    val debugUnitTest = tasks.named<Test>("testDebugUnitTest")
+    dependsOn(debugUnitTest.map { it.taskDependencies })
+    testClassesDirs = files(debugUnitTest.map { it.testClassesDirs })
+    classpath = files(debugUnitTest.map { it.classpath })
+    useJUnit {
+        includeCategories("dev.koduki.kucode.MediumTest")
+    }
+    shouldRunAfter(debugUnitTest)
+}
+
+tasks.named("check") {
+    dependsOn(testDebugMediumUnitTest)
 }
 
 dependencies {
