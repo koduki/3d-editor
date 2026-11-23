@@ -47,7 +47,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: android/app/src/main/assets/runtime
-          key: runtime-debian12-openvscode-1.109.5-v1
+          key: runtime-debian12-openvscode-1.109.5-tgz-v2
 
       - name: Fetch Debian Minimal Rootfs & OpenVSCode Server
         run: ./scripts/fetch-runtime-assets.sh
@@ -64,11 +64,11 @@ jobs:
         run: |
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           ls -lh "$APK"
-          unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tar\.gz|openvscode-server-linux-arm64\.tar\.gz|boot\.html"
+          unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tgz|openvscode-server-linux-arm64\.tgz|boot\.html"
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot.so"
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot-loader.so"
-          unzip -l "$APK" | grep -q "assets/runtime/debian-arm64-rootfs.tar.gz"
-          unzip -l "$APK" | grep -q "assets/runtime/openvscode-server-linux-arm64.tar.gz"
+          unzip -l "$APK" | grep -q "assets/runtime/debian-arm64-rootfs.tgz"
+          unzip -l "$APK" | grep -q "assets/runtime/openvscode-server-linux-arm64.tgz"
           mkdir -p dist-apk
           cp "$APK" "dist-apk/xr-editor-debug-${GITHUB_SHA::7}.apk"
           cp "$APK" "dist-apk/xr-editor-debug.apk"

@@ -11,8 +11,8 @@ import java.io.File
 object PosixRuntimeConfig {
 
     const val RUNTIME_VERSION = "0.5.0-debian12-openvscode-1.109.5"
-    const val ASSET_ROOTFS = "runtime/debian-arm64-rootfs.tar.gz"
-    const val ASSET_OPENVSCODE = "runtime/openvscode-server-linux-arm64.tar.gz"
+    const val ASSET_ROOTFS = "runtime/debian-arm64-rootfs.tgz"
+    const val ASSET_OPENVSCODE = "runtime/openvscode-server-linux-arm64.tgz"
 
     const val GUEST_WORKSPACE = "/workspace"
     const val GUEST_OPENVSCODE_DIR = "/opt/openvscode-server"

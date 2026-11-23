@@ -13,8 +13,8 @@ OPENVSCODE_VERSION="${OPENVSCODE_VERSION:-1.109.5}"
 OPENVSCODE_TAG="openvscode-server-v${OPENVSCODE_VERSION}"
 OPENVSCODE_URL="https://github.com/gitpod-io/openvscode-server/releases/download/${OPENVSCODE_TAG}/${OPENVSCODE_TAG}-linux-arm64.tar.gz"
 
-ROOTFS_OUT="$OUT_DIR/debian-arm64-rootfs.tar.gz"
-VSCODE_OUT="$OUT_DIR/openvscode-server-linux-arm64.tar.gz"
+ROOTFS_OUT="$OUT_DIR/debian-arm64-rootfs.tgz"
+VSCODE_OUT="$OUT_DIR/openvscode-server-linux-arm64.tgz"
 
 mkdir -p "$OUT_DIR"
 

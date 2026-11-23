@@ -50,8 +50,9 @@ android {
     }
 
     androidResources {
-        // Keep embedded Debian rootfs & openvscode-server tar.gz uncompressed inside the APK
-        noCompress += listOf("gz", "tar", "xz")
+        // Keep embedded Debian rootfs & openvscode-server .tgz uncompressed inside the APK
+        // (using .tgz avoids AGP's legacy auto-gunzip behavior on .gz assets)
+        noCompress += listOf("tgz", "tar", "xz")
     }
 
     compileOptions {
