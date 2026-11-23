@@ -1,6 +1,6 @@
 # KuCode
 
-**空間で、書く。**
+**空間に、書く。**
 *Code in the space. — A self-contained code editor for spatial computing.*
 
 XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエディタ。
