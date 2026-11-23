@@ -117,6 +117,9 @@ curl -fSL "$PROOT_URL" -o "$WORK_DIR/proot.tar.gz"
 tar -xzf "$WORK_DIR/proot.tar.gz" -C "$WORK_DIR"
 PROOT_SRC="$WORK_DIR/proot-${PROOT_VERSION}"
 
+# NDK r27+ Clang treats implicit strcmp/memset declarations as errors
+sed -i '1i #include <string.h>' "$PROOT_SRC/src/extension/ashmem_memfd/ashmem_memfd.c"
+
 echo "[proot] Compiling proot + unbundled loader for Android arm64-v8a..."
 (
   cd "$PROOT_SRC/src"
