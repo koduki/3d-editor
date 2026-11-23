@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">XR-Editor</string>
+    <string name="app_name">KuCode</string>
     <string name="documents_root_summary">POSIX /workspace</string>
-    <string name="keepalive_channel_name">XR-Editor サーバー維持</string>
-    <string name="keepalive_notification_title">XR-Editor 起動中</string>
+    <string name="keepalive_channel_name">KuCode サーバー維持</string>
+    <string name="keepalive_notification_title">KuCode 起動中</string>
     <string name="keepalive_notification_text">内蔵 openvscode-server (Debian POSIX) が稼働しています</string>
     <string name="keepalive_action_stop">停止</string>
 </resources>

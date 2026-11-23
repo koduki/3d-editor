@@ -1,4 +1,4 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import android.annotation.SuppressLint
 import android.content.ClipData
@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Single-window Android XR Activity hosting:
- * 1. Pure-black boot/diagnostics page (`file:///android_asset/boot.html`) with isolated `XREditorHost` bridge
+ * 1. Pure-black boot/diagnostics page (`file:///android_asset/boot.html`) with isolated `KuCodeHost` bridge
  * 2. Dedicated authenticated editor WebView, without a native bridge, with
  *    native trusted KeyEvents flowing directly to Monaco / xterm.js, and XR multi-window focus dimming
  */
@@ -134,7 +134,7 @@ class MainActivity : AppCompatActivity() {
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
             }
-            addJavascriptInterface(bootBridge, "XREditorHost")
+            addJavascriptInterface(bootBridge, "KuCodeHost")
             loadUrl("file:///android_asset/boot.html")
         }
 
@@ -205,10 +205,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        val snapshot = runtimeManager.getStatus()
         // Re-assert foreground keep-alive if Android 15 dataSync service timed out earlier
-        ServerKeepAliveService.start(this)
+        if (snapshot.state != PosixRuntimeManager.State.IDLE) {
+            ServerKeepAliveService.start(this)
+        }
         if (!showingEditor && ::bootView.isInitialized) {
-            val snapshot = runtimeManager.getStatus()
             bootView.evaluateJavascript(
                 "window.__onHostStatus && window.__onHostStatus(${snapshot.toJsonString()});",
                 null,
@@ -237,7 +239,7 @@ class MainActivity : AppCompatActivity() {
             ServerKeepAliveService.stop(this)
         }
         rootFrame.removeAllViews()
-        bootView.removeJavascriptInterface("XREditorHost")
+        bootView.removeJavascriptInterface("KuCodeHost")
         bootView.destroy()
         webView.destroy()
         super.onDestroy()
@@ -280,7 +282,7 @@ class MainActivity : AppCompatActivity() {
             runCatching {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     ?: return@runCatching false
-                val clip = ClipData.newPlainText("XR-Editor Diagnostics", text)
+                val clip = ClipData.newPlainText("KuCode Diagnostics", text)
                 clipboard.setPrimaryClip(clip)
                 true
             }.getOrDefault(false)

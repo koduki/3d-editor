@@ -11,13 +11,13 @@ Android XR 実機（XREAL AURA 等）はエミュレータと異なり、カー�
 
 1. **アプリ内蔵の非破壊・並列診断スクリプト（`DiagnosticsRunner`）**
    - 端末基礎情報（端末名・Android API・ABI・4KB/16KB ページサイズ・SELinux・WebView・ディスプレイ・接続中 KB/Mouse・システム DNS・バッテリー最適化・通知・ストレージ/メモリ等）を収集。
-   - ネイティブバイナリ確認・展開確認・`XrDocumentsProvider` の共有ルート確認・PRoot Gate 1（`PROOT_NO_SECCOMP=1` 自動プローブ含む）を実行したうえで、**5 系統の POSIX プローブを並列実行**する：
+   - ネイティブバイナリ確認・展開確認・`KuCodeDocumentsProvider` の共有ルート確認・PRoot Gate 1（`PROOT_NO_SECCOMP=1` 自動プローブ含む）を実行したうえで、**5 系統の POSIX プローブを並列実行**する：
      1. Node.js & `openvscode-server` バージョン
      2. `node-pty` でシェルへ入力し、サイズ変更後の行・列とシェルが読み取った一意な文字列を照合
      3. `@parcel/watcher` で作業領域の一時ディレクトリを購読し、作成したファイルのイベントを照合
      4. Android DocumentsProvider で一時ファイルを作成し、ゲストの `/workspace` で照合・上書きし、Android 側で読み戻して削除。永続ホームとアプリ共有領域もホストとゲストの双方から一時ファイルの内容を照合する
      5. DNS 解決・Debian apt HTTP・GitHub HTTPS・`dpkg`/`apt`/`git`/`gh`/`curl`
-   - 直近 80 行のサーバー／エラーログを含めた単一の Markdown レポートに整形し、VS Code 内からはタブ表示＋Android ネイティブクリップボード自動コピー、`boot.html` からはボタン 1 つ（および起動エラー時は自動実行）で取得可能にする。
+   - 直近 80 行のサーバー／エラーログを含めた単一の Markdown レポートに整形し、エディタ内からはタブ表示＋Android ネイティブクリップボード自動コピー、`boot.html` からはボタン 1 つ（および起動エラー時は自動実行）で取得可能にする。
 2. **非 PTY フォールバック CLI コンソール（`boot.html`）**
    - 万一 `node-pty` が動かない端末でも最低限の CLI・`apt` 操作を継続できるよう、`boot.html` から `PosixRuntimeManager.runShellCommand()` 経由で PRoot の `bash -lc` を実行可能にする。
    - `runShellCommand()` は稼働中サーバーの設定ファイルを書き換えないよう `ensureMountPointDirsExist()` に分離する。
@@ -27,7 +27,7 @@ Android XR 実機（XREAL AURA 等）はエミュレータと異なり、カー�
 - **代替案 A：`adb logcat` と手動シェルコマンドで実機調査する**
   - 実機単体で完結せず、毎回コマンドを打つ負担が大きいため不採用。
 - **代替案 B：プローブを直列実行する**
-  - ネットワーク遅延時に `LocalDiagnosticsServer` のソケットタイムアウト（60 秒）に近づく恐れがあったため、Gate 1 通過後の プローブを `coroutineScope { async { ... } }` で並列化した。
+  - ネットワーク遅延時に `LocalDiagnosticsServer` のソケットタイムアウト（60 秒）に近づく恐れがあったため、Gate 1 通過後のプローブを `coroutineScope { async { ... } }` で並列化した。
 
 ## 影響とトレードオフ（Consequences）
 
@@ -36,7 +36,7 @@ Android XR 実機（XREAL AURA 等）はエミュレータと異なり、カー�
 
 ## 該当実装
 
-- [DiagnosticsRunner.kt](../../android/app/src/main/java/dev/koduki/xreditor/DiagnosticsRunner.kt)
-- [DiagnosticsRunnerTest.kt](../../android/app/src/test/java/dev/koduki/xreditor/DiagnosticsRunnerTest.kt)
+- [DiagnosticsRunner.kt](../../android/app/src/main/java/dev/koduki/kucode/DiagnosticsRunner.kt)
+- [DiagnosticsRunnerTest.kt](../../android/app/src/test/java/dev/koduki/kucode/DiagnosticsRunnerTest.kt)
 - [android/app/src/main/assets/boot.html](../../android/app/src/main/assets/boot.html)
-- [PosixRuntimeManager.kt](../../android/app/src/main/java/dev/koduki/xreditor/PosixRuntimeManager.kt)
+- [PosixRuntimeManager.kt](../../android/app/src/main/java/dev/koduki/kucode/PosixRuntimeManager.kt)

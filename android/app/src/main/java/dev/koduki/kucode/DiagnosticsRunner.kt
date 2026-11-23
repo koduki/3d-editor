@@ -1,4 +1,4 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import android.app.ActivityManager
 import android.app.NotificationManager
@@ -48,7 +48,7 @@ object DiagnosticsRunner {
 
     fun formatMarkdownReport(input: ReportInput): String {
         val sb = StringBuilder()
-        sb.appendLine("# XR-Editor 実機診断レポート")
+        sb.appendLine("# KuCode 実機診断レポート")
         sb.appendLine("- Timestamp (UTC): `${input.timestampUtc}`")
         sb.appendLine()
 
@@ -194,7 +194,7 @@ object DiagnosticsRunner {
 
     internal fun nativeProbeCommand(mode: String, script: String): String {
         require(mode == "pty" || mode == "watcher")
-        return "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node - $mode <<'XR_PROBE_JS'\n$script\nXR_PROBE_JS"
+        return "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node - $mode <<'KUCODE_PROBE_JS'\n$script\nKUCODE_PROBE_JS"
     }
 
     internal fun networkChecks(): Map<String, String> {
@@ -337,33 +337,37 @@ object DiagnosticsRunner {
                 val id = UUID.randomUUID()
                 val root = DocumentsContract.buildDocumentUri(authority, rootId)
                 step = "一時ドキュメントの作成"
-                val doc = checkNotNull(DocumentsContract.createDocument(resolver, root, "text/plain", ".xr-files-$id"))
-                try {
-                    step = "Android Files の一覧に表示"
-                    val idColumn = DocumentsContract.Document.COLUMN_DOCUMENT_ID
-                    val children = DocumentsContract.buildChildDocumentsUri(authority, rootId)
-                    val expectedId = DocumentsContract.getDocumentId(doc)
-                    val listed = resolver.query(children, arrayOf(idColumn), null, null, null)?.use { cursor ->
-                        val index = cursor.getColumnIndexOrThrow(idColumn)
-                        var found = false
-                        while (!found && cursor.moveToNext()) found = cursor.getString(index) == expectedId
-                        found
-                    }
-                    check(listed == true) { "作成したドキュメントが一覧にありません" }
-                    step = "Android Files から書き込み"
-                    checkNotNull(resolver.openOutputStream(doc, "wt")).use { it.write("android-$id".toByteArray()) }
-                    step = "ゲストから読み込み・上書き"
-                    val result = runtime.runShellCommand(fileExchangeCommand("/workspace", id), timeoutSeconds = 10)
-                    check(result.exitCode == 0) { "guest exit=${result.exitCode}" }
-                    step = "Android Files からゲストの変更を読み込み"
-                    val expected = "guest-$id".toByteArray()
-                    val matches = checkNotNull(resolver.openInputStream(doc)).use {
-                        it.readNBytes(expected.size + 1).contentEquals(expected)
-                    }
-                    check(matches) { "読み戻した内容が一致しません" }
-                } finally {
-                    check(DocumentsContract.deleteDocument(resolver, doc)) { "一時ドキュメントの削除に失敗しました" }
-                }
+                val doc = checkNotNull(DocumentsContract.createDocument(resolver, root, "text/plain", ".kucode-files-$id"))
+                runWithCleanup(
+                    block = {
+                        step = "Android Files の一覧に表示"
+                        val idColumn = DocumentsContract.Document.COLUMN_DOCUMENT_ID
+                        val children = DocumentsContract.buildChildDocumentsUri(authority, rootId)
+                        val expectedId = DocumentsContract.getDocumentId(doc)
+                        val listed = resolver.query(children, arrayOf(idColumn), null, null, null)?.use { cursor ->
+                            val index = cursor.getColumnIndexOrThrow(idColumn)
+                            var found = false
+                            while (!found && cursor.moveToNext()) found = cursor.getString(index) == expectedId
+                            found
+                        }
+                        check(listed == true) { "作成したドキュメントが一覧にありません" }
+                        step = "Android Files から書き込み"
+                        checkNotNull(resolver.openOutputStream(doc, "wt")).use { it.write("android-$id".toByteArray()) }
+                        step = "ゲストから読み込み・上書き"
+                        val result = runtime.runShellCommand(fileExchangeCommand("/workspace", id), timeoutSeconds = 10)
+                        check(result.exitCode == 0) { "guest exit=${result.exitCode}" }
+                        step = "Android Files からゲストの変更を読み込み"
+                        val expected = "guest-$id".toByteArray()
+                        val matches = checkNotNull(resolver.openInputStream(doc)).use {
+                            it.readNBytes(expected.size + 1).contentEquals(expected)
+                        }
+                        check(matches) { "読み戻した内容が一致しません" }
+                        step = "一時ドキュメントの削除"
+                    },
+                    cleanup = {
+                        check(DocumentsContract.deleteDocument(resolver, doc)) { "一時ドキュメントの削除に失敗しました" }
+                    },
+                )
             }
             val detail = if (runtime == null) "ルート取得成功。PRoot 起動失敗のため双方向確認は未実行" else "作成・一覧で確認 → ゲストで照合・上書き → Android で照合 → 削除"
             CheckItem(name, true, detail, System.currentTimeMillis() - t0)
@@ -379,17 +383,20 @@ object DiagnosticsRunner {
         val name = "$guestDir バインドマウントの双方向読み書き"
         val id = UUID.randomUUID()
         return try {
-            val marker = Files.createFile(hostDir.toPath().resolve(".xr-files-$id"))
-            try {
-                Files.write(marker, "android-$id".toByteArray())
-                val result = runtime.runShellCommand(fileExchangeCommand(guestDir, id), timeoutSeconds = 10)
-                check(result.exitCode == 0) { "ゲストから読み込み・上書きできません (exit=${result.exitCode})" }
-                val expected = "guest-$id".toByteArray()
-                val matches = Files.newInputStream(marker).use { it.readNBytes(expected.size + 1).contentEquals(expected) }
-                check(matches) { "Android 側に書き込みが反映されません" }
-            } finally {
-                Files.deleteIfExists(marker)
-            }
+            val marker = Files.createFile(hostDir.toPath().resolve(".kucode-files-$id"))
+            runWithCleanup(
+                block = {
+                    Files.write(marker, "android-$id".toByteArray())
+                    val result = runtime.runShellCommand(fileExchangeCommand(guestDir, id), timeoutSeconds = 10)
+                    check(result.exitCode == 0) { "ゲストから読み込み・上書きできません (exit=${result.exitCode})" }
+                    val expected = "guest-$id".toByteArray()
+                    val matches = Files.newInputStream(marker).use { it.readNBytes(expected.size + 1).contentEquals(expected) }
+                    check(matches) { "Android 側に書き込みが反映されません" }
+                },
+                cleanup = {
+                    Files.deleteIfExists(marker)
+                },
+            )
             CheckItem(name, true, "同じ一時ファイルを両側から照合し、削除しました", System.currentTimeMillis() - t0)
         } catch (cancel: CancellationException) {
             throw cancel
@@ -398,9 +405,33 @@ object DiagnosticsRunner {
         }
     }
 
+    internal inline fun <T> runWithCleanup(block: () -> T, cleanup: () -> Unit): T {
+        var primaryFailure: Throwable? = null
+        try {
+            return block()
+        } catch (t: Throwable) {
+            primaryFailure = t
+            throw t
+        } finally {
+            val cleanupFailure = try {
+                cleanup()
+                null
+            } catch (t: Throwable) {
+                t
+            }
+            if (cleanupFailure != null) {
+                if (primaryFailure != null) {
+                    primaryFailure.addSuppressed(cleanupFailure)
+                } else {
+                    throw cleanupFailure
+                }
+            }
+        }
+    }
+
     internal fun fileExchangeCommand(guestDir: String, id: UUID): String = """
         set -eu
-        file="$guestDir/.xr-files-$id"
+        file="$guestDir/.kucode-files-$id"
         printf '%s' 'android-$id' | cmp -s - "${'$'}file"
         printf '%s' 'guest-$id' > "${'$'}file"
     """.trimIndent()

@@ -8,16 +8,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   OPENVSCODE_VERSION: "1.109.5"
+  OPENVSCODE_X64_SHA256: "b433bf4f0227321a7014d8460d10a8f958adc0f45aa79bd889e84e65e8f88363"
 
 jobs:
   android-apk:
-    name: XR-Editor APK Build (PRoot + Debian + OpenVSCode)
+    name: KuCode APK Build (PRoot + Debian + OpenVSCode)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      has_release: ${{ steps.release_build.outputs.has_release }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +44,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: android/app/src/main/jniLibs/arm64-v8a
-          key: proot-arm64-v5.1.107.102-talloc-2.5.0-api34-v1
+          key: proot-arm64-${{ hashFiles('scripts/build-proot-android.sh') }}
 
       - name: Build PRoot + Loader for Android arm64-v8a
         run: ./scripts/build-proot-android.sh
@@ -50,38 +53,47 @@ jobs:
         uses: actions/cache@v4
         with:
           path: android/app/src/main/assets/runtime
-          key: runtime-debian12-openvscode-${{ env.OPENVSCODE_VERSION }}-tgz-v2
+          key: runtime-assets-${{ env.OPENVSCODE_VERSION }}-${{ hashFiles('scripts/fetch-runtime-assets.sh') }}
 
       - name: Fetch Debian Minimal Rootfs & OpenVSCode Server
         run: ./scripts/fetch-runtime-assets.sh
 
-      - name: Exercise native diagnostics with matching OpenVSCode on the Linux runner
+      - name: Exercise extension & native diagnostics with matching OpenVSCode on the Linux runner
         run: |
           tag="openvscode-server-v${OPENVSCODE_VERSION}"
-          server="$RUNNER_TEMP/xr-openvscode-linux"
+          archive="$RUNNER_TEMP/${tag}-linux-x64.tar.gz"
+          server="$RUNNER_TEMP/kucode-openvscode-linux"
           mkdir -p "$server"
-          curl -fsSL --retry 3 "https://github.com/gitpod-io/openvscode-server/releases/download/$tag/$tag-linux-x64.tar.gz" |
-            tar -xz -C "$server" --strip-components=1
-          XR_NATIVE_MODULES="$server/node_modules" "$server/node" --test tests/runtime-probes.test.cjs
+          curl -fsSL --retry 3 "https://github.com/gitpod-io/openvscode-server/releases/download/$tag/$tag-linux-x64.tar.gz" -o "$archive"
+          echo "${OPENVSCODE_X64_SHA256}  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$server" --strip-components=1
+          rm -f "$archive"
+          "$server/node" --check android/app/src/main/assets/runtime-probes.cjs
+          "$server/node" --check android/app/src/main/assets/kucode-tools/extension.js
+          KUCODE_NATIVE_MODULES="$server/node_modules" "$server/node" --test tests/runtime-probes.test.cjs tests/kucode-extension.test.cjs
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.11.1
 
-      - name: Run Unit Tests & Build Debug APK
+      - name: Run Small & Medium Unit Tests and Build Debug APK
         working-directory: android
-        run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
+        run: ./gradlew :app:testDebugUnitTest :app:testDebugMediumUnitTest :app:assembleDebug --stacktrace
 
-      - name: Verify Embedded Runtime & License Notices Inside Debug APK
+      - name: Verify Embedded Runtime, Extension & License Notices Inside Debug APK
         run: |
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           ls -lh "$APK"
           unzip -p "$APK" assets/runtime-probes.cjs | cmp - android/app/src/main/assets/runtime-probes.cjs
-          unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tgz|openvscode-server-linux-arm64\.tgz|boot\.html|assets/licenses/"
+          unzip -p "$APK" assets/kucode-tools/extension.js | cmp - android/app/src/main/assets/kucode-tools/extension.js
+          unzip -p "$APK" assets/kucode-tools/package.json | cmp - android/app/src/main/assets/kucode-tools/package.json
+          unzip -p "$APK" assets/kucode-tools/icon.svg | cmp - android/app/src/main/assets/kucode-tools/icon.svg
+          unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tgz|openvscode-server-linux-arm64\.tgz|boot\.html|assets/kucode-tools/|assets/licenses/"
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot.so"
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot-loader.so"
           unzip -l "$APK" | grep -q "assets/runtime/debian-arm64-rootfs.tgz"
           unzip -l "$APK" | grep -q "assets/runtime/openvscode-server-linux-arm64.tgz"
+          unzip -l "$APK" | grep -q "assets/kucode-tools/extension.js"
+          unzip -l "$APK" | grep -q "assets/kucode-tools/package.json"
+          unzip -l "$APK" | grep -q "assets/kucode-tools/icon.svg"
           unzip -l "$APK" | grep -q "assets/licenses/LICENSE"
           unzip -l "$APK" | grep -q "assets/licenses/THIRD_PARTY_NOTICES.md"
           unzip -l "$APK" | grep -q "assets/licenses/GPL-3.0.txt"
@@ -90,7 +102,7 @@ jobs:
           unzip -l "$APK" | grep -q "assets/licenses/Apache-2.0.txt"
           unzip -l "$APK" | grep -q "assets/licenses/debian-manifest.txt"
           mkdir -p dist-apk
-          cp "$APK" "dist-apk/xr-editor-debug.apk"
+          cp "$APK" "dist-apk/kucode-debug.apk"
           cp "android/app/src/main/assets/runtime/debian-manifest.txt" "dist-apk/debian-manifest.txt"
           cp "THIRD_PARTY_NOTICES.md" "dist-apk/THIRD_PARTY_NOTICES.md"
           ls -lh dist-apk/
@@ -98,9 +110,18 @@ jobs:
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: xr-editor-debug-apk
-          path: dist-apk/xr-editor-debug.apk
+          name: kucode-debug-apk
+          path: dist-apk/kucode-debug.apk
           retention-days: 30
+
+      - name: Upload License Notices & Debian Manifest Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kucode-notices
+          path: |
+            dist-apk/debian-manifest.txt
+            dist-apk/THIRD_PARTY_NOTICES.md
+          retention-days: 90
 
       - name: Build Signed Release APK & AAB (when signing secrets are configured)
         id: release_build
@@ -117,33 +138,60 @@ jobs:
             exit 0
           fi
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-          ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/release.keystore" gradle :app:assembleRelease :app:bundleRelease --stacktrace
+          ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/release.keystore" ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace
           rm -f "$RUNNER_TEMP/release.keystore"
-          cp app/build/outputs/apk/release/app-release.apk ../dist-apk/xr-editor-release.apk
-          cp app/build/outputs/bundle/release/app-release.aab ../dist-apk/xr-editor-release.aab
+          cp app/build/outputs/apk/release/app-release.apk ../dist-apk/kucode-release.apk
+          cp app/build/outputs/bundle/release/app-release.aab ../dist-apk/kucode-release.aab
           echo "has_release=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload Signed Release Artifact
         if: steps.release_build.outputs.has_release == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: xr-editor-release-bundle
+          name: kucode-release-bundle
           path: |
-            dist-apk/xr-editor-release.apk
-            dist-apk/xr-editor-release.aab
+            dist-apk/kucode-release.apk
+            dist-apk/kucode-release.aab
           retention-days: 90
 
+  release:
+    name: Publish GitHub Release
+    needs: android-apk
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: kucode-debug-apk
+          path: release-files
+
+      - name: Download License Notices & Debian Manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: kucode-notices
+          path: release-files
+
+      - name: Download Signed Release Bundle
+        if: needs.android-apk.outputs.has_release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: kucode-release-bundle
+          path: release-files
+
       - name: Publish GitHub Release on v* tag
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          FILES=(dist-apk/xr-editor-debug.apk dist-apk/debian-manifest.txt dist-apk/THIRD_PARTY_NOTICES.md)
-          if [ -f dist-apk/xr-editor-release.apk ]; then
-            FILES+=(dist-apk/xr-editor-release.apk dist-apk/xr-editor-release.aab)
+          FILES=(release-files/debian-manifest.txt release-files/THIRD_PARTY_NOTICES.md)
+          if [ -f release-files/kucode-release.apk ]; then
+            FILES+=(release-files/kucode-release.apk release-files/kucode-release.aab)
           fi
+          FILES+=(release-files/kucode-debug.apk)
           gh release create "$TAG" "${FILES[@]}" \
-            --title "XR-Editor $TAG" \
+            --title "KuCode $TAG" \
             --generate-notes || \
           gh release upload "$TAG" "${FILES[@]}" --clobber

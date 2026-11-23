@@ -10,7 +10,7 @@ const probeFile = path.resolve(__dirname, '../android/app/src/main/assets/runtim
 const { checkPty, checkWatcher } = require(probeFile);
 
 function workspace(t) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xr-tests-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kucode-tests-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     return dir;
 }
@@ -42,7 +42,7 @@ test('PTY echo alone cannot pass the shell and size check', async () => {
     let killed = false;
     const terminal = {
         onData(handler) { data = handler; },
-        onExit() { setImmediate(() => data('XR_PTY_READY\n')); },
+        onExit() { setImmediate(() => data('KUCODE_PTY_READY\n')); },
         resize() {},
         write(input) { data(input); },
         kill() { killed = true; },
@@ -51,7 +51,7 @@ test('PTY echo alone cannot pass the shell and size check', async () => {
     assert.equal(killed, true);
 });
 
-const modules = process.env.XR_NATIVE_MODULES;
+const modules = process.env.KUCODE_NATIVE_MODULES;
 test('OpenVSCode node-pty input and resize round trip', { skip: !modules }, async () => {
     await checkPty(require(path.join(modules, 'node-pty')));
 });

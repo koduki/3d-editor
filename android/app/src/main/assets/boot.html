@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>XR-Editor</title>
+  <title>KuCode</title>
   <style>
     :root {
       --bg: #000000;
@@ -158,8 +158,8 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="title">XR-Editor</div>
-        <div class="hint">Debian minimal + 内蔵 openvscode-server（Ctrl+Alt+D でこの画面とエディタを切替）</div>
+        <div class="title">KuCode</div>
+        <div class="hint">空間に、書く。 — Debian minimal + 内蔵 openvscode-server（Ctrl+Alt+D でこの画面とエディタを切替）</div>
       </div>
       <span id="stateBadge" class="badge">起動中</span>
     </header>
@@ -214,12 +214,12 @@
       <div class="card-head">
         <div>
           <strong>ライセンス &amp; OSS 表記（APK 同梱）</strong>
-          <div class="hint">XR-Editor 本体（MIT）および同梱コンポーネント（PRoot / talloc / Debian / OpenVSCode Server / AndroidX 等）のライセンス全文と Debian パッケージ一覧を閲覧できます</div>
+          <div class="hint">KuCode 本体（MIT）および同梱コンポーネント（PRoot / talloc / Debian / OpenVSCode Server / AndroidX 等）のライセンス全文と Debian パッケージ一覧を閲覧できます</div>
         </div>
       </div>
       <div class="actions" id="licenseButtons">
         <button data-license="THIRD_PARTY_NOTICES.md">Third-Party Notices</button>
-        <button data-license="LICENSE">XR-Editor (MIT)</button>
+        <button data-license="LICENSE">KuCode (MIT)</button>
         <button data-license="GPL-3.0.txt">GPL-3.0</button>
         <button data-license="GPL-2.0.txt">GPL-2.0</button>
         <button data-license="LGPL-3.0.txt">LGPL-3.0</button>
@@ -257,8 +257,8 @@
       if (!text) return;
       let ok = false;
       try {
-        if (window.XREditorHost && typeof window.XREditorHost.copyToClipboard === 'function') {
-          ok = Boolean(window.XREditorHost.copyToClipboard(text));
+        if (window.KuCodeHost && typeof window.KuCodeHost.copyToClipboard === 'function') {
+          ok = Boolean(window.KuCodeHost.copyToClipboard(text));
         }
       } catch (_) {}
       if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
@@ -274,11 +274,11 @@
     }
 
     function runDiagnostics() {
-      if (!window.XREditorHost || typeof window.XREditorHost.startDiagnostics !== 'function') return;
+      if (!window.KuCodeHost || typeof window.KuCodeHost.startDiagnostics !== 'function') return;
       runDiagBtn.disabled = true;
       copyDiagBtn.disabled = true;
       diagReport.textContent = '実機チェックを実行中（PRoot / PTY / マウント / 疎通 / ログ収集）...';
-      window.XREditorHost.startDiagnostics();
+      window.KuCodeHost.startDiagnostics();
     }
 
     window.__onDiagnosticsResult = function(report) {
@@ -303,7 +303,7 @@
 
       if (status.hasAllFilesAccess) {
         storageBtn.textContent = 'Android 全ストレージ許可済み (/android/sdcard)';
-        storageHint.textContent = 'POSIX の /workspace/android/sdcard から Android ストレージを直接読み書きできます。Android の Files アプリからは「XR-Editor」として /workspace が見えます。';
+        storageHint.textContent = 'POSIX の /workspace/android/sdcard から Android ストレージを直接読み書きできます。Android の Files アプリからは「KuCode」として /workspace が見えます。';
       } else {
         storageBtn.textContent = 'Android ストレージをマウント許可';
         storageHint.textContent = '未許可でも /workspace と /android/shared は利用できます。Documents 等を直接開く場合は許可後に「サーバー再起動」してください。';
@@ -318,9 +318,9 @@
     }
 
     function refreshLogs() {
-      if (!window.XREditorHost) return;
+      if (!window.KuCodeHost) return;
       const wasAtBottom = (serverLogs.scrollHeight - serverLogs.scrollTop - serverLogs.clientHeight) < 36;
-      const txt = window.XREditorHost.getLogs() || '(ログなし)';
+      const txt = window.KuCodeHost.getLogs() || '(ログなし)';
       if (serverLogs.textContent !== txt) {
         serverLogs.textContent = txt;
         if (wasAtBottom) {
@@ -333,11 +333,11 @@
       renderStatus(status);
     };
 
-    openEditorBtn.addEventListener('click', () => window.XREditorHost?.openEditor());
-    storageBtn.addEventListener('click', () => window.XREditorHost?.requestAllFilesAccess());
+    openEditorBtn.addEventListener('click', () => window.KuCodeHost?.openEditor());
+    storageBtn.addEventListener('click', () => window.KuCodeHost?.requestAllFilesAccess());
     restartBtn.addEventListener('click', () => {
       autoDiagTriggeredOnError = false;
-      window.XREditorHost?.restartServer();
+      window.KuCodeHost?.restartServer();
     });
     runDiagBtn.addEventListener('click', runDiagnostics);
     copyDiagBtn.addEventListener('click', () => copyText(latestReportText, copyDiagBtn, '結果をコピー'));
@@ -346,10 +346,10 @@
 
     function runCli() {
       const cmd = cliInput.value.trim();
-      if (!cmd || !window.XREditorHost || typeof window.XREditorHost.startCommand !== 'function') return;
+      if (!cmd || !window.KuCodeHost || typeof window.KuCodeHost.startCommand !== 'function') return;
       cliRunBtn.disabled = true;
       cliOutput.textContent = '$ ' + cmd + '\n(実行中...)';
-      window.XREditorHost.startCommand(cmd);
+      window.KuCodeHost.startCommand(cmd);
     }
 
     cliRunBtn.addEventListener('click', runCli);
@@ -365,7 +365,7 @@
     let activeLicenseFile = '';
     licenseButtons.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-license]');
-      if (!btn || !window.XREditorHost || typeof window.XREditorHost.readLicenseAsset !== 'function') return;
+      if (!btn || !window.KuCodeHost || typeof window.KuCodeHost.readLicenseAsset !== 'function') return;
       const fileName = btn.getAttribute('data-license');
       if (activeLicenseFile === fileName && licenseViewer.style.display !== 'none') {
         licenseViewer.style.display = 'none';
@@ -373,21 +373,21 @@
         return;
       }
       activeLicenseFile = fileName;
-      licenseViewer.textContent = window.XREditorHost.readLicenseAsset(fileName) || '(empty)';
+      licenseViewer.textContent = window.KuCodeHost.readLicenseAsset(fileName) || '(empty)';
       licenseViewer.style.display = 'block';
       licenseViewer.scrollTop = 0;
     });
 
-    if (window.XREditorHost) {
+    if (window.KuCodeHost) {
       try {
-        renderStatus(JSON.parse(window.XREditorHost.getStatus()));
+        renderStatus(JSON.parse(window.KuCodeHost.getStatus()));
       } catch (e) {
         statusMessage.textContent = 'ステータス取得エラー: ' + e;
       }
       setInterval(() => {
         if (document.hidden) return;
         try {
-          renderStatus(JSON.parse(window.XREditorHost.getStatus()));
+          renderStatus(JSON.parse(window.KuCodeHost.getStatus()));
         } catch (_) {}
       }, 1500);
     }

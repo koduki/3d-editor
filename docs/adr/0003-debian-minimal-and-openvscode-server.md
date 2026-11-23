@@ -39,5 +39,5 @@
 
 - [scripts/fetch-runtime-assets.sh](../../scripts/fetch-runtime-assets.sh)
 - [android/app/build.gradle.kts](../../android/app/build.gradle.kts)
-- [TarGzExtractor.kt](../../android/app/src/main/java/dev/koduki/xreditor/TarGzExtractor.kt)
-- [TarGzExtractorTest.kt](../../android/app/src/test/java/dev/koduki/xreditor/TarGzExtractorTest.kt)
+- [TarGzExtractor.kt](../../android/app/src/main/java/dev/koduki/kucode/TarGzExtractor.kt)
+- [TarGzExtractorTest.kt](../../android/app/src/test/java/dev/koduki/kucode/TarGzExtractorTest.kt)

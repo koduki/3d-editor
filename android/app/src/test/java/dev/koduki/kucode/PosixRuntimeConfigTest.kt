@@ -1,8 +1,10 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -12,27 +14,30 @@ class PosixRuntimeConfigTest {
     @Test
     fun buildProotCommand_includesDecoupledWorkspaceHomeAndAndroidMounts() {
         val paths = PosixRuntimeConfig.Paths(
-            runtimeRoot = File("/data/user/0/dev.koduki.xreditor/files/runtime"),
-            workspaceDir = File("/data/user/0/dev.koduki.xreditor/files/workspace"),
-            homeDir = File("/data/user/0/dev.koduki.xreditor/files/home"),
-            nativeLibDir = File("/data/app/xreditor/lib/arm64"),
-            androidSharedDir = File("/sdcard/Android/data/dev.koduki.xreditor/files/shared"),
+            runtimeRoot = File("/data/user/0/dev.koduki.kucode/files/runtime"),
+            workspaceDir = File("/data/user/0/dev.koduki.kucode/files/workspace"),
+            homeDir = File("/data/user/0/dev.koduki.kucode/files/home"),
+            nativeLibDir = File("/data/app/kucode/lib/arm64"),
+            androidSharedDir = File("/sdcard/Android/data/dev.koduki.kucode/files/shared"),
             androidSdcardDir = File("/storage/emulated/0"),
         )
+
+        assertEquals(File(paths.rootfsDir, ".kucode-runtime-version"), paths.versionMarker)
+        assertEquals(File(paths.vscodeDataDir, "data/Machine/settings.json"), paths.machineSettingsFile)
 
         val cmd = PosixRuntimeConfig.buildProotCommand(
             paths = paths,
             guestCommand = PosixRuntimeConfig.buildOpenVsCodeServerCommand(PosixRuntimeConfig.PREFERRED_SERVER_PORT),
         )
-        assertEquals("/data/app/xreditor/lib/arm64/libproot.so", cmd.first())
+        assertEquals("/data/app/kucode/lib/arm64/libproot.so", cmd.first())
         assertTrue(cmd.contains("--link2symlink"))
         assertTrue(cmd.contains("--kill-on-exit"))
-        assertTrue(cmd.contains("/data/user/0/dev.koduki.xreditor/files/workspace:/workspace"))
-        assertTrue(cmd.contains("/data/user/0/dev.koduki.xreditor/files/home:/root"))
-        assertTrue(cmd.contains("/sdcard/Android/data/dev.koduki.xreditor/files/shared:/android/shared"))
+        assertTrue(cmd.contains("/data/user/0/dev.koduki.kucode/files/workspace:/workspace"))
+        assertTrue(cmd.contains("/data/user/0/dev.koduki.kucode/files/home:/root"))
+        assertTrue(cmd.contains("/sdcard/Android/data/dev.koduki.kucode/files/shared:/android/shared"))
         assertTrue(cmd.contains("/storage/emulated/0:/android/sdcard"))
         assertFalse(cmd.contains("--without-connection-token"))
-        assertEquals("/var/lib/xr-vscode/.editor-token", cmd[cmd.indexOf("--connection-token-file") + 1])
+        assertEquals("/var/lib/kucode-vscode/.editor-token", cmd[cmd.indexOf("--connection-token-file") + 1])
         assertTrue(cmd.contains("18765"))
 
         val env = PosixRuntimeConfig.buildProotEnvironment(
@@ -41,10 +46,10 @@ class PosixRuntimeConfigTest {
             adminPort = 43210,
             adminToken = "secret-token",
         )
-        assertEquals("/data/app/xreditor/lib/arm64/libproot-loader.so", env["PROOT_LOADER"])
+        assertEquals("/data/app/kucode/lib/arm64/libproot-loader.so", env["PROOT_LOADER"])
         assertEquals("1", env["PROOT_NO_SECCOMP"])
-        assertEquals("43210", env["XR_ADMIN_PORT"])
-        assertEquals("secret-token", env["XR_ADMIN_TOKEN"])
+        assertEquals("43210", env["KUCODE_ADMIN_PORT"])
+        assertEquals("secret-token", env["KUCODE_ADMIN_TOKEN"])
     }
 
     @Test
@@ -83,12 +88,52 @@ class PosixRuntimeConfigTest {
     @Test
     fun mergeDefaultVsCodeSettings_preservesUserOverridesAndAddsMissingDefaults() {
         val existing = """{"editor.fontSize": 20, "custom.flag": true}"""
-        val merged = JSONObject(PosixRuntimeConfig.mergeDefaultVsCodeSettings(existing))
+        val mergedJson = PosixRuntimeConfig.mergeDefaultVsCodeSettings(existing)
+        assertNotNull(mergedJson)
+        val merged = JSONObject(mergedJson!!)
         assertEquals(20, merged.getInt("editor.fontSize"))
         assertEquals(true, merged.getBoolean("custom.flag"))
         assertEquals("off", merged.getString("terminal.integrated.gpuAcceleration"))
         assertEquals("500", merged.getString("editor.fontWeight"))
         assertEquals(3, merged.getInt("editor.cursorWidth"))
+    }
+
+    @Test
+    fun mergeDefaultVsCodeSettings_returnsDefaultsWhenNullOrBlank() {
+        val fromNull = PosixRuntimeConfig.mergeDefaultVsCodeSettings(null)
+        val fromBlank = PosixRuntimeConfig.mergeDefaultVsCodeSettings("   \n\t ")
+        assertNotNull(fromNull)
+        assertEquals(fromNull, fromBlank)
+        assertEquals(16, JSONObject(fromNull!!).getInt("editor.fontSize"))
+    }
+
+    @Test
+    fun mergeDefaultVsCodeSettings_returnsNullOnJsoncOrMalformedInput() {
+        assertNull(PosixRuntimeConfig.mergeDefaultVsCodeSettings("""{"editor.fontSize": 20,}"""))
+        assertNull(PosixRuntimeConfig.mergeDefaultVsCodeSettings("""{"arr": [1, 2,]}"""))
+        assertNull(PosixRuntimeConfig.mergeDefaultVsCodeSettings("// user comment\n{\"editor.fontSize\": 20}"))
+        assertNull(PosixRuntimeConfig.mergeDefaultVsCodeSettings("""{"editor.fontSize": 20 /* inline */}"""))
+        assertNull(PosixRuntimeConfig.mergeDefaultVsCodeSettings("{broken json"))
+        assertNull(PosixRuntimeConfig.mergeDefaultVsCodeSettings("""{"editor.fontSize": 20} trailing"""))
+    }
+
+    @Test
+    fun mergeDefaultVsCodeSettings_allowsCommentLikeSequencesInsideJsonStrings() {
+        val existing = """{"custom.url": "https://example.com/a,}", "custom.escaped": "quote \" // ok"}"""
+        val mergedJson = PosixRuntimeConfig.mergeDefaultVsCodeSettings(existing)
+        assertNotNull(mergedJson)
+        val merged = JSONObject(mergedJson!!)
+        assertEquals("https://example.com/a,}", merged.getString("custom.url"))
+        assertEquals("quote \" // ok", merged.getString("custom.escaped"))
+        assertEquals(16, merged.getInt("editor.fontSize"))
+    }
+
+    @Test
+    fun mergeDefaultVsCodeSettings_returnsOriginalStringWhenNoKeysMissing() {
+        val complete = PosixRuntimeConfig.buildMinimalVsCodeSettingsObject()
+            .put("custom.keep", "yes")
+            .toString()
+        assertEquals(complete, PosixRuntimeConfig.mergeDefaultVsCodeSettings(complete))
     }
 
     @Test

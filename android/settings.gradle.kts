@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "XR-Editor"
+rootProject.name = "KuCode"
 include(":app")

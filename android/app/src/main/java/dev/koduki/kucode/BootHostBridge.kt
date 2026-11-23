@@ -1,4 +1,4 @@
-package dev.koduki.xreditor
+package dev.koduki.kucode
 
 import android.content.Context
 import android.webkit.JavascriptInterface
@@ -58,8 +58,10 @@ class BootHostBridge(
         scope.launch {
             val report = try {
                 DiagnosticsRunner.collect(context, runtimeManager)
-            } catch (t: Throwable) {
-                "Diagnostics Error: ${t.message}"
+            } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
+                throw cancel
+            } catch (e: Exception) {
+                "Diagnostics Error: ${e.message}"
             }
             onDiagnosticsCompleted(report)
         }
@@ -88,8 +90,10 @@ class BootHostBridge(
         scope.launch {
             val resultJson = try {
                 runtimeManager.runShellCommand(trimmed).toJsonString()
-            } catch (t: Throwable) {
-                PosixRuntimeManager.CommandResult(1, "Error: ${t.message}").toJsonString()
+            } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
+                throw cancel
+            } catch (e: Exception) {
+                PosixRuntimeManager.CommandResult(1, "Error: ${e.message}").toJsonString()
             }
             onCommandCompleted(trimmed, resultJson)
         }

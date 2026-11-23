@@ -5,7 +5,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
 async function checkWatcher(watcher, workspace, timeoutMs = 6000) {
-    const dir = fs.mkdtempSync(path.join(workspace, '.xr-watch-'));
+    const dir = fs.mkdtempSync(path.join(workspace, '.kucode-watch-'));
     const marker = path.join(dir, 'marker');
     let subscription;
     let timer;
@@ -46,9 +46,9 @@ async function checkPty(pty, timeoutMs = 6000) {
     const command = [
         'set -eu',
         'stty -echo',
-        'echo XR_PTY_READY',
+        'echo KUCODE_PTY_READY',
         'IFS= read -r input',
-        'printf "XR_PTY_ACK %s %s\\n" "$(stty size)" "$input"',
+        'printf "KUCODE_PTY_ACK %s %s\\n" "$(stty size)" "$input"',
     ].join('\n');
     const terminal = pty.spawn('/bin/sh', ['-c', command], { cols: 80, rows: 24 });
     let timer;
@@ -58,12 +58,12 @@ async function checkPty(pty, timeoutMs = 6000) {
     try {
         await new Promise((resolve, reject) => {
             const check = () => {
-                if (exited && output.includes('XR_PTY_ACK 37 103 ' + nonce)) resolve();
+                if (exited && output.includes('KUCODE_PTY_ACK 37 103 ' + nonce)) resolve();
             };
             timer = setTimeout(() => reject(new Error('PTY input, resize or exit acknowledgement missing')), timeoutMs);
             terminal.onData(chunk => {
                 output = (output + chunk).slice(-4096);
-                if (!sent && output.includes('XR_PTY_READY')) {
+                if (!sent && output.includes('KUCODE_PTY_READY')) {
                     sent = true;
                     try {
                         terminal.resize(103, 37);
