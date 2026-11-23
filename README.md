@@ -286,5 +286,6 @@ gradle :app:testDebugUnitTest :app:assembleDebug
 
 ## 関連ドキュメント & ライセンス
 
-- 仕様書：[spec.md](spec.md)
-- 同梱サードパーティ OSS ライセンス表記：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+- **XR-Editor 本体ライセンス**：[MIT License](LICENSE)
+- **同梱サードパーティ OSS 表記・対応ソース案内・商標免責**：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) および [`LICENSES/`](LICENSES/)（ビルド時に APK 内 `assets/licenses/` へ自動同梱され、アプリ内管理画面 `boot.html` からも閲覧可能）
+- **仕様書**：[spec.md](spec.md)

@@ -77,6 +77,38 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/licenseAssets"))
+        }
+    }
+}
+
+val repoRootDir = rootProject.projectDir.parentFile
+val generatedLicenseAssetsDir = layout.buildDirectory.dir("generated/licenseAssets")
+
+val syncLicenseAssets by tasks.registering(Sync::class) {
+    from(repoRootDir) {
+        include("LICENSE", "THIRD_PARTY_NOTICES.md")
+    }
+    from(File(repoRootDir, "LICENSES")) {
+        include("*.txt")
+    }
+    from(file("src/main/assets/runtime")) {
+        include("debian-manifest.txt")
+    }
+    into(generatedLicenseAssetsDir.map { it.dir("licenses") })
+}
+
+tasks.named("preBuild") {
+    dependsOn(syncLicenseAssets)
+}
+
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("Assets")) {
+        dependsOn(syncLicenseAssets)
+    }
 }
 
 dependencies {

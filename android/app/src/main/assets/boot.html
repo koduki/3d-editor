@@ -209,6 +209,27 @@
       </div>
       <pre id="serverLogs"></pre>
     </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <strong>ライセンス &amp; OSS 表記（APK 同梱）</strong>
+          <div class="hint">XR-Editor 本体（MIT）および同梱コンポーネント（PRoot / talloc / Debian / OpenVSCode Server / AndroidX 等）のライセンス全文と Debian パッケージ一覧を閲覧できます</div>
+        </div>
+      </div>
+      <div class="actions" id="licenseButtons">
+        <button data-license="THIRD_PARTY_NOTICES.md">Third-Party Notices</button>
+        <button data-license="LICENSE">XR-Editor (MIT)</button>
+        <button data-license="GPL-3.0.txt">GPL-3.0</button>
+        <button data-license="GPL-2.0.txt">GPL-2.0</button>
+        <button data-license="LGPL-3.0.txt">LGPL-3.0</button>
+        <button data-license="LGPL-2.1.txt">LGPL-2.1</button>
+        <button data-license="Apache-2.0.txt">Apache-2.0</button>
+        <button data-license="MIT-OpenVSCode.txt">MIT (OpenVSCode)</button>
+        <button data-license="debian-manifest.txt">Debian パッケージ一覧</button>
+      </div>
+      <pre id="licenseViewer" style="display:none;"></pre>
+    </section>
   </div>
 
   <script>
@@ -337,6 +358,24 @@
         e.preventDefault();
         runCli();
       }
+    });
+
+    const licenseButtons = document.getElementById('licenseButtons');
+    const licenseViewer = document.getElementById('licenseViewer');
+    let activeLicenseFile = '';
+    licenseButtons.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-license]');
+      if (!btn || !window.XREditorHost || typeof window.XREditorHost.readLicenseAsset !== 'function') return;
+      const fileName = btn.getAttribute('data-license');
+      if (activeLicenseFile === fileName && licenseViewer.style.display !== 'none') {
+        licenseViewer.style.display = 'none';
+        activeLicenseFile = '';
+        return;
+      }
+      activeLicenseFile = fileName;
+      licenseViewer.textContent = window.XREditorHost.readLicenseAsset(fileName) || '(empty)';
+      licenseViewer.style.display = 'block';
+      licenseViewer.scrollTop = 0;
     });
 
     if (window.XREditorHost) {

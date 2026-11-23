@@ -66,6 +66,19 @@ class BootHostBridge(
     }
 
     @JavascriptInterface
+    fun readLicenseAsset(fileName: String): String {
+        val safeName = fileName.trim()
+        if (safeName !in ALLOWED_LICENSE_FILES) {
+            return "Invalid license file."
+        }
+        return runCatching {
+            context.assets.open("licenses/$safeName").bufferedReader(Charsets.UTF_8).use { it.readText() }
+        }.getOrElse { e ->
+            "License file not available ($safeName): ${e.message}"
+        }
+    }
+
+    @JavascriptInterface
     fun startCommand(command: String) {
         val trimmed = command.trim()
         if (trimmed.isEmpty()) {
@@ -80,5 +93,19 @@ class BootHostBridge(
             }
             onCommandCompleted(trimmed, resultJson)
         }
+    }
+
+    companion object {
+        private val ALLOWED_LICENSE_FILES = setOf(
+            "THIRD_PARTY_NOTICES.md",
+            "LICENSE",
+            "MIT-OpenVSCode.txt",
+            "Apache-2.0.txt",
+            "GPL-2.0.txt",
+            "GPL-3.0.txt",
+            "LGPL-2.1.txt",
+            "LGPL-3.0.txt",
+            "debian-manifest.txt",
+        )
     }
 }
