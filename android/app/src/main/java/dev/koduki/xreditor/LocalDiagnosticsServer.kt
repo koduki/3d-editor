@@ -23,7 +23,7 @@ class LocalDiagnosticsServer(
     private val onRequestStoragePermission: () -> Unit,
     private val onRestartServer: () -> Unit,
 ) {
-    val authToken: String = generateToken()
+    val authToken: String = generateConnectionToken()
 
     @Volatile
     var port: Int = 0
@@ -190,11 +190,11 @@ class LocalDiagnosticsServer(
 
     companion object {
         private const val MAX_BODY_BYTES = 1024 * 1024
-
-        private fun generateToken(): String {
-            val bytes = ByteArray(24)
-            SecureRandom().nextBytes(bytes)
-            return bytes.joinToString("") { "%02x".format(it) }
-        }
     }
+}
+
+internal fun generateConnectionToken(): String {
+    val bytes = ByteArray(24)
+    SecureRandom().nextBytes(bytes)
+    return bytes.joinToString("") { "%02x".format(it) }
 }

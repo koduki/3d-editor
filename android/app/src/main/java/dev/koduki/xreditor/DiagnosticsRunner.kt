@@ -12,12 +12,14 @@ import android.system.OsConstants
 import android.view.InputDevice
 import android.webkit.WebView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
+import java.nio.file.Files
+import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -68,6 +70,11 @@ object DiagnosticsRunner {
         }
         sb.appendLine()
 
+        sb.appendLine("### XR での手動確認（自動集計外）")
+        sb.appendLine("- 日本語入力中に Enter で変換を確定し、余分な改行が入らないことを確認する。")
+        sb.appendLine("- 隣のプレビューから戻り、最初のキー入力が元のエディタに届くことを確認する。")
+        sb.appendLine("- 管理画面を往復し、未保存の文字、カーソル位置、ターミナルセッションを確認する。")
+        sb.appendLine()
         sb.appendLine("## 3. 直近のサーバー / エラーログ")
         sb.appendLine("```text")
         val trimmedLogs = input.recentLogs.trim()
@@ -110,7 +117,6 @@ object DiagnosticsRunner {
             // 1-3. Fast local Android-side checks
             checks.add(checkNativeBinaries(paths))
             checks.add(checkExtractedRuntime(paths))
-            checks.add(checkDocumentsProvider(context))
 
             // 4. PRoot Gate 1
             val prootCheck = runProotProbe(runtime)
@@ -118,68 +124,54 @@ object DiagnosticsRunner {
 
             // 5-9. Run independent POSIX probes in parallel to keep total runtime well under timeout
             if (prootCheck.ok) {
+                val probeScript = context.assets.open("runtime-probes.cjs").bufferedReader().use { it.readText() }
                 val parallelChecks = coroutineScope {
+                    val documentsTask = async { checkDocumentsProvider(context, runtime) }
                     val nodeTask = async {
                         runTimedCommand(
                             name = "Node.js & openvscode-server 実行確認",
                             runtime = runtime,
-                            command = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node -v && ${PosixRuntimeConfig.GUEST_OPENVSCODE_BIN} --version | head -n 3",
+                            command = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node -v && ${PosixRuntimeConfig.GUEST_OPENVSCODE_BIN} --version",
                             timeoutSeconds = 15,
                         )
                     }
                     val ptyTask = async {
                         runTimedCommand(
-                            name = "node-pty 実起動テスト（統合ターミナル検証）",
+                            name = "統合ターミナル (PTY 入出力・リサイズ)",
                             runtime = runtime,
-                            command = buildNodePtyProbeCommand(),
+                            command = nativeProbeCommand("pty", probeScript),
                             timeoutSeconds = 15,
                         )
                     }
                     val watcherTask = async {
                         runTimedCommand(
-                            name = "@parcel/watcher & inotify 確認",
+                            name = "ワークスペースのファイル作成通知 (@parcel/watcher)",
                             runtime = runtime,
-                            command = buildWatcherProbeCommand(),
+                            command = nativeProbeCommand("watcher", probeScript),
                             timeoutSeconds = 15,
                         )
                     }
-                    val mountTask = async {
-                        runTimedCommand(
-                            name = "POSIX /workspace & /android マウント確認",
-                            runtime = runtime,
-                            command = """
-                                set -e
-                                TEST_F=/workspace/.xr-diag-rw-test
-                                echo ok > "${'$'}TEST_F" && cat "${'$'}TEST_F" >/dev/null && rm -f "${'$'}TEST_F"
-                                echo "workspace_rw=OK"
-                                ls -ld /workspace /workspace/android /android/shared /android/sdcard 2>&1 || true
-                                echo "android_shared_entries=$(ls -A /android/shared 2>/dev/null | wc -l)"
-                                echo "android_sdcard_entries=$(ls -A /android/sdcard 2>/dev/null | wc -l)"
-                            """.trimIndent(),
-                            timeoutSeconds = 15,
-                        )
-                    }
-                    val netTask = async {
-                        runTimedCommand(
-                            name = "DNS・Debian apt / GitHub 疎通・CLI (apt/git/gh) 確認",
-                            runtime = runtime,
-                            command = buildNetworkAndCliProbeCommand(),
-                            timeoutSeconds = 15,
-                        )
+                    val homeTask = async { checkBindMount(runtime, paths.homeDir, "/root") }
+                    val sharedTask = async { checkBindMount(runtime, paths.androidSharedDir, "/workspace/android/shared") }
+                    val networkTasks = networkChecks().map { (name, command) ->
+                        async { runTimedCommand(name, runtime, command, timeoutSeconds = 15) }
                     }
                     listOf(
+                        documentsTask.await(),
                         nodeTask.await(),
                         ptyTask.await(),
                         watcherTask.await(),
-                        mountTask.await(),
-                        netTask.await(),
-                    )
+                        homeTask.await(),
+                        sharedTask.await(),
+                    ) + networkTasks.awaitAll()
                 }
                 checks.addAll(parallelChecks)
+            } else {
+                checks.add(checkDocumentsProvider(context, null))
             }
 
             // 10. Embedded HTTP server health check
-            checks.add(checkLocalServerHttp(status))
+            checks.add(checkLocalServerHttp(runtime, status))
 
             val tailLogs = runtime.getLogsText()
                 .lines()
@@ -200,62 +192,33 @@ object DiagnosticsRunner {
             )
         }
 
-    internal fun buildNodePtyProbeCommand(): String {
-        val node = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node"
-        val ptyModule = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node_modules/node-pty"
-        return """
-            ls -l /dev/ptmx /dev/pts 2>&1 | head -n 4 || true
-            $node -e '
-              const pty = require("$ptyModule");
-              const p = pty.spawn("/bin/sh", ["-c", "echo NODE_PTY_SPAWN_OK"], { cols: 80, rows: 24 });
-              let out = "";
-              const timer = setTimeout(() => { console.error("TIMEOUT"); process.exit(124); }, 8000);
-              p.onData(d => out += d);
-              p.onExit(({ exitCode }) => {
-                clearTimeout(timer);
-                console.log(out.trim());
-                process.exit(out.includes("NODE_PTY_SPAWN_OK") && exitCode === 0 ? 0 : (exitCode || 1));
-              });
-            '
-        """.trimIndent()
+    internal fun nativeProbeCommand(mode: String, script: String): String {
+        require(mode == "pty" || mode == "watcher")
+        return "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node - $mode <<'XR_PROBE_JS'\n$script\nXR_PROBE_JS"
     }
 
-    internal fun buildWatcherProbeCommand(): String {
+    internal fun networkChecks(): Map<String, String> {
         val node = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node"
-        val watcherModule = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node_modules/@parcel/watcher"
-        return """
-            echo "inotify_max_watches=$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo unreadable)"
+        fun httpProbe(url: String) = """
             $node -e '
-              const w = require("$watcherModule");
-              console.log("parcel_watcher_keys=" + Object.keys(w).join(","));
-            '
+              fetch(process.argv[1], { method: "HEAD", signal: AbortSignal.timeout(5000) })
+                .then(r => { console.log("HTTP " + r.status); process.exitCode = r.ok ? 0 : 1; })
+                .catch(e => { console.error(e.cause?.code || e.message); process.exitCode = 1; });
+            ' '$url'
         """.trimIndent()
-    }
-
-    internal fun buildNetworkAndCliProbeCommand(): String {
-        val node = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node"
-        return """
-            cat /etc/resolv.conf 2>&1 || true
-            (getent hosts deb.debian.org 2>&1 | head -n 2) || echo "dns_lookup=FAILED"
-            $node -e '
-              async function probe(name, url) {
-                try {
-                  const r = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(5000) });
-                  console.log(name + "=HTTP_" + r.status);
-                } catch (e) {
-                  console.log(name + "=ERR:" + (e.cause?.code || e.message));
-                }
-              }
-              Promise.all([
-                probe("debian_apt_http", "http://deb.debian.org/debian/dists/bookworm/Release"),
-                probe("github_https", "https://api.github.com/zen"),
-              ]);
-            '
-            dpkg --version 2>&1 | head -n 1 || true
-            for bin in bash apt git gh curl; do
-              printf '%s=%s\n' "${'$'}bin" "$(command -v "${'$'}bin" 2>/dev/null || echo missing)"
-            done
-        """.trimIndent()
+        return linkedMapOf(
+            "DNS (deb.debian.org)" to "getent hosts deb.debian.org",
+            "Debian apt HTTP" to httpProbe("http://deb.debian.org/debian/dists/bookworm/Release"),
+            "GitHub HTTPS" to httpProbe("https://api.github.com/zen"),
+            "CLI (必須: bash/apt, 任意: git/gh/curl)" to """
+                set -e
+                command -v bash
+                command -v apt
+                for bin in git gh curl; do
+                    printf '%s=%s\n' "${'$'}bin" "$(command -v "${'$'}bin" || echo 未導入)"
+                done
+            """.trimIndent(),
+        )
     }
 
     private fun queryPageSize(): String {
@@ -359,54 +322,88 @@ object DiagnosticsRunner {
         return CheckItem("Debian rootfs & openvscode-server 展開状態", ok, detail)
     }
 
-    private fun checkDocumentsProvider(context: Context): CheckItem {
+    private suspend fun checkDocumentsProvider(context: Context, runtime: PosixRuntimeManager?): CheckItem {
         val authority = "${context.packageName}.documents"
+        val resolver = context.contentResolver
         val t0 = System.currentTimeMillis()
+        val name = if (runtime == null) "Android Files ルート一覧" else "Android Files ↔ /workspace 双方向読み書き"
+        var step = "共有ルートの取得"
         return try {
-            val rootsUri = DocumentsContract.buildRootsUri(authority)
-            var rootTitle = ""
-            var rootDocId = ""
-            context.contentResolver.query(rootsUri, null, null, null, null)?.use { c ->
-                if (c.moveToFirst()) {
-                    val titleIdx = c.getColumnIndex(DocumentsContract.Root.COLUMN_TITLE)
-                    val docIdx = c.getColumnIndex(DocumentsContract.Root.COLUMN_DOCUMENT_ID)
-                    if (titleIdx >= 0) rootTitle = c.getString(titleIdx) ?: ""
-                    if (docIdx >= 0) rootDocId = c.getString(docIdx) ?: ""
-                }
-            }
-
-            val childNames = mutableListOf<String>()
-            if (rootDocId.isNotEmpty()) {
-                val childrenUri = DocumentsContract.buildChildDocumentsUri(authority, rootDocId)
-                context.contentResolver.query(childrenUri, null, null, null, null)?.use { c ->
-                    val nameIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                    while (c.moveToNext() && childNames.size < 10) {
-                        if (nameIdx >= 0) childNames.add(c.getString(nameIdx) ?: "")
+            val column = DocumentsContract.Root.COLUMN_DOCUMENT_ID
+            val rootId = resolver.query(DocumentsContract.buildRootsUri(authority), arrayOf(column), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(it.getColumnIndexOrThrow(column)) else null }
+            check(!rootId.isNullOrBlank()) { "共有ルートがありません" }
+            if (runtime != null) {
+                val id = UUID.randomUUID()
+                val root = DocumentsContract.buildDocumentUri(authority, rootId)
+                step = "一時ドキュメントの作成"
+                val doc = checkNotNull(DocumentsContract.createDocument(resolver, root, "text/plain", ".xr-files-$id"))
+                try {
+                    step = "Android Files の一覧に表示"
+                    val idColumn = DocumentsContract.Document.COLUMN_DOCUMENT_ID
+                    val children = DocumentsContract.buildChildDocumentsUri(authority, rootId)
+                    val expectedId = DocumentsContract.getDocumentId(doc)
+                    val listed = resolver.query(children, arrayOf(idColumn), null, null, null)?.use { cursor ->
+                        val index = cursor.getColumnIndexOrThrow(idColumn)
+                        var found = false
+                        while (!found && cursor.moveToNext()) found = cursor.getString(index) == expectedId
+                        found
                     }
+                    check(listed == true) { "作成したドキュメントが一覧にありません" }
+                    step = "Android Files から書き込み"
+                    checkNotNull(resolver.openOutputStream(doc, "wt")).use { it.write("android-$id".toByteArray()) }
+                    step = "ゲストから読み込み・上書き"
+                    val result = runtime.runShellCommand(fileExchangeCommand("/workspace", id), timeoutSeconds = 10)
+                    check(result.exitCode == 0) { "guest exit=${result.exitCode}" }
+                    step = "Android Files からゲストの変更を読み込み"
+                    val expected = "guest-$id".toByteArray()
+                    val matches = checkNotNull(resolver.openInputStream(doc)).use {
+                        it.readNBytes(expected.size + 1).contentEquals(expected)
+                    }
+                    check(matches) { "読み戻した内容が一致しません" }
+                } finally {
+                    check(DocumentsContract.deleteDocument(resolver, doc)) { "一時ドキュメントの削除に失敗しました" }
                 }
             }
-
-            val ok = rootDocId.isNotEmpty()
-            val detail = buildString {
-                appendLine("authority=$authority")
-                appendLine("rootTitle=$rootTitle, rootDocId=$rootDocId")
-                appendLine("children(${childNames.size}): ${childNames.joinToString(", ")}")
-            }
-            CheckItem(
-                name = "XrDocumentsProvider (Android Files → POSIX /workspace)",
-                ok = ok,
-                detail = detail,
-                durationMs = System.currentTimeMillis() - t0,
-            )
-        } catch (t: Throwable) {
-            CheckItem(
-                name = "XrDocumentsProvider (Android Files → POSIX /workspace)",
-                ok = false,
-                detail = "authority=$authority -> ${t.javaClass.simpleName}: ${t.message}",
-                durationMs = System.currentTimeMillis() - t0,
-            )
+            val detail = if (runtime == null) "ルート取得成功。PRoot 起動失敗のため双方向確認は未実行" else "作成・一覧で確認 → ゲストで照合・上書き → Android で照合 → 削除"
+            CheckItem(name, true, detail, System.currentTimeMillis() - t0)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            CheckItem(name, false, "$step: ${failure.message}", System.currentTimeMillis() - t0)
         }
     }
+
+    private suspend fun checkBindMount(runtime: PosixRuntimeManager, hostDir: File, guestDir: String): CheckItem {
+        val t0 = System.currentTimeMillis()
+        val name = "$guestDir バインドマウントの双方向読み書き"
+        val id = UUID.randomUUID()
+        return try {
+            val marker = Files.createFile(hostDir.toPath().resolve(".xr-files-$id"))
+            try {
+                Files.write(marker, "android-$id".toByteArray())
+                val result = runtime.runShellCommand(fileExchangeCommand(guestDir, id), timeoutSeconds = 10)
+                check(result.exitCode == 0) { "ゲストから読み込み・上書きできません (exit=${result.exitCode})" }
+                val expected = "guest-$id".toByteArray()
+                val matches = Files.newInputStream(marker).use { it.readNBytes(expected.size + 1).contentEquals(expected) }
+                check(matches) { "Android 側に書き込みが反映されません" }
+            } finally {
+                Files.deleteIfExists(marker)
+            }
+            CheckItem(name, true, "同じ一時ファイルを両側から照合し、削除しました", System.currentTimeMillis() - t0)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            CheckItem(name, false, failure.message.orEmpty(), System.currentTimeMillis() - t0)
+        }
+    }
+
+    internal fun fileExchangeCommand(guestDir: String, id: UUID): String = """
+        set -eu
+        file="$guestDir/.xr-files-$id"
+        printf '%s' 'android-$id' | cmp -s - "${'$'}file"
+        printf '%s' 'guest-$id' > "${'$'}file"
+    """.trimIndent()
 
     private suspend fun runProotProbe(runtime: PosixRuntimeManager): CheckItem {
         val probeCmd = "uname -a && id && grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release || true"
@@ -459,40 +456,17 @@ object DiagnosticsRunner {
         )
     }
 
-    private fun checkLocalServerHttp(status: PosixRuntimeManager.StatusSnapshot): CheckItem {
-        if (status.port <= 0) {
-            return CheckItem(
-                name = "内蔵 openvscode-server HTTP 応答 (Gate 2)",
-                ok = false,
-                detail = "state=${status.state}, port=${status.port}, message=${status.message}",
-            )
-        }
+    private fun checkLocalServerHttp(
+        runtime: PosixRuntimeManager,
+        status: PosixRuntimeManager.StatusSnapshot,
+    ): CheckItem {
         val t0 = System.currentTimeMillis()
-        var conn: HttpURLConnection? = null
-        return try {
-            conn = (URL("http://127.0.0.1:${status.port}/").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 2000
-                readTimeout = 2000
-                instanceFollowRedirects = false
-            }
-            val code = conn.responseCode
-            val elapsed = System.currentTimeMillis() - t0
-            CheckItem(
-                name = "内蔵 openvscode-server HTTP 応答 (Gate 2)",
-                ok = code in 200..399,
-                detail = "url=http://127.0.0.1:${status.port}/ -> HTTP $code (state=${status.state})",
-                durationMs = elapsed,
-            )
-        } catch (t: Throwable) {
-            CheckItem(
-                name = "内蔵 openvscode-server HTTP 応答 (Gate 2)",
-                ok = false,
-                detail = "url=http://127.0.0.1:${status.port}/ -> ${t.javaClass.simpleName}: ${t.message}",
-                durationMs = System.currentTimeMillis() - t0,
-            )
-        } finally {
-            conn?.disconnect()
-        }
+        val ok = runtime.editorAccessVerified()
+        return CheckItem(
+            name = "内蔵 openvscode-server 認証 (Gate 2)",
+            ok = ok,
+            detail = "state=${status.state}, port=${status.port}, anonymousDeniedAndEditorAuthenticated=$ok",
+            durationMs = System.currentTimeMillis() - t0,
+        )
     }
 }

@@ -74,6 +74,50 @@ class TarGzExtractorTest {
         }
     }
 
+    @Test
+    fun extractionPathsUseRealDirectoriesOnly() {
+        val root = Files.createTempDirectory("xr-paths").toFile().canonicalFile
+        try {
+            val lib = root.resolve("usr/lib").apply { mkdirs() }
+            Files.createSymbolicLink(root.resolve("lib").toPath(), lib.toPath())
+            assertEquals(lib.resolve("pkg"), TarGzExtractor.resolveSafeChild(root, "usr/lib/pkg"))
+            try {
+                TarGzExtractor.resolveSafeChild(root, "lib/pkg")
+                fail("The host must not resolve guest symlinks")
+            } catch (_: IOException) {
+                // The guest can still resolve this alias at runtime.
+                assertTrue(Files.isSymbolicLink(root.resolve("lib").toPath()))
+            }
+        } finally {
+            Files.deleteIfExists(root.resolve("lib").toPath())
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun extractBundledArm64ArchivesWhenAvailable() {
+        val runtime = java.io.File("src/main/assets/runtime")
+        val debian = runtime.resolve(PosixRuntimeConfig.ASSET_ROOTFS.substringAfterLast('/'))
+        val editor = runtime.resolve(PosixRuntimeConfig.ASSET_OPENVSCODE.substringAfterLast('/'))
+        if (System.getenv("GITHUB_ACTIONS") == "true") {
+            assertTrue("CI must supply both bundled archives at ${runtime.absolutePath}", debian.isFile && editor.isFile)
+        } else {
+            org.junit.Assume.assumeTrue(debian.isFile && editor.isFile)
+        }
+        val root = Files.createTempDirectory("xr-runtime").toFile()
+        try {
+            debian.inputStream().use { TarGzExtractor.extract(it, root) }
+            val editorDir = TarGzExtractor.resolveSafeChild(root, "opt/openvscode-server")
+            editor.inputStream().use { TarGzExtractor.extract(it, editorDir, stripComponents = 1) }
+            assertTrue(root.resolve("usr/bin/bash").canExecute())
+            assertTrue(editorDir.resolve("bin/openvscode-server").canExecute())
+        } finally {
+            Files.walk(root.toPath()).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach { Files.delete(it) }
+            }
+        }
+    }
+
     private fun buildTarGz(block: (TarArchiveOutputStream) -> Unit): ByteArray {
         val baos = ByteArrayOutputStream()
         GzipCompressorOutputStream(baos).use { gz ->

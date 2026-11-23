@@ -1,5 +1,8 @@
 package dev.koduki.xreditor
 
+import java.nio.file.Files
+import java.util.UUID
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -35,19 +38,33 @@ class DiagnosticsRunnerTest {
     }
 
     @Test
+    fun workspaceExchangeRequiresTheAndroidPayloadBeforeOverwriting() {
+        val id = UUID.randomUUID()
+        val dir = Files.createTempDirectory("xr-files-test").toFile()
+        try {
+            val file = dir.resolve(".xr-files-$id")
+            val command = DiagnosticsRunner.fileExchangeCommand(".", id)
+            fun run() = ProcessBuilder("sh", "-c", command).directory(dir).start().waitFor()
+            file.writeText("unchanged")
+            assertTrue(run() != 0)
+            assertEquals("unchanged", file.readText())
+            file.writeText("android-$id")
+            assertEquals(0, run())
+            assertEquals("guest-$id", file.readText())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun probeCommands_referenceBundledOpenVsCodeAndNetworkEndpoints() {
-        val ptyCmd = DiagnosticsRunner.buildNodePtyProbeCommand()
-        assertTrue(ptyCmd.contains("/opt/openvscode-server/node"))
-        assertTrue(ptyCmd.contains("node-pty"))
-        assertTrue(ptyCmd.contains("NODE_PTY_SPAWN_OK"))
+        val command = DiagnosticsRunner.nativeProbeCommand("pty", "console.log(process.argv)")
+        assertTrue(command.startsWith("/opt/openvscode-server/node - pty <<'XR_PROBE_JS'"))
+        assertTrue(command.endsWith("\nXR_PROBE_JS"))
 
-        val watcherCmd = DiagnosticsRunner.buildWatcherProbeCommand()
-        assertTrue(watcherCmd.contains("@parcel/watcher"))
-        assertTrue(watcherCmd.contains("max_user_watches"))
-
-        val netCmd = DiagnosticsRunner.buildNetworkAndCliProbeCommand()
-        assertTrue(netCmd.contains("deb.debian.org"))
-        assertTrue(netCmd.contains("api.github.com"))
-        assertTrue(netCmd.contains("dpkg --version"))
+        val checks = DiagnosticsRunner.networkChecks()
+        assertTrue(checks.getValue("DNS (deb.debian.org)").contains("getent hosts"))
+        assertTrue(checks.getValue("Debian apt HTTP").contains("deb.debian.org"))
+        assertTrue(checks.getValue("GitHub HTTPS").contains("api.github.com"))
     }
 }

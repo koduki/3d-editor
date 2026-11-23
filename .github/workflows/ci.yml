@@ -10,6 +10,9 @@ on:
 permissions:
   contents: write
 
+env:
+  OPENVSCODE_VERSION: "1.109.5"
+
 jobs:
   android-apk:
     name: XR-Editor APK Build (PRoot + Debian + OpenVSCode)
@@ -47,10 +50,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: android/app/src/main/assets/runtime
-          key: runtime-debian12-openvscode-1.109.5-tgz-v2
+          key: runtime-debian12-openvscode-${{ env.OPENVSCODE_VERSION }}-tgz-v2
 
       - name: Fetch Debian Minimal Rootfs & OpenVSCode Server
         run: ./scripts/fetch-runtime-assets.sh
+
+      - name: Exercise native diagnostics with matching OpenVSCode on the Linux runner
+        run: |
+          tag="openvscode-server-v${OPENVSCODE_VERSION}"
+          server="$RUNNER_TEMP/xr-openvscode-linux"
+          mkdir -p "$server"
+          curl -fsSL --retry 3 "https://github.com/gitpod-io/openvscode-server/releases/download/$tag/$tag-linux-x64.tar.gz" |
+            tar -xz -C "$server" --strip-components=1
+          XR_NATIVE_MODULES="$server/node_modules" "$server/node" --test tests/runtime-probes.test.cjs
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -64,6 +76,7 @@ jobs:
         run: |
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           ls -lh "$APK"
+          unzip -p "$APK" assets/runtime-probes.cjs | cmp - android/app/src/main/assets/runtime-probes.cjs
           unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tgz|openvscode-server-linux-arm64\.tgz|boot\.html|assets/licenses/"
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot.so"
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot-loader.so"
