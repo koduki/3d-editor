@@ -10,6 +10,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.nio.file.attribute.PosixFilePermission
 
 /**
  * Extracts POSIX .tar.gz archives (Debian rootfs / openvscode-server) while preserving
@@ -29,13 +30,7 @@ object TarGzExtractor {
                 linkPath.delete()
             }
             linkPath.parentFile?.mkdirs()
-            try {
-                val osClass = Class.forName("android.system.Os")
-                val method = osClass.getMethod("symlink", String::class.java, String::class.java)
-                method.invoke(null, target, linkPath.absolutePath)
-            } catch (_: Throwable) {
-                Files.createSymbolicLink(linkPath.toPath(), Paths.get(target))
-            }
+            Files.createSymbolicLink(linkPath.toPath(), Paths.get(target))
         }
 
         override fun hardlinkOrCopy(existingTarget: File, linkPath: File) {
@@ -55,17 +50,23 @@ object TarGzExtractor {
         override fun chmod(file: File, mode: Int) {
             val perm = mode and 0x1FF
             if (perm == 0) return
+            val perms = mutableSetOf<PosixFilePermission>()
+            if ((perm and 0b100_000_000) != 0) perms.add(PosixFilePermission.OWNER_READ)
+            if ((perm and 0b010_000_000) != 0) perms.add(PosixFilePermission.OWNER_WRITE)
+            if ((perm and 0b001_000_000) != 0) perms.add(PosixFilePermission.OWNER_EXECUTE)
+            if ((perm and 0b000_100_000) != 0) perms.add(PosixFilePermission.GROUP_READ)
+            if ((perm and 0b000_010_000) != 0) perms.add(PosixFilePermission.GROUP_WRITE)
+            if ((perm and 0b000_001_000) != 0) perms.add(PosixFilePermission.GROUP_EXECUTE)
+            if ((perm and 0b000_000_100) != 0) perms.add(PosixFilePermission.OTHERS_READ)
+            if ((perm and 0b000_000_010) != 0) perms.add(PosixFilePermission.OTHERS_WRITE)
+            if ((perm and 0b000_000_001) != 0) perms.add(PosixFilePermission.OTHERS_EXECUTE)
             try {
-                val osClass = Class.forName("android.system.Os")
-                val method = osClass.getMethod("chmod", String::class.java, Int::class.javaPrimitiveType)
-                method.invoke(null, file.absolutePath, perm)
-                return
+                Files.setPosixFilePermissions(file.toPath(), perms)
             } catch (_: Throwable) {
-                // Fall back to Java File permissions (JVM unit tests)
+                file.setReadable((perm and 0b100_000_000) != 0, (perm and 0b000_100_100) == 0)
+                file.setWritable((perm and 0b010_000_000) != 0, (perm and 0b000_010_010) == 0)
+                file.setExecutable((perm and 0b001_000_000) != 0, (perm and 0b000_001_001) == 0)
             }
-            file.setReadable((perm and 0b100_000_000) != 0, (perm and 0b000_100_100) == 0)
-            file.setWritable((perm and 0b010_000_000) != 0, (perm and 0b000_010_010) == 0)
-            file.setExecutable((perm and 0b001_000_000) != 0, (perm and 0b000_001_001) == 0)
         }
     }
 
