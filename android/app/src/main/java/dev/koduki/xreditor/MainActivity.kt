@@ -1,6 +1,9 @@
 package dev.koduki.xreditor
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
@@ -77,9 +80,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         val bridge = BootHostBridge(
+            context = applicationContext,
             runtimeManager = runtimeManager,
             onOpenEditor = { runOnUiThread { loadEditorIfReady() } },
             onRequestAllFilesAccess = { runOnUiThread { openAllFilesPermissionSettings() } },
+            onCopyToClipboard = { text -> copyTextToClipboard(text) },
         )
         webView.addJavascriptInterface(bridge, "XREditorHost")
         setContentView(webView)
@@ -189,5 +194,15 @@ class MainActivity : AppCompatActivity() {
         runCatching { startActivity(intent) }.onFailure {
             runCatching { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
         }
+    }
+
+    private fun copyTextToClipboard(text: String): Boolean {
+        return runCatching {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                ?: return false
+            val clip = ClipData.newPlainText("XR-Editor Diagnostics", text)
+            clipboard.setPrimaryClip(clip)
+            true
+        }.getOrDefault(false)
     }
 }

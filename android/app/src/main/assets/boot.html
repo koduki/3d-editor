@@ -28,9 +28,9 @@
       line-height: 1.5;
     }
     .wrap {
-      max-width: 960px;
+      max-width: 980px;
       margin: 0 auto;
-      padding: 28px 24px;
+      padding: 24px 22px 36px;
       display: flex;
       flex-direction: column;
       gap: 16px;
@@ -68,6 +68,13 @@
       flex-direction: column;
       gap: 12px;
     }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
     .bar-bg {
       width: 100%;
       height: 8px;
@@ -100,6 +107,10 @@
       background: #082f49;
       border-color: var(--accent);
     }
+    button.ok {
+      border-color: var(--ok);
+      color: var(--ok);
+    }
     button:disabled {
       opacity: 0.45;
       cursor: not-allowed;
@@ -115,12 +126,13 @@
       border: 1px solid var(--border);
       border-radius: 8px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 13px;
+      font-size: 12.5px;
       line-height: 1.45;
       white-space: pre-wrap;
       word-break: break-word;
-      max-height: 240px;
+      max-height: 280px;
       overflow: auto;
+      user-select: text;
     }
     .cli-row {
       display: flex;
@@ -164,6 +176,20 @@
     </section>
 
     <section class="card">
+      <div class="card-head">
+        <div>
+          <strong>実機チェック &amp; 診断レポート（コピペ用）</strong>
+          <div class="hint">端末情報・PRoot・Node/openvscode-server・/workspace &amp; /android マウント・PTY/DNS/CLI・直近エラーログを一括チェックします</div>
+        </div>
+        <div class="actions">
+          <button id="runDiagBtn" class="primary">実機チェックを実行</button>
+          <button id="copyDiagBtn" disabled>結果をコピー</button>
+        </div>
+      </div>
+      <pre id="diagReport">（「実機チェックを実行」を押すと、ここにコピペ可能な診断レポートが出力されます）</pre>
+    </section>
+
+    <section class="card">
       <div><strong>POSIX ミニターミナル（フォールバック / CLI 確認用）</strong></div>
       <div class="hint">例: <code>ls -la /workspace</code> / <code>apt update &amp;&amp; apt install -y ca-certificates git gh</code> / <code>gh --version</code></div>
       <div class="cli-row">
@@ -174,9 +200,12 @@
     </section>
 
     <section class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <strong>起動ログ</strong>
-        <button id="refreshLogsBtn">ログ更新</button>
+      <div class="card-head">
+        <strong>起動 / エラーログ</strong>
+        <div class="actions">
+          <button id="refreshLogsBtn">ログ更新</button>
+          <button id="copyLogsBtn">ログをコピー</button>
+        </div>
       </div>
       <pre id="serverLogs"></pre>
     </section>
@@ -190,11 +219,58 @@
     const storageBtn = document.getElementById('storageBtn');
     const restartBtn = document.getElementById('restartBtn');
     const storageHint = document.getElementById('storageHint');
+    const runDiagBtn = document.getElementById('runDiagBtn');
+    const copyDiagBtn = document.getElementById('copyDiagBtn');
+    const diagReport = document.getElementById('diagReport');
     const cliInput = document.getElementById('cliInput');
     const cliRunBtn = document.getElementById('cliRunBtn');
     const cliOutput = document.getElementById('cliOutput');
     const serverLogs = document.getElementById('serverLogs');
     const refreshLogsBtn = document.getElementById('refreshLogsBtn');
+    const copyLogsBtn = document.getElementById('copyLogsBtn');
+
+    let latestReportText = '';
+    let autoDiagTriggeredOnError = false;
+
+    function copyText(text, btn, defaultLabel) {
+      if (!text) return;
+      let ok = false;
+      try {
+        if (window.XREditorHost && typeof window.XREditorHost.copyToClipboard === 'function') {
+          ok = Boolean(window.XREditorHost.copyToClipboard(text));
+        }
+      } catch (_) {}
+      if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {});
+        ok = true;
+      }
+      btn.textContent = ok ? 'コピーしました' : 'コピー失敗';
+      if (ok) btn.classList.add('ok');
+      setTimeout(() => {
+        btn.textContent = defaultLabel;
+        btn.classList.remove('ok');
+      }, 1800);
+    }
+
+    function runDiagnostics() {
+      if (!window.XREditorHost || typeof window.XREditorHost.runDiagnostics !== 'function') return;
+      runDiagBtn.disabled = true;
+      copyDiagBtn.disabled = true;
+      diagReport.textContent = '実機チェックを実行中（PRoot / Node / マウント / PTY / DNS / ログ収集）...';
+      setTimeout(() => {
+        try {
+          latestReportText = window.XREditorHost.runDiagnostics() || '(empty)';
+          diagReport.textContent = latestReportText;
+          copyDiagBtn.disabled = false;
+        } catch (err) {
+          latestReportText = 'Diagnostics Error: ' + err;
+          diagReport.textContent = latestReportText;
+          copyDiagBtn.disabled = false;
+        } finally {
+          runDiagBtn.disabled = false;
+        }
+      }, 30);
+    }
 
     function renderStatus(status) {
       if (!status) return;
@@ -212,6 +288,12 @@
         storageHint.textContent = '未許可でも /workspace と /android/shared は利用できます。Documents 等を直接開く場合は許可後に「サーバー再起動」してください。';
       }
       refreshLogs();
+
+      // If startup hits ERROR, automatically run diagnostics once so the user can copy-paste immediately
+      if (status.state === 'ERROR' && !autoDiagTriggeredOnError) {
+        autoDiagTriggeredOnError = true;
+        runDiagnostics();
+      }
     }
 
     function refreshLogs() {
@@ -227,8 +309,14 @@
 
     openEditorBtn.addEventListener('click', () => window.XREditorHost?.openEditor());
     storageBtn.addEventListener('click', () => window.XREditorHost?.requestAllFilesAccess());
-    restartBtn.addEventListener('click', () => window.XREditorHost?.restartServer());
+    restartBtn.addEventListener('click', () => {
+      autoDiagTriggeredOnError = false;
+      window.XREditorHost?.restartServer();
+    });
+    runDiagBtn.addEventListener('click', runDiagnostics);
+    copyDiagBtn.addEventListener('click', () => copyText(latestReportText, copyDiagBtn, '結果をコピー'));
     refreshLogsBtn.addEventListener('click', refreshLogs);
+    copyLogsBtn.addEventListener('click', () => copyText(serverLogs.textContent || '', copyLogsBtn, 'ログをコピー'));
 
     function runCli() {
       const cmd = cliInput.value.trim();

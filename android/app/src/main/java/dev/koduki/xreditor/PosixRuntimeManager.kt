@@ -176,7 +176,11 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
     }
 
-    suspend fun runShellCommand(command: String, timeoutSeconds: Long = 120): CommandResult =
+    suspend fun runShellCommand(
+        command: String,
+        timeoutSeconds: Long = 120,
+        forceNoSeccomp: Boolean? = null,
+    ): CommandResult =
         withContext(Dispatchers.IO) {
             val paths = getPaths()
             if (!paths.prootBin.exists() || !paths.prootLoader.exists()) {
@@ -199,7 +203,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             )
             val pb = ProcessBuilder(prootCmd)
             pb.redirectErrorStream(true)
-            pb.environment().putAll(PosixRuntimeConfig.buildProotEnvironment(paths, disableSeccomp))
+            val noSeccomp = forceNoSeccomp ?: disableSeccomp
+            pb.environment().putAll(PosixRuntimeConfig.buildProotEnvironment(paths, noSeccomp))
 
             val output = StringBuilder()
             try {
