@@ -99,7 +99,7 @@ flowchart TB
         direction TB
         PROOT["libproot.so + libproot-loader.so<br/>(jniLibs/arm64-v8a / 16KB ページ対応 / PROOT_LOADER)"]
         VSC["openvscode-server v1.109.5<br/>127.0.0.1:18765 (固定優先ポート) + 統合ターミナル"]
-        EXT["内蔵拡張 kucode-tools (v0.6.0)<br/>左 Activity Bar メニュー / 右クリック / テーマ・ズーム切替"]
+        EXT["内蔵拡張 kucode-tools (v0.7.0)<br/>左 Activity Bar メニュー / 右クリック / テーマ・ズーム切替"]
     end
 
     subgraph Storage["永続ストレージ & マウント境界"]

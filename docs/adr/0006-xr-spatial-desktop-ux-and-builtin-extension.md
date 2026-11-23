@@ -21,7 +21,7 @@ Android XR（XREAL AURA 等の光学シースルーグラス）に物理キー�
    - 初回設定（`data/Machine/settings.json` のみに適用し、既存設定や JSONC を壊さない `mergeDefaultVsCodeSettings`）で、純黒 OST 背景 `#000000`・`fontWeight: "500"`・`fontSize: 16`・`lineHeight: 26`・`window.zoomLevel: 0.5`・太さ `3px` のシアンカーソル・明るめコメント `#8da2be`・ミニマップ/Welcome/パンくず/テレメトリ無効化を適用する。
    - Android WebView での xterm WebGL 黒画面を防ぐため `terminal.integrated.gpuAcceleration: "off"` を初期設定する。
    - `MainActivity` のルート `FrameLayout` に `1.5dp` のフォーカス枠（アクティブ `#38BDF8` / 非アクティブ `#18181B`）を設け、`onWindowFocusChanged` で非フォーカス時に `alpha = 0.55f` へ自動減光する。
-3. **システム内蔵拡張 `kucode-tools`（v0.6.0）**
+3. **システム内蔵拡張 `kucode-tools`（v0.7.0）**
    - ソースを `assets/kucode-tools/{extension.js,package.json,icon.svg}` として分離管理し、起動ごとに `prepareRuntimeDirectories()` で `/opt/openvscode-server/extensions/kucode-tools/` へアトミック同期する（rootfs 再展開なしで APK 更新が即反映され、Node.js で構文チェック・単体テストも可能）。
    - 押しやすい **左端 Activity Bar（バイザーアイコン `KuCode` サイドバー）**、右クリックメニュー、エディタ右上ボタン、左下ステータスバー（`KuCode`）、コマンドパレットから以下を提供する：
      - 実機チェック実行（レポート表示＆自動コピー）
