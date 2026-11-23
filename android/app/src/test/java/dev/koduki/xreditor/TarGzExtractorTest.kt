@@ -99,7 +99,11 @@ class TarGzExtractorTest {
         val runtime = java.io.File("src/main/assets/runtime")
         val debian = runtime.resolve(PosixRuntimeConfig.ASSET_ROOTFS.substringAfterLast('/'))
         val editor = runtime.resolve(PosixRuntimeConfig.ASSET_OPENVSCODE.substringAfterLast('/'))
-        org.junit.Assume.assumeTrue(debian.isFile && editor.isFile)
+        if (System.getenv("GITHUB_ACTIONS") == "true") {
+            assertTrue("CI must supply both bundled archives at ${runtime.absolutePath}", debian.isFile && editor.isFile)
+        } else {
+            org.junit.Assume.assumeTrue(debian.isFile && editor.isFile)
+        }
         val root = Files.createTempDirectory("xr-runtime").toFile()
         try {
             debian.inputStream().use { TarGzExtractor.extract(it, root) }

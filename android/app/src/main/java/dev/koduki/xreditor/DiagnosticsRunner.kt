@@ -457,12 +457,11 @@ object DiagnosticsRunner {
         status: PosixRuntimeManager.StatusSnapshot,
     ): CheckItem {
         val t0 = System.currentTimeMillis()
-        val ok = status.state == PosixRuntimeManager.State.READY && status.port > 0 &&
-            runtime.editorRejectsAnonymousRequests(status.port)
+        val ok = runtime.editorAccessVerified()
         return CheckItem(
             name = "内蔵 openvscode-server 認証 (Gate 2)",
             ok = ok,
-            detail = "state=${status.state}, port=${status.port}, readyAndRejectsAnonymous=$ok",
+            detail = "state=${status.state}, port=${status.port}, anonymousDeniedAndEditorAuthenticated=$ok",
             durationMs = System.currentTimeMillis() - t0,
         )
     }

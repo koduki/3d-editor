@@ -553,7 +553,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 updateStatus(State.ERROR, "openvscode-server の起動に失敗しました (exit=$exitCode)", 0)
                 return
             }
-            if (announced.get() && editorRejectsAnonymousRequests(port)) {
+            if (announced.get() && editorAccessVerified(port, token)) {
                 if (!paths.versionMarker.exists()) {
                     writePrivateFile(paths.versionMarker, PosixRuntimeConfig.RUNTIME_VERSION)
                 }
@@ -591,18 +591,29 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
     }
 
-    internal fun editorRejectsAnonymousRequests(port: Int): Boolean {
+    internal fun editorAccessVerified(): Boolean {
+        val token = editorToken ?: return false
+        return state == State.READY && editorAccessVerified(serverPort, token)
+    }
+
+    private fun editorAccessVerified(port: Int, token: String): Boolean =
+        editorHttpStatus(port, null) == HttpURLConnection.HTTP_FORBIDDEN &&
+            editorHttpStatus(port, token) == HttpURLConnection.HTTP_OK
+
+    private fun editorHttpStatus(port: Int, token: String?): Int {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
+                useCaches = false
+                setRequestProperty("Cookie", if (token == null) "" else "vscode-tkn=$token")
                 connectTimeout = 500
                 readTimeout = 500
                 instanceFollowRedirects = false
             }
-            conn.responseCode == HttpURLConnection.HTTP_FORBIDDEN
-        } catch (_: Throwable) {
-            false
+            conn.responseCode
+        } catch (_: java.io.IOException) {
+            -1
         } finally {
             conn?.disconnect()
         }
