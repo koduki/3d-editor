@@ -17,6 +17,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.file.Files
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 import java.text.SimpleDateFormat
@@ -150,24 +151,8 @@ object DiagnosticsRunner {
                             timeoutSeconds = 15,
                         )
                     }
-                    val mountTask = async {
-                        runTimedCommand(
-                            name = "POSIX /workspace & /android マウント確認",
-                            runtime = runtime,
-                            command = """
-                                set -e
-                                TEST_F=$(mktemp /workspace/.xr-diag.XXXXXXXX)
-                                trap 'rm -f -- "${'$'}TEST_F"' EXIT
-                                echo ok > "${'$'}TEST_F"
-                                test "$(cat "${'$'}TEST_F")" = ok
-                                echo "workspace_rw=OK"
-                                ls -ld /workspace /workspace/android /android/shared /android/sdcard 2>&1 || true
-                                echo "android_shared_entries=$(ls -A /android/shared 2>/dev/null | wc -l)"
-                                echo "android_sdcard_entries=$(ls -A /android/sdcard 2>/dev/null | wc -l)"
-                            """.trimIndent(),
-                            timeoutSeconds = 15,
-                        )
-                    }
+                    val homeTask = async { checkBindMount(runtime, paths.homeDir, "/root") }
+                    val sharedTask = async { checkBindMount(runtime, paths.androidSharedDir, "/workspace/android/shared") }
                     val networkTasks = networkChecks().map { (name, command) ->
                         async { runTimedCommand(name, runtime, command, timeoutSeconds = 15) }
                     }
@@ -176,7 +161,8 @@ object DiagnosticsRunner {
                         nodeTask.await(),
                         ptyTask.await(),
                         watcherTask.await(),
-                        mountTask.await(),
+                        homeTask.await(),
+                        sharedTask.await(),
                     ) + networkTasks.awaitAll()
                 }
                 checks.addAll(parallelChecks)
@@ -353,10 +339,21 @@ object DiagnosticsRunner {
                 step = "一時ドキュメントの作成"
                 val doc = checkNotNull(DocumentsContract.createDocument(resolver, root, "text/plain", ".xr-files-$id"))
                 try {
+                    step = "Android Files の一覧に表示"
+                    val idColumn = DocumentsContract.Document.COLUMN_DOCUMENT_ID
+                    val children = DocumentsContract.buildChildDocumentsUri(authority, rootId)
+                    val expectedId = DocumentsContract.getDocumentId(doc)
+                    val listed = resolver.query(children, arrayOf(idColumn), null, null, null)?.use { cursor ->
+                        val index = cursor.getColumnIndexOrThrow(idColumn)
+                        var found = false
+                        while (!found && cursor.moveToNext()) found = cursor.getString(index) == expectedId
+                        found
+                    }
+                    check(listed == true) { "作成したドキュメントが一覧にありません" }
                     step = "Android Files から書き込み"
                     checkNotNull(resolver.openOutputStream(doc, "wt")).use { it.write("android-$id".toByteArray()) }
                     step = "ゲストから読み込み・上書き"
-                    val result = runtime.runShellCommand(workspaceExchangeCommand(id), timeoutSeconds = 10)
+                    val result = runtime.runShellCommand(fileExchangeCommand("/workspace", id), timeoutSeconds = 10)
                     check(result.exitCode == 0) { "guest exit=${result.exitCode}" }
                     step = "Android Files からゲストの変更を読み込み"
                     val expected = "guest-$id".toByteArray()
@@ -368,7 +365,7 @@ object DiagnosticsRunner {
                     check(DocumentsContract.deleteDocument(resolver, doc)) { "一時ドキュメントの削除に失敗しました" }
                 }
             }
-            val detail = if (runtime == null) "ルート取得成功。PRoot 起動失敗のため双方向確認は未実行" else "作成 → ゲストで照合・上書き → Android で照合 → 削除"
+            val detail = if (runtime == null) "ルート取得成功。PRoot 起動失敗のため双方向確認は未実行" else "作成・一覧で確認 → ゲストで照合・上書き → Android で照合 → 削除"
             CheckItem(name, true, detail, System.currentTimeMillis() - t0)
         } catch (cancel: CancellationException) {
             throw cancel
@@ -377,10 +374,34 @@ object DiagnosticsRunner {
         }
     }
 
-    internal fun workspaceExchangeCommand(id: UUID): String = """
+    private suspend fun checkBindMount(runtime: PosixRuntimeManager, hostDir: File, guestDir: String): CheckItem {
+        val t0 = System.currentTimeMillis()
+        val name = "$guestDir バインドマウントの双方向読み書き"
+        val id = UUID.randomUUID()
+        return try {
+            val marker = Files.createFile(hostDir.toPath().resolve(".xr-files-$id"))
+            try {
+                Files.write(marker, "android-$id".toByteArray())
+                val result = runtime.runShellCommand(fileExchangeCommand(guestDir, id), timeoutSeconds = 10)
+                check(result.exitCode == 0) { "ゲストから読み込み・上書きできません (exit=${result.exitCode})" }
+                val expected = "guest-$id".toByteArray()
+                val matches = Files.newInputStream(marker).use { it.readNBytes(expected.size + 1).contentEquals(expected) }
+                check(matches) { "Android 側に書き込みが反映されません" }
+            } finally {
+                Files.deleteIfExists(marker)
+            }
+            CheckItem(name, true, "同じ一時ファイルを両側から照合し、削除しました", System.currentTimeMillis() - t0)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            CheckItem(name, false, failure.message.orEmpty(), System.currentTimeMillis() - t0)
+        }
+    }
+
+    internal fun fileExchangeCommand(guestDir: String, id: UUID): String = """
         set -eu
-        file="/workspace/.xr-files-$id"
-        test "$(cat -- "${'$'}file")" = "android-$id"
+        file="$guestDir/.xr-files-$id"
+        printf '%s' 'android-$id' | cmp -s - "${'$'}file"
         printf '%s' 'guest-$id' > "${'$'}file"
     """.trimIndent()
 

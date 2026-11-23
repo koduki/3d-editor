@@ -43,7 +43,7 @@ class DiagnosticsRunnerTest {
         val dir = Files.createTempDirectory("xr-files-test").toFile()
         try {
             val file = dir.resolve(".xr-files-$id")
-            val command = DiagnosticsRunner.workspaceExchangeCommand(id).replace("/workspace/", "./")
+            val command = DiagnosticsRunner.fileExchangeCommand(".", id)
             fun run() = ProcessBuilder("sh", "-c", command).directory(dir).start().waitFor()
             file.writeText("unchanged")
             assertTrue(run() != 0)

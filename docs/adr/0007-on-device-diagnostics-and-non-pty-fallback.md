@@ -15,7 +15,7 @@ Android XR 実機（XREAL AURA 等）はエミュレータと異なり、カー�
      1. Node.js & `openvscode-server` バージョン
      2. `node-pty` でシェルへ入力し、サイズ変更後の行・列とシェルが読み取った一意な文字列を照合
      3. `@parcel/watcher` で作業領域の一時ディレクトリを購読し、作成したファイルのイベントを照合
-     4. Android DocumentsProvider で一時ファイルを作成し、ゲストの `/workspace` で照合・上書きし、Android 側で読み戻して削除。共有マウントの情報も記録
+     4. Android DocumentsProvider で一時ファイルを作成し、ゲストの `/workspace` で照合・上書きし、Android 側で読み戻して削除。永続ホームとアプリ共有領域もホストとゲストの双方から一時ファイルの内容を照合する
      5. DNS 解決・Debian apt HTTP・GitHub HTTPS・`dpkg`/`apt`/`git`/`gh`/`curl`
    - 直近 80 行のサーバー／エラーログを含めた単一の Markdown レポートに整形し、VS Code 内からはタブ表示＋Android ネイティブクリップボード自動コピー、`boot.html` からはボタン 1 つ（および起動エラー時は自動実行）で取得可能にする。
 2. **非 PTY フォールバック CLI コンソール（`boot.html`）**
