@@ -22,7 +22,7 @@ import kotlin.coroutines.cancellation.CancellationException
 /**
  * Minimal loopback-only (127.0.0.1) token-authenticated HTTP server hosted inside
  * the Android app so the embedded extension (`kucode-tools`) can trigger
- * on-device diagnostics, clipboard copy, storage permissions, or boot/CLI screen toggle.
+ * on-device diagnostics, clipboard copy/paste, storage permissions, or boot/CLI screen toggle.
  *
  * Security hardening for pre-authentication input:
  * - Bounded worker thread pool & queue so hostile local apps cannot exhaust threads/memory
@@ -34,6 +34,7 @@ class LocalDiagnosticsServer(
     private val onRunDiagnostics: suspend () -> String,
     private val onGetLogs: () -> String,
     private val onCopyToClipboard: (String) -> Boolean,
+    private val onReadFromClipboard: () -> String? = { null },
     private val onOpenBootPage: () -> Unit,
     private val onRequestStoragePermission: () -> Unit,
     private val onRestartServer: () -> Unit,
@@ -227,6 +228,16 @@ class LocalDiagnosticsServer(
                     method == "POST" && path == "/copy" -> {
                         val ok = onCopyToClipboard(body)
                         writeResponse(output, if (ok) 200 else 500, if (ok) "ok" else "clipboard unavailable")
+                    }
+
+                    method == "GET" && path == "/clipboard" -> {
+                        val text = onReadFromClipboard()
+                        when {
+                            text == null -> writeResponse(output, 503, "clipboard unavailable")
+                            text.toByteArray(Charsets.UTF_8).size > MAX_BODY_BYTES ->
+                                writeResponse(output, 413, "Payload Too Large")
+                            else -> writeResponse(output, 200, text)
+                        }
                     }
 
                     method == "POST" && path == "/open-boot" -> {

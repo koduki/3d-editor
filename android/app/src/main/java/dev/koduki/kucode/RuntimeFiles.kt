@@ -12,13 +12,20 @@ import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 
-internal fun writeBytesAtomically(target: File, content: ByteArray) {
+internal fun writeBytesAtomically(
+    target: File,
+    content: ByteArray,
+    worldReadable: Boolean = false,
+) {
     val parent = target.parentFile
         ?: throw IOException("Target file has no parent directory: $target")
     parent.mkdirs()
     val temporary = Files.createTempFile(parent.toPath(), ".pending-", ".tmp")
     try {
         Files.write(temporary, content)
+        if (worldReadable) {
+            TarGzExtractor.DefaultPosixFsOps.chmod(temporary.toFile(), 0b110_100_100)
+        }
         try {
             Files.move(
                 temporary,
@@ -38,8 +45,32 @@ internal fun writeBytesAtomically(target: File, content: ByteArray) {
     }
 }
 
-internal fun writeTextAtomically(target: File, content: String, charset: Charset = Charsets.UTF_8) {
-    writeBytesAtomically(target, content.toByteArray(charset))
+internal fun writeTextAtomically(
+    target: File,
+    content: String,
+    charset: Charset = Charsets.UTF_8,
+    worldReadable: Boolean = false,
+) {
+    writeBytesAtomically(target, content.toByteArray(charset), worldReadable = worldReadable)
+}
+
+internal fun ensureDirectoryWithMode(dir: File, mode: Int) {
+    val missing = mutableListOf<File>()
+    var current: File? = dir
+    while (current != null && !current.exists()) {
+        missing.add(current)
+        current = current.parentFile
+    }
+    dir.mkdirs()
+    for (created in missing.asReversed()) {
+        if (created.isDirectory) {
+            val createdMode = if (created == dir) mode else 0b111_101_101
+            TarGzExtractor.DefaultPosixFsOps.chmod(created, createdMode)
+        }
+    }
+    if (dir.isDirectory) {
+        TarGzExtractor.DefaultPosixFsOps.chmod(dir, mode)
+    }
 }
 
 /**

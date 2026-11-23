@@ -99,6 +99,7 @@ object DiagnosticsRunner {
             deviceInfo["Display / Window"] = queryDisplayInfo(context)
             deviceInfo["Input Devices (KB/Mouse)"] = queryInputDevices(context)
             deviceInfo["System DNS"] = if (systemDns.isEmpty()) "(fallback 1.1.1.1/8.8.8.8)" else systemDns.joinToString(", ")
+            deviceInfo["System CA Bundle"] = querySystemCaSummary(paths)
             deviceInfo["App"] = "${context.packageName} (targetSdk=${context.applicationInfo.targetSdkVersion})"
             deviceInfo["XR Spatial Feature"] =
                 context.packageManager.hasSystemFeature("android.software.xr.api.spatial").toString()
@@ -197,6 +198,39 @@ object DiagnosticsRunner {
         return "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node - $mode <<'KUCODE_PROBE_JS'\n$script\nKUCODE_PROBE_JS"
     }
 
+    internal fun httpsSystemCaProbeCommand(
+        url: String,
+        nodeBin: String = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node",
+    ): String = """
+        $nodeBin -e '
+          const fs = require("node:fs");
+          const https = require("node:https");
+          const caFile = process.env.SSL_CERT_FILE || "${PosixRuntimeConfig.GUEST_CA_BUNDLE}";
+          const ca = fs.readFileSync(caFile, "utf8");
+          if (!ca.includes("-----BEGIN CERTIFICATE-----")) {
+            console.error("Empty or invalid CA bundle: " + caFile);
+            process.exit(1);
+          }
+          const req = https.request(process.argv[1], {
+            method: "HEAD",
+            ca: [ca],
+            rejectUnauthorized: true,
+            timeout: 5000,
+            headers: { "User-Agent": "KuCode-Diagnostics" },
+          }, (res) => {
+            res.resume();
+            console.log("HTTP " + res.statusCode + " (verified via " + caFile + ")");
+            process.exitCode = (res.statusCode >= 200 && res.statusCode < 400) ? 0 : 1;
+          });
+          req.on("timeout", () => req.destroy(new Error("ETIMEDOUT")));
+          req.on("error", (e) => {
+            console.error((e.code || e.message) + " (ca=" + caFile + ")");
+            process.exitCode = 1;
+          });
+          req.end();
+        ' '$url'
+    """.trimIndent()
+
     internal fun networkChecks(): Map<String, String> {
         val node = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node"
         fun httpProbe(url: String) = """
@@ -207,9 +241,23 @@ object DiagnosticsRunner {
             ' '$url'
         """.trimIndent()
         return linkedMapOf(
+            "システム CA 証明書 & apt 設定" to """
+                set -e
+                ca="${'$'}{SSL_CERT_FILE:-${PosixRuntimeConfig.GUEST_CA_BUNDLE}}"
+                test -r "${'$'}ca"
+                count="${'$'}(grep -c -- '-----BEGIN CERTIFICATE-----' "${'$'}ca")"
+                test "${'$'}count" -gt 0
+                printf 'ca=%s (%s certs)\n' "${'$'}ca" "${'$'}count"
+                printf 'SSL_CERT_FILE=%s\n' "${'$'}{SSL_CERT_FILE:-unset}"
+                apt_cfg="${'$'}(apt-config dump APT::Sandbox::User APT::Sandbox::Seccomp Acquire::https::CaInfo)"
+                printf '%s\n' "${'$'}apt_cfg"
+                printf '%s\n' "${'$'}apt_cfg" | grep -q 'APT::Sandbox::User "root";'
+                printf '%s\n' "${'$'}apt_cfg" | grep -q 'Acquire::https::CaInfo'
+            """.trimIndent(),
             "DNS (deb.debian.org)" to "getent hosts deb.debian.org",
             "Debian apt HTTP" to httpProbe("http://deb.debian.org/debian/dists/bookworm/Release"),
-            "GitHub HTTPS" to httpProbe("https://api.github.com/zen"),
+            "Debian apt HTTPS (システム CA)" to httpsSystemCaProbeCommand("https://deb.debian.org/debian/dists/bookworm/Release"),
+            "GitHub HTTPS (システム CA)" to httpsSystemCaProbeCommand("https://api.github.com/zen"),
             "CLI (必須: bash/apt, 任意: git/gh/curl)" to """
                 set -e
                 command -v bash
@@ -219,6 +267,23 @@ object DiagnosticsRunner {
                 done
             """.trimIndent(),
         )
+    }
+
+    internal fun querySystemCaSummary(paths: PosixRuntimeConfig.Paths): String {
+        val caFile = paths.guestCaBundleHostFile
+        if (!caFile.isFile) return "missing (${PosixRuntimeConfig.GUEST_CA_BUNDLE})"
+        val count = runCatching { CaTrustSync.countCertificatesInPem(caFile.readText(Charsets.UTF_8)) }.getOrDefault(0)
+        val userCount = if (paths.androidUserCaBundleFile.isFile) {
+            runCatching { CaTrustSync.countCertificatesInPem(paths.androidUserCaBundleFile.readText(Charsets.UTF_8)) }.getOrDefault(0)
+        } else {
+            0
+        }
+        val source = if (File(paths.rootfsDir, "usr/sbin/update-ca-certificates").isFile) "debian+android" else "android-synced"
+        return if (userCount > 0) {
+            "$count certs ($source, user=$userCount)"
+        } else {
+            "$count certs ($source)"
+        }
     }
 
     private fun queryPageSize(): String {

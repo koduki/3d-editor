@@ -188,6 +188,141 @@ class LocalDiagnosticsServerTest {
         }
     }
 
+    @Test
+    fun servesAuthenticatedClipboardReadAndHandlesUnavailableAndOversizedPayloads() {
+        val clipboard = AtomicReference<String?>("こんにちは\nKuCode クリップボード")
+        val server = LocalDiagnosticsServer(
+            onRunDiagnostics = { "ok" },
+            onGetLogs = { "ok" },
+            onCopyToClipboard = { txt -> clipboard.set(txt); true },
+            onReadFromClipboard = { clipboard.get() },
+            onOpenBootPage = {},
+            onRequestStoragePermission = {},
+            onRestartServer = {},
+        )
+        val port = server.start()
+        try {
+            // Unauthorized GET /clipboard -> 403
+            val unauth = URL("http://127.0.0.1:$port/clipboard").openConnection() as HttpURLConnection
+            assertEquals(403, unauth.responseCode)
+            unauth.disconnect()
+
+            // Authorized UTF-8 clipboard read -> 200
+            val okConn = (URL("http://127.0.0.1:$port/clipboard").openConnection() as HttpURLConnection).apply {
+                setRequestProperty("X-KuCode-Token", server.authToken)
+            }
+            assertEquals(200, okConn.responseCode)
+            assertEquals("こんにちは\nKuCode クリップボード", okConn.inputStream.bufferedReader(Charsets.UTF_8).readText())
+            okConn.disconnect()
+
+            // Empty clipboard -> 200 with empty body
+            clipboard.set("")
+            val emptyConn = (URL("http://127.0.0.1:$port/clipboard").openConnection() as HttpURLConnection).apply {
+                setRequestProperty("X-KuCode-Token", server.authToken)
+            }
+            assertEquals(200, emptyConn.responseCode)
+            assertEquals("", emptyConn.inputStream.bufferedReader(Charsets.UTF_8).readText())
+            emptyConn.disconnect()
+
+            // Unavailable clipboard (null) -> 503
+            clipboard.set(null)
+            val unavailConn = (URL("http://127.0.0.1:$port/clipboard").openConnection() as HttpURLConnection).apply {
+                setRequestProperty("X-KuCode-Token", server.authToken)
+            }
+            assertEquals(503, unavailConn.responseCode)
+            unavailConn.disconnect()
+
+            // Oversized clipboard (> MAX_BODY_BYTES) -> 413
+            clipboard.set("x".repeat(LocalDiagnosticsServer.MAX_BODY_BYTES + 1))
+            val bigConn = (URL("http://127.0.0.1:$port/clipboard").openConnection() as HttpURLConnection).apply {
+                setRequestProperty("X-KuCode-Token", server.authToken)
+            }
+            assertEquals(413, bigConn.responseCode)
+            bigConn.disconnect()
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun clipboardHelperScriptsRoundTripWithLocalDiagnosticsServer() {
+        val clipboard = AtomicReference<String?>("")
+        val server = LocalDiagnosticsServer(
+            onRunDiagnostics = { "ok" },
+            onGetLogs = { "ok" },
+            onCopyToClipboard = { txt -> clipboard.set(txt); true },
+            onReadFromClipboard = { clipboard.get() },
+            onOpenBootPage = {},
+            onRequestStoragePermission = {},
+            onRestartServer = {},
+        )
+        val tmpDir = java.nio.file.Files.createTempDirectory("kucode-clip-cli").toFile()
+        val port = server.start()
+        try {
+            val scripts = PosixRuntimeConfig.buildClipboardHelperScripts()
+            val copyScript = java.io.File(tmpDir, "kucode-copy").apply { writeText(scripts.getValue("kucode-copy")) }
+            val pasteScript = java.io.File(tmpDir, "kucode-paste").apply { writeText(scripts.getValue("kucode-paste")) }
+
+            // 1. kucode-copy via argv
+            val argvProc = ProcessBuilder("node", copyScript.absolutePath, "hello", "xr", "world").apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            assertEquals(0, argvProc.waitFor())
+            assertEquals("hello xr world", clipboard.get())
+
+            // 2. kucode-copy via stdin (UTF-8 + multiline)
+            val multiline = "一行目\n二行目\nfinal line"
+            val stdinProc = ProcessBuilder("node", copyScript.absolutePath).apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            stdinProc.outputStream.use { it.write(multiline.toByteArray(Charsets.UTF_8)) }
+            assertEquals(0, stdinProc.waitFor())
+            assertEquals(multiline, clipboard.get())
+
+            // 3. kucode-paste reads full payload back on stdout
+            val pasteProc = ProcessBuilder("node", pasteScript.absolutePath).apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            val pasted = pasteProc.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            assertEquals(0, pasteProc.waitFor())
+            assertEquals(multiline, pasted)
+
+            // 4. Large payload (~200 KiB) must flush completely to stdout without truncation
+            val largeText = "0123456789abcdef\n".repeat(12_000)
+            clipboard.set(largeText)
+            val largePasteProc = ProcessBuilder("node", pasteScript.absolutePath).apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            val largeOut = largePasteProc.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            assertEquals(0, largePasteProc.waitFor())
+            assertEquals(largeText.length, largeOut.length)
+            assertEquals(largeText, largeOut)
+
+            // 5. Invalid token fails with non-zero exit and HTTP 403
+            val badTokenProc = ProcessBuilder("node", pasteScript.absolutePath).apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = "wrong-token"
+            }.start()
+            val badTokenErr = badTokenProc.errorStream.bufferedReader(Charsets.UTF_8).readText()
+            assertTrue(badTokenProc.waitFor() != 0)
+            assertTrue(badTokenErr.contains("403"))
+
+            // 6. Missing env fails cleanly
+            val noEnvProc = ProcessBuilder("node", copyScript.absolutePath, "x").apply {
+                environment().remove("KUCODE_ADMIN_PORT")
+                environment().remove("KUCODE_ADMIN_TOKEN")
+            }.start()
+            assertTrue(noEnvProc.waitFor() != 0)
+        } finally {
+            server.stop()
+            deleteTreeNoFollow(tmpDir)
+        }
+    }
+
     private fun sendRawHttpStatus(port: Int, rawRequest: String): Int {
         Socket("127.0.0.1", port).use { socket ->
             socket.soTimeout = 3_000
@@ -202,3 +337,4 @@ class LocalDiagnosticsServerTest {
         }
     }
 }
+

@@ -46,7 +46,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
 │  │  ・jniLibs/arm64-v8a/libproot.so + libproot-loader.so    │  │
 │  │  ・PROOT_LOADER により targetSdk=35 (W^X) のまま実行     │  │
 │  │  ・/workspace & /root を rootfs 外に永続分離マウント     │  │
-│  │  ・ダミー /proc, /dev/shm, 動的 /etc/resolv.conf 生成    │  │
+│  │  ・ダミー /proc, /dev/shm, 動的 DNS & Android CA 同期    │  │
 │  │  ・内蔵拡張 kucode-tools (左 Activity Bar メニュー)      │  │
 │  └──────────────────────────┬───────────────────────────────┘  │
 │                             │                                  │
@@ -106,6 +106,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
             │       ├── PosixRuntimeManager.kt
             │       ├── RuntimeStatusStore.kt
             │       ├── RuntimeInstaller.kt
+            │       ├── CaTrustSync.kt
             │       ├── OpenVsCodeLauncher.kt
             │       ├── PosixShellExecutor.kt
             │       ├── RuntimeFiles.kt
@@ -126,7 +127,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
 ## 4. 実機検証ゲート（XREAL AURA / Android XR）
 
 1. **PRoot 起動ゲート**：`targetSdk = 35` で `libproot.so` + `libproot-loader.so` が Debian `bash` / `node` を起動できること。
-2. **基礎エディタゲート**：`openvscode-server` が `http://127.0.0.1:<port>` で起動し、ファイルの開閉・編集・保存・物理キーボードショートカット（`Ctrl+S`, `Ctrl+W`）・日本語 IME が機能すること。
+2. **基礎エディタゲート**：`openvscode-server` が `http://127.0.0.1:<port>` で起動し、ファイルの開閉・編集・保存・物理キーボードショートカット（`Ctrl+S`, `Ctrl+W`, `Ctrl+C`/`Ctrl+X`/`Ctrl+V`, ターミナル `Ctrl+Shift+C`/`Ctrl+Shift+V`）・日本語 IME が機能すること。
 3. **ファイル連携 & CLI ゲート**：
    - Android XR の Files アプリから「KuCode」の `/workspace` を開いてファイル読み書きできること。
    - `/workspace/android` から Android 側ファイルを開いて保存できること。

@@ -110,8 +110,140 @@ class DiagnosticsRunnerTest {
         assertTrue(command.endsWith("\nKUCODE_PROBE_JS"))
 
         val checks = DiagnosticsRunner.networkChecks()
+        assertTrue(checks.getValue("システム CA 証明書 & apt 設定").contains("apt-config dump"))
         assertTrue(checks.getValue("DNS (deb.debian.org)").contains("getent hosts"))
         assertTrue(checks.getValue("Debian apt HTTP").contains("deb.debian.org"))
-        assertTrue(checks.getValue("GitHub HTTPS").contains("api.github.com"))
+        assertTrue(checks.getValue("Debian apt HTTPS (システム CA)").contains("https://deb.debian.org"))
+        assertTrue(checks.getValue("Debian apt HTTPS (システム CA)").contains("ca: [ca]"))
+        assertTrue(checks.getValue("GitHub HTTPS (システム CA)").contains("https://api.github.com/zen"))
+        assertTrue(checks.getValue("GitHub HTTPS (システム CA)").contains("User-Agent"))
+    }
+
+    @Test
+    fun querySystemCaSummary_reportsMissingAndSyncedCounts() {
+        val base = Files.createTempDirectory("kucode-diag-ca").toFile()
+        try {
+            val paths = PosixRuntimeConfig.Paths(
+                runtimeRoot = java.io.File(base, "runtime"),
+                workspaceDir = java.io.File(base, "workspace"),
+                homeDir = java.io.File(base, "home"),
+                nativeLibDir = java.io.File(base, "native"),
+                androidSharedDir = java.io.File(base, "shared"),
+            )
+            assertTrue(DiagnosticsRunner.querySystemCaSummary(paths).startsWith("missing"))
+
+            CaTrustSync.syncIntoRootfs(
+                paths,
+                listOf(
+                    CaCertificateEntry("system:a.0", byteArrayOf(0x30, 0x01), isUserAdded = false),
+                    CaCertificateEntry("user:b.0", byteArrayOf(0x30, 0x02), isUserAdded = true),
+                ),
+            )
+            assertEquals("2 certs (android-synced, user=1)", DiagnosticsRunner.querySystemCaSummary(paths))
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    @Category(MediumTest::class)
+    fun httpsSystemCaProbe_strictlyUsesConfiguredCaBundleAndAptConfParsesCleanly() {
+        val dir = Files.createTempDirectory("kucode-https-probe-test").toFile()
+        var serverProc: Process? = null
+        try {
+            // 1. Verify apt-config parses KuCode's apt PRoot drop-in cleanly when apt-config is installed
+            val aptConfigAvailable = runCatching {
+                ProcessBuilder("sh", "-c", "command -v apt-config >/dev/null").start().waitFor() == 0
+            }.getOrDefault(false)
+            if (aptConfigAvailable) {
+                val confFile = dir.resolve("99kucode-proot")
+                confFile.writeText(PosixRuntimeConfig.buildAptProotConf())
+                val dumpProc = ProcessBuilder(
+                    "apt-config", "-c", confFile.absolutePath, "dump",
+                    "APT::Sandbox::User", "APT::Sandbox::Seccomp", "Acquire::https::CaInfo",
+                ).redirectErrorStream(true).start()
+                val dumpOut = dumpProc.inputStream.bufferedReader().readText()
+                assertEquals(0, dumpProc.waitFor())
+                assertTrue(dumpOut.contains("""APT::Sandbox::User "root";"""))
+                assertTrue(dumpOut.contains("""APT::Sandbox::Seccomp "false";"""))
+                assertTrue(dumpOut.contains("""Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";"""))
+            }
+
+            // 2. Exercise DiagnosticsRunner.httpsSystemCaProbeCommand against a real local TLS server
+            val hasTools = runCatching {
+                ProcessBuilder("sh", "-c", "command -v node >/dev/null && command -v openssl >/dev/null").start().waitFor() == 0
+            }.getOrDefault(false)
+            org.junit.Assume.assumeTrue(hasTools)
+
+            val keyA = dir.resolve("a.key")
+            val crtA = dir.resolve("a.crt")
+            val keyB = dir.resolve("b.key")
+            val crtB = dir.resolve("b.crt")
+            assertEquals(
+                0,
+                ProcessBuilder(
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                    "-keyout", keyA.absolutePath, "-out", crtA.absolutePath,
+                    "-days", "1", "-nodes", "-subj", "/CN=localhost",
+                    "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                ).redirectErrorStream(true).start().waitFor(),
+            )
+            assertEquals(
+                0,
+                ProcessBuilder(
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                    "-keyout", keyB.absolutePath, "-out", crtB.absolutePath,
+                    "-days", "1", "-nodes", "-subj", "/CN=other",
+                ).redirectErrorStream(true).start().waitFor(),
+            )
+
+            val serverScript = """
+                const fs = require("node:fs");
+                const https = require("node:https");
+                const srv = https.createServer(
+                  { key: fs.readFileSync(process.argv[1]), cert: fs.readFileSync(process.argv[2]) },
+                  (req, res) => { res.writeHead(200); res.end(); }
+                );
+                srv.listen(0, "127.0.0.1", () => console.log("PORT=" + srv.address().port));
+            """.trimIndent()
+            serverProc = ProcessBuilder("node", "-e", serverScript, keyA.absolutePath, crtA.absolutePath)
+                .redirectErrorStream(true)
+                .start()
+            val portLine = serverProc.inputStream.bufferedReader().readLine()
+            assertTrue("Expected PORT=..., got $portLine", portLine != null && portLine.startsWith("PORT="))
+            val port = portLine!!.removePrefix("PORT=").toInt()
+
+            val probeCmd = DiagnosticsRunner.httpsSystemCaProbeCommand("https://127.0.0.1:$port/", nodeBin = "node")
+
+            fun runProbe(caFile: String): Pair<Int, String> {
+                val p = ProcessBuilder("sh", "-c", probeCmd).apply {
+                    redirectErrorStream(true)
+                    environment()["SSL_CERT_FILE"] = caFile
+                }.start()
+                val out = p.inputStream.bufferedReader().readText()
+                return p.waitFor() to out
+            }
+
+            // Trusted multi-cert bundle succeeds
+            val multiBundle = dir.resolve("trusted.crt").apply {
+                writeText(crtB.readText() + "\n" + crtA.readText())
+            }
+            val (okCode, okOut) = runProbe(multiBundle.absolutePath)
+            assertEquals("Expected trusted CA bundle to pass, output: $okOut", 0, okCode)
+            assertTrue(okOut.contains("HTTP 200"))
+
+            // Untrusted CA bundle fails
+            val (badCode, badOut) = runProbe(crtB.absolutePath)
+            assertTrue("Expected untrusted CA bundle to fail, output: $badOut", badCode != 0)
+
+            // Empty CA bundle fails (never falls back to Node built-in CAs)
+            val emptyBundle = dir.resolve("empty.crt").apply { writeText("") }
+            val (emptyCode, emptyOut) = runProbe(emptyBundle.absolutePath)
+            assertTrue("Expected empty CA bundle to fail, output: $emptyOut", emptyCode != 0)
+            assertTrue(emptyOut.contains("Empty or invalid CA bundle"))
+        } finally {
+            serverProc?.destroyForcibly()
+            deleteTreeNoFollow(dir)
+        }
     }
 }

@@ -68,6 +68,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val onOpenBootPage: () -> Unit,
         val onRequestStoragePermission: () -> Unit,
         val onCopyToClipboard: (String) -> Boolean,
+        val onReadFromClipboard: () -> String? = { null },
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -80,6 +81,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     private val installer = RuntimeInstaller(
         openAsset = { path -> appContext.assets.open(path) },
         querySystemDnsServers = ::querySystemDnsServers,
+        loadHostCaCertificates = CaTrustSync::loadAndroidTrustStoreCertificates,
         onProgress = { message, pct ->
             statusStore.update(hasAllFilesAccess()) {
                 it.copy(state = State.EXTRACTING, message = message, progress = pct)
@@ -110,6 +112,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         onRunDiagnostics = { DiagnosticsRunner.collect(appContext, this) },
         onGetLogs = { getLogsText() },
         onCopyToClipboard = { text -> hostActions?.onCopyToClipboard?.invoke(text) ?: false },
+        onReadFromClipboard = { hostActions?.onReadFromClipboard?.invoke() },
         onOpenBootPage = { hostActions?.onOpenBootPage?.invoke() },
         onRequestStoragePermission = { hostActions?.onRequestStoragePermission?.invoke() },
         onRestartServer = { restart() },
