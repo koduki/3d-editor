@@ -42,7 +42,7 @@ XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエデ
 
 ### 1. インストール
 
-日常利用（`~/.ssh` や `gh` 認証トークン等を保存する用途）では、[GitHub Releases](https://github.com/koduki/3d-editor/releases) から署名済みリリース版 **`kucode-release.apk`** を取得するか、下記のローカル手順で署名済みリリース APK をビルドしてインストールしてください。
+日常利用（`~/.ssh` や `gh` 認証トークン等を保存する用途）では、[GitHub Releases](https://github.com/koduki/kucode/releases) から署名済みリリース版 **`kucode-release.apk`** を取得するか、下記のローカル手順で署名済みリリース APK をビルドしてインストールしてください。
 
 ```bash
 adb install -r kucode-release.apk

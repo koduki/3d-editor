@@ -59,14 +59,14 @@ In accordance with GNU GPL v2 (§3), GNU GPL v3 (§6), and GNU LGPL v3 (§4), th
 
 1. **PRoot + Samba talloc (`libproot.so`, `libproot-loader.so`):**
    - Exact source archives, 1-line patch, and reproducible cross-compilation script:
-     - Build script & patch: `scripts/build-proot-android.sh` in https://github.com/koduki/3d-editor
+     - Build script & patch: `scripts/build-proot-android.sh` in https://github.com/koduki/kucode
      - PRoot source tag: `https://github.com/termux/proot/archive/refs/tags/v5.1.107.102.tar.gz`
      - Samba talloc source: `https://www.samba.org/ftp/talloc/talloc-2.5.0.tar.gz`
 2. **Debian `bookworm-slim` (`arm64`) packages:**
    - The exact binary and source package names and versions bundled in each APK are recorded in `assets/licenses/debian-manifest.txt` (and attached to GitHub Releases).
    - Matching Debian source packages (`.dsc`, `.orig.tar.*`, `.debian.tar.*`) can be retrieved from Debian's official archive (`https://snapshot.debian.org/package/<source_package>/<source_version>/` or `apt-get source <package>=<version>`).
 3. **Three-Year Written Offer:**
-   - For at least **three (3) years** following the distribution of any KuCode binary release, upon request via a GitHub Issue at https://github.com/koduki/3d-editor/issues (specifying the APK version / release tag), the project maintainer will provide a complete, machine-readable copy of the Corresponding Source code (including patches and build scripts) for all bundled GPL/LGPL components at no charge via electronic download (or for no more than the physical cost of distribution).
+   - For at least **three (3) years** following the distribution of any KuCode binary release, upon request via a GitHub Issue at https://github.com/koduki/kucode/issues (specifying the APK version / release tag), the project maintainer will provide a complete, machine-readable copy of the Corresponding Source code (including patches and build scripts) for all bundled GPL/LGPL components at no charge via electronic download (or for no more than the physical cost of distribution).
 
 ---
 
