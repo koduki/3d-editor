@@ -71,15 +71,20 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
 
 ## 3. ディレクトリ構成
 
+設計判断の背景・代替案・トレードオフは [`docs/adr/`](docs/adr/README.md)（ADR-0001〜0008）を参照。
+
 ```text
 .
 ├── spec.md
 ├── README.md
+├── LICENSE
 ├── THIRD_PARTY_NOTICES.md
+├── LICENSES/                             # 同梱 OSS ライセンス全文（ビルド時に APK へ自動同期）
+├── docs/adr/                             # Architecture Decision Records (ADR-0001〜0008)
 ├── .github/workflows/ci.yml              # NDK proot + Debian rootfs + openvscode-server 同梱 APK ビルド
 ├── scripts/
 │   ├── build-proot-android.sh            # Android NDK で libproot.so / libproot-loader.so をビルド
-│   └── fetch-runtime-assets.sh           # Debian minimal rootfs + openvscode-server を取得
+│   └── fetch-runtime-assets.sh           # Debian minimal rootfs + openvscode-server + debian-manifest.txt を生成
 └── android/
     ├── settings.gradle.kts
     ├── build.gradle.kts
@@ -90,7 +95,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
             ├── main/
             │   ├── AndroidManifest.xml
             │   ├── assets/boot.html
-            │   ├── assets/runtime/       # CI/スクリプトで .tgz を配置 (noCompress)
+            │   ├── assets/runtime/       # CI/スクリプトで .tgz & debian-manifest.txt を配置
             │   ├── jniLibs/arm64-v8a/    # CI/スクリプトで libproot*.so を配置
             │   └── java/dev/koduki/xreditor/
             │       ├── MainActivity.kt
