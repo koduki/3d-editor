@@ -15,7 +15,7 @@
    - **識別子:** `kucode` / `ku-code`
    - **タグライン:**
      - 日: **空間に、書く。**（説明調: *APK 1 本で完結する、空間コンピューティングのためのコードエディタ。*）
-     - 英: **Code in the space.** / *A self-contained code editor for spatial computing.*
+     - 英: **A code editor for spatial computing.**
 
 2. **名前の由来**
    - **空（くう）** に二つの意味を重ねる：

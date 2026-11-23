@@ -1,11 +1,11 @@
 # KuCode
 
 **空間に、書く。**
-*Code in the space. — A self-contained code editor for spatial computing.*
+*A code editor for spatial computing.*
 
 XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエディタ。
 
-物理キーボードとマウスを想定して、vscode−serverの構築・起動や Termuxなどの別途導入は不要で、単一のAPKをインストールだけで動作します。
+物理キーボードとマウスを想定して、`openvscode-server` の構築・起動や Termux などの別途導入は不要で、単一の APK をインストールするだけで動作します。
 
 内蔵の **`openvscode-server` + Debian 12 minimal (`arm64`)** がローカルで自動起動し、キーボード＋マウス／トラックパッドですぐにコードを書き始められます。
 
@@ -25,11 +25,11 @@ XREAL AURAを想定したAndroid XR向けのVisual Studio Codeベースのエデ
 ## コンセプト
 
 1. **APK 1 本で完結**
-   `PRoot`・`Debian 12 (bookworm-slim, arm64)`・`openvscode-server`・ライセンス一式を約 109 MiB の APK に同梱。初回起動時に自動展開・自動起動するため、vscode−server構築も Termux の別途導入も不要.
+   `PRoot`・`Debian 12 (bookworm-slim, arm64)`・`openvscode-server`・ライセンス一式を約 109 MiB の APK に同梱。初回起動時に自動展開・自動起動するため、`openvscode-server` の構築も Termux の別途導入も不要です。
 2. **空間デスクトップ最適化**
    物理キーボード＋マウス／トラックパッド前提で設計し、スマホ向け仮想キーや過剰な独自 UI は持ちません。
 3. **Android 標準準拠でクリーン**
-   `targetSdk = 35` を維持し、分離ローダー型 PRoot（16KB ページ対応）と Android 標準 SDK によるクリーンな Kotlin 実装
+   `targetSdk = 35` を維持し、分離ローダー型 PRoot（16KB ページ対応）と Android 標準 SDK によるクリーンな Kotlin 実装です。
 
 ## 開発方針
 
