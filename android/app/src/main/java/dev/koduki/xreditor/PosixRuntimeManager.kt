@@ -21,6 +21,9 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.URL
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
@@ -108,6 +111,15 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     @Volatile
     private var hostActions: HostActions? = null
 
+    @Volatile
+    private var editorToken: String? = null
+
+    fun editorLaunchUrl(): String? {
+        val token = editorToken ?: return null
+        val url = getStatus().serverUrl
+        return if (url.isEmpty()) null else "$url&tkn=$token"
+    }
+
     private val diagnosticsServer = LocalDiagnosticsServer(
         onRunDiagnostics = { DiagnosticsRunner.collect(appContext, this) },
         onGetLogs = { getLogsText() },
@@ -194,6 +206,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     emitStatus()
                     return@withLock
                 }
+                if (serverProcess != null) stopInternal()
                 startInternal()
             }
         }
@@ -288,12 +301,12 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
 
         try {
-            migrateLegacyWorkspaceIfNeeded(paths)
             ensureExtracted(paths)
             prepareRuntimeDirectories(paths)
             ensureMinimalVsCodeSettings(paths)
             launchOpenVsCodeServer(paths, allowSeccompRetry = true)
         } catch (t: Throwable) {
+            stopInternal()
             appendLog("[error] Startup failed: ${t.stackTraceToString()}")
             updateStatus(State.ERROR, "起動失敗: ${t.message}", progress)
         }
@@ -301,53 +314,32 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
     private fun stopInternal() {
         val proc = serverProcess
-        serverProcess = null
-        if (proc != null) {
+        if (proc != null && proc.isAlive) {
             appendLog("[runtime] Stopping openvscode-server...")
-            runCatching { proc.destroy() }
-            runCatching {
-                if (!proc.waitFor(2, TimeUnit.SECONDS)) {
-                    proc.destroyForcibly()
-                }
+            proc.destroy()
+            if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+                proc.destroyForcibly()
+                proc.waitFor()
             }
         }
+        serverProcess = null
+        editorToken = null
         serverPort = 0
         diagnosticsServer.stop()
         updateStatus(State.IDLE, "停止しました", 0)
     }
 
-    /**
-     * One-time safe migration for early v0.5.0 installs where `/workspace` lived
-     * inside `runtime/rootfs/workspace` instead of decoupled `filesDir/workspace`.
-     */
-    private fun migrateLegacyWorkspaceIfNeeded(paths: PosixRuntimeConfig.Paths) {
-        migrateLegacyDirectory(paths.legacyRootfsWorkspaceDir, paths.workspaceDir, "workspace")
-        migrateLegacyDirectory(paths.legacyRootfsHomeDir, paths.homeDir, "home (/root)")
-    }
-
-    private fun migrateLegacyDirectory(legacy: File, destDir: File, label: String) {
-        if (!legacy.exists() || !legacy.isDirectory) return
-        val legacyEntries = legacy.listFiles() ?: return
-        val realEntries = legacyEntries.filter { !Files.isSymbolicLink(it.toPath()) }
-        if (realEntries.isEmpty()) return
-
-        destDir.mkdirs()
-        var migrated = 0
-        for (item in realEntries) {
-            val dest = File(destDir, item.name)
-            if (!dest.exists()) {
-                if (!item.renameTo(dest)) {
-                    runCatching { item.copyRecursively(dest, overwrite = false) }
-                }
-                migrated++
+    private fun ensureExtracted(paths: PosixRuntimeConfig.Paths) {
+        // Recover an interrupted swap before checking the current installation.
+        val backup = File(paths.runtimeRoot, "rootfs.previous")
+        if (backup.exists()) {
+            if (paths.rootfsDir.exists() && paths.versionMarker.isFile && paths.versionMarker.readText() == PosixRuntimeConfig.RUNTIME_VERSION) {
+                removeRuntimeTree(backup)
+            } else {
+                removeRuntimeTree(paths.rootfsDir)
+                Files.move(backup.toPath(), paths.rootfsDir.toPath(), StandardCopyOption.ATOMIC_MOVE)
             }
         }
-        if (migrated > 0) {
-            appendLog("[runtime] Migrated $migrated item(s) from legacy $label to decoupled storage")
-        }
-    }
-
-    private fun ensureExtracted(paths: PosixRuntimeConfig.Paths) {
         val installed = paths.versionMarker.takeIf { it.exists() }?.readText()?.trim()
         val hasServerBin = File(paths.openvscodeDir, "bin/openvscode-server").exists()
         if (installed == PosixRuntimeConfig.RUNTIME_VERSION && hasServerBin) {
@@ -359,10 +351,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         appendLog("[runtime] Extracting embedded Debian minimal rootfs...")
 
         paths.runtimeRoot.mkdirs()
-        if (paths.stagingDir.exists()) {
-            paths.stagingDir.deleteRecursively()
-        }
-        paths.stagingDir.mkdirs()
+        removeRuntimeTree(paths.stagingDir)
+        Files.createDirectory(paths.stagingDir.toPath())
 
         appContext.assets.open(PosixRuntimeConfig.ASSET_ROOTFS).use { stream ->
             val stats = TarGzExtractor.extract(
@@ -378,7 +368,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
         updateStatus(State.EXTRACTING, "初回セットアップ: openvscode-server を展開中...", 50)
         appendLog("[runtime] Extracting embedded openvscode-server...")
-        val stagingVscode = File(paths.stagingDir, "opt/openvscode-server")
+        val stagingVscode = TarGzExtractor.resolveSafeChild(paths.stagingDir.canonicalFile, "opt/openvscode-server")
         appContext.assets.open(PosixRuntimeConfig.ASSET_OPENVSCODE).use { stream ->
             val stats = TarGzExtractor.extract(
                 input = stream,
@@ -391,17 +381,32 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             appendLog("[runtime] openvscode-server extracted: $stats")
         }
 
-        // Atomic swap of rootfs only — user filesDir/workspace and filesDir/home are untouched
+        Files.deleteIfExists(paths.versionMarker.toPath())
         if (paths.rootfsDir.exists()) {
-            paths.rootfsDir.deleteRecursively()
+            Files.move(paths.rootfsDir.toPath(), backup.toPath(), StandardCopyOption.ATOMIC_MOVE)
         }
-        if (!paths.stagingDir.renameTo(paths.rootfsDir)) {
-            throw IllegalStateException("Failed to move staging rootfs into place")
-        }
-
-        paths.versionMarker.writeText(PosixRuntimeConfig.RUNTIME_VERSION)
+        Files.move(paths.stagingDir.toPath(), paths.rootfsDir.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        // Commit the staged root only after the editor has successfully started.
         updateStatus(State.EXTRACTING, "展開完了。サーバーを起動します...", 88)
         appendLog("[runtime] Extraction finished cleanly.")
+    }
+
+    private fun writePrivateFile(target: File, value: String) {
+        val temporary = Files.createTempFile(target.parentFile!!.toPath(), ".pending-", null)
+        try {
+            Files.write(temporary, value.toByteArray(Charsets.US_ASCII))
+            Files.move(temporary, target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            Files.deleteIfExists(temporary)
+        }
+    }
+
+    private fun removeRuntimeTree(root: File) {
+        // Files.walk does not follow links. A Debian rootfs contains guest-absolute symlinks.
+        if (!Files.exists(root.toPath(), LinkOption.NOFOLLOW_LINKS)) return
+        Files.walk(root.toPath()).use { entries ->
+            entries.sorted(Comparator.reverseOrder()).forEach { Files.delete(it) }
+        }
     }
 
     private fun ensureMountPointDirsExist(paths: PosixRuntimeConfig.Paths) {
@@ -491,6 +496,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         serverPort = port
         updateStatus(State.STARTING, "内蔵 openvscode-server を起動中 (127.0.0.1:$port)...", 92)
 
+        val token = generateConnectionToken()
+        // Replace the directory entry atomically, including any stale token from an interrupted boot.
+        writePrivateFile(File(paths.vscodeDataDir, ".editor-token"), token)
         val guestCmd = PosixRuntimeConfig.buildOpenVsCodeServerCommand(port)
         val prootCmd = PosixRuntimeConfig.buildProotCommand(paths, guestCmd)
         appendLog("[runtime] Launching PRoot (disableSeccomp=$disableSeccomp) on 127.0.0.1:$port (admin=$adminPort)")
@@ -509,13 +517,17 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val proc = pb.start()
         serverProcess = proc
 
+        val announced = AtomicBoolean(false)
         // Drain process output continuously into the ring buffer
         scope.launch {
             runCatching {
                 BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                     while (isActive) {
                         val line = reader.readLine() ?: break
-                        appendLog(line)
+                        if (line.contains("http://localhost:$port") && line.contains("?tkn=$token")) {
+                            announced.set(true)
+                        }
+                        appendLog(line.replace(token, "[redacted]"))
                     }
                 }
             }
@@ -537,10 +549,15 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     launchOpenVsCodeServer(paths, allowSeccompRetry = false)
                     return
                 }
+                stopInternal()
                 updateStatus(State.ERROR, "openvscode-server の起動に失敗しました (exit=$exitCode)", 0)
                 return
             }
-            if (isHttpReady(port)) {
+            if (announced.get() && editorRejectsAnonymousRequests(port)) {
+                if (!paths.versionMarker.exists()) {
+                    writePrivateFile(paths.versionMarker, PosixRuntimeConfig.RUNTIME_VERSION)
+                }
+                editorToken = token
                 updateStatus(State.READY, "起動完了 (127.0.0.1:$port)", 100)
                 appendLog("[runtime] openvscode-server is READY at http://127.0.0.1:$port")
                 return
@@ -548,6 +565,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             delay(350)
         }
 
+        stopInternal()
         updateStatus(State.ERROR, "openvscode-server 応答タイムアウト (45s)", 0)
     }
 
@@ -573,7 +591,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
     }
 
-    private fun isHttpReady(port: Int): Boolean {
+    internal fun editorRejectsAnonymousRequests(port: Int): Boolean {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection).apply {
@@ -582,7 +600,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 readTimeout = 500
                 instanceFollowRedirects = false
             }
-            conn.responseCode in 200..399
+            conn.responseCode == HttpURLConnection.HTTP_FORBIDDEN
         } catch (_: Throwable) {
             false
         } finally {

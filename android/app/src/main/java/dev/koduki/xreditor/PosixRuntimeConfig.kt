@@ -33,8 +33,6 @@ object PosixRuntimeConfig {
     ) {
         val rootfsDir: File get() = File(runtimeRoot, "rootfs")
         val stagingDir: File get() = File(runtimeRoot, "staging")
-        val legacyRootfsWorkspaceDir: File get() = File(rootfsDir, "workspace")
-        val legacyRootfsHomeDir: File get() = File(rootfsDir, "root")
         val openvscodeDir: File get() = File(rootfsDir, "opt/openvscode-server")
         val sysdataDir: File get() = File(runtimeRoot, "sysdata")
         val shmDir: File get() = File(runtimeRoot, "shm")
@@ -56,7 +54,7 @@ object PosixRuntimeConfig {
         port: Int,
         editorServerPort: Int,
     ): Boolean {
-        if (scheme == "file") return true
+        if (scheme != "http") return false
         if ((host == "127.0.0.1" || host == "localhost") && editorServerPort > 0 && port == editorServerPort) {
             return true
         }
@@ -133,7 +131,7 @@ object PosixRuntimeConfig {
         GUEST_OPENVSCODE_BIN,
         "--host", "127.0.0.1",
         "--port", port.toString(),
-        "--without-connection-token",
+        "--connection-token-file", "$GUEST_VSCODE_DATA/.editor-token",
         "--accept-server-license-terms",
         "--telemetry-level", "off",
         "--disable-workspace-trust",

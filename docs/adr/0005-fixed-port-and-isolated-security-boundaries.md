@@ -14,15 +14,16 @@
 ## 決定事項（Decision）
 
 1. **優先固定ポート `18765`**：`PosixRuntimeConfig.PREFERRED_SERVER_PORT = 18765` を優先バインドし、使用中の場合のみ OS 割り当てのエフェメラルポートへフォールバックする。
+   - IDE は管理 API と独立した起動ごとの接続トークンを要求する。アプリが認証付き URL を開き、起動ログではトークンを伏せる。
 2. **`XREditorHost` の厳格隔離と非同期化**：
-   - `XREditorHost` と `allowFileAccess = true` は `file:///android_asset/boot.html` 表示中のみ有効化し、`openvscode-server` へ遷移する直前に `removeJavascriptInterface`・`allowFileAccess = false` で切り離す。
+   - 管理画面は同梱の `boot.html` 専用 WebView に分離し、このビューにのみ `XREditorHost` を登録する。エディタ用 WebView を保持したまま表示を切り替える。
    - 診断やミニ CLI 実行は `BootHostBridge` 内で `Dispatchers.IO` コルーチンへ非同期委譲し、完了時にコールバック（`window.__onDiagnosticsResult` / `window.__onCommandResult`）で返す。
 3. **トークン認証ループバック管理 API（`LocalDiagnosticsServer`）**：
    - 内蔵 VS Code 拡張（`xr-editor-tools`）から Android 側機能（診断実行・ログ取得・クリップボードコピー・管理画面遷移・ストレージ権限・再起動）を呼ぶ経路は、`127.0.0.1` 限定バインドの `LocalDiagnosticsServer` に一本化する。
    - 起動ごとに `SecureRandom` で生成した 24 バイトランダムトークン（`XR_ADMIN_TOKEN`）を PRoot プロセス環境変数経由で渡し、全リクエストで `X-XR-Token` ヘッダ一致を検証する（タイムアウト 60 秒）。
    - `ClipboardManager` 書き込みは `MainLooper` 上で実行し、バックグラウンドスレッド例外を防ぐ。
 4. **ポート認識 URL ルーティング**：
-   - `PosixRuntimeConfig.shouldKeepInsideWebView` で `file://` とエディタ自身のポート（`127.0.0.1:<editorPort>`）のみ WebView 内に留め、他ポートの `localhost`（例 `:3000`）や外部 URL は `Intent.ACTION_VIEW` で Android XR 上の別ブラウザウィンドウへ開く。
+   - `PosixRuntimeConfig.shouldKeepInsideWebView` で エディタ自身の HTTP ポート（`127.0.0.1:<editorPort>`）のみ WebView 内に留め、他ポートの `localhost`（例 `:3000`）や外部 URL は `Intent.ACTION_VIEW` で Android XR 上の別ブラウザウィンドウへ開く。
 
 ## 検討した代替案（Alternatives Considered）
 

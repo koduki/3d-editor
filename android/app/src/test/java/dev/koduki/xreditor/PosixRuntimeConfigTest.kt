@@ -31,7 +31,8 @@ class PosixRuntimeConfigTest {
         assertTrue(cmd.contains("/data/user/0/dev.koduki.xreditor/files/home:/root"))
         assertTrue(cmd.contains("/sdcard/Android/data/dev.koduki.xreditor/files/shared:/android/shared"))
         assertTrue(cmd.contains("/storage/emulated/0:/android/sdcard"))
-        assertTrue(cmd.contains("--without-connection-token"))
+        assertFalse(cmd.contains("--without-connection-token"))
+        assertEquals("/var/lib/xr-vscode/.editor-token", cmd[cmd.indexOf("--connection-token-file") + 1])
         assertTrue(cmd.contains("18765"))
 
         val env = PosixRuntimeConfig.buildProotEnvironment(
@@ -48,7 +49,7 @@ class PosixRuntimeConfigTest {
 
     @Test
     fun shouldKeepInsideWebView_routesOtherLocalhostPortsToExternalBrowser() {
-        assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("file", "", -1, 18765))
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("file", "", -1, 18765))
         assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 18765, 18765))
         assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 18765, 18765))
 

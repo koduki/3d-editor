@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.View
 import android.view.KeyEvent
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
@@ -28,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Single-window Android XR Activity hosting:
  * 1. Pure-black boot/diagnostics page (`file:///android_asset/boot.html`) with isolated `XREditorHost` bridge
- * 2. Embedded `openvscode-server` (`http://127.0.0.1:18765/?folder=/workspace`) with `XREditorHost` removed,
+ * 2. Dedicated authenticated editor WebView, without a native bridge, with
  *    native trusted KeyEvents flowing directly to Monaco / xterm.js, and XR multi-window focus dimming
  */
 class MainActivity : AppCompatActivity() {
@@ -42,7 +43,8 @@ class MainActivity : AppCompatActivity() {
 
     private var showingEditor = false
     private var autoOpenedEditor = false
-    private var hostBridgeAttached = false
+    private lateinit var bootView: WebView
+    private var loadedEditorUrl: String? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,8 +61,8 @@ class MainActivity : AppCompatActivity() {
             onCopyToClipboard = { text -> copyTextToClipboard(text) },
             onDiagnosticsCompleted = { report ->
                 runOnUiThread {
-                    if (!showingEditor && ::webView.isInitialized) {
-                        webView.evaluateJavascript(
+                    if (!isDestroyed && ::bootView.isInitialized) {
+                        bootView.evaluateJavascript(
                             "window.__onDiagnosticsResult && window.__onDiagnosticsResult(${JSONObject.quote(report)});",
                             null,
                         )
@@ -69,8 +71,8 @@ class MainActivity : AppCompatActivity() {
             },
             onCommandCompleted = { command, resultJson ->
                 runOnUiThread {
-                    if (!showingEditor && ::webView.isInitialized) {
-                        webView.evaluateJavascript(
+                    if (!isDestroyed && ::bootView.isInitialized) {
+                        bootView.evaluateJavascript(
                             "window.__onCommandResult && window.__onCommandResult(${JSONObject.quote(command)}, $resultJson);",
                             null,
                         )
@@ -88,7 +90,7 @@ class MainActivity : AppCompatActivity() {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
-                allowFileAccess = true
+                allowFileAccess = false
                 allowContentAccess = false
                 useWideViewPort = true
                 loadWithOverviewMode = true
@@ -113,6 +115,7 @@ class MainActivity : AppCompatActivity() {
                     if (PosixRuntimeConfig.shouldKeepInsideWebView(uri.scheme, uri.host, uri.port, editorPort)) {
                         return false
                     }
+                    if (uri.scheme == "file" || (uri.isHierarchical && uri.getQueryParameter("tkn") != null)) return true
                     // Open external URLs AND dev servers on other localhost ports (e.g. :3000) in XR browser
                     runCatching {
                         startActivity(Intent(Intent.ACTION_VIEW, uri))
@@ -122,6 +125,17 @@ class MainActivity : AppCompatActivity() {
             }
 
             webChromeClient = WebChromeClient()
+        }
+
+        bootView = WebView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            settings.javaScriptEnabled = true
+            settings.allowContentAccess = false
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
+            }
+            addJavascriptInterface(bootBridge, "XREditorHost")
+            loadUrl("file:///android_asset/boot.html")
         }
 
         val borderPx = (resources.displayMetrics.density * 1.5f).toInt().coerceAtLeast(1)
@@ -136,6 +150,7 @@ class MainActivity : AppCompatActivity() {
                 ),
             )
         }
+        rootFrame.addView(bootView)
         setContentView(rootFrame)
 
         // Prevent stray Back/Esc gestures in XR from accidentally killing the editor & server
@@ -160,13 +175,13 @@ class MainActivity : AppCompatActivity() {
 
         runtimeManager.setStatusListener { snapshot ->
             runOnUiThread {
-                if (!showingEditor && ::webView.isInitialized) {
-                    webView.evaluateJavascript(
+                if (!showingEditor && ::bootView.isInitialized) {
+                    bootView.evaluateJavascript(
                         "window.__onHostStatus && window.__onHostStatus(${snapshot.toJsonString()});",
                         null,
                     )
                 }
-                if (snapshot.state == PosixRuntimeManager.State.READY && !autoOpenedEditor) {
+                if (snapshot.state == PosixRuntimeManager.State.READY && (!autoOpenedEditor || showingEditor)) {
                     autoOpenedEditor = true
                     loadEditorIfReady()
                 }
@@ -180,9 +195,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (::webView.isInitialized && ::rootFrame.isInitialized) {
+        if (::bootView.isInitialized && ::rootFrame.isInitialized) {
             // Clear visual cue for keyboard focus + lower OST glare when looking at sibling XR windows
             webView.alpha = if (hasFocus) 1.0f else 0.55f
+            bootView.alpha = webView.alpha
             rootFrame.setBackgroundColor(if (hasFocus) COLOR_BORDER_FOCUSED else COLOR_BORDER_UNFOCUSED)
         }
     }
@@ -191,9 +207,9 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // Re-assert foreground keep-alive if Android 15 dataSync service timed out earlier
         ServerKeepAliveService.start(this)
-        if (!showingEditor && ::webView.isInitialized) {
+        if (!showingEditor && ::bootView.isInitialized) {
             val snapshot = runtimeManager.getStatus()
-            webView.evaluateJavascript(
+            bootView.evaluateJavascript(
                 "window.__onHostStatus && window.__onHostStatus(${snapshot.toJsonString()});",
                 null,
             )
@@ -220,44 +236,30 @@ class MainActivity : AppCompatActivity() {
             runtimeManager.stop()
             ServerKeepAliveService.stop(this)
         }
-        if (::webView.isInitialized) {
-            detachBootBridge()
-            webView.destroy()
-        }
+        rootFrame.removeAllViews()
+        bootView.removeJavascriptInterface("XREditorHost")
+        bootView.destroy()
+        webView.destroy()
         super.onDestroy()
-    }
-
-    private fun attachBootBridge() {
-        if (!hostBridgeAttached) {
-            webView.addJavascriptInterface(bootBridge, "XREditorHost")
-            hostBridgeAttached = true
-        }
-        webView.settings.allowFileAccess = true
-    }
-
-    private fun detachBootBridge() {
-        if (hostBridgeAttached) {
-            webView.removeJavascriptInterface("XREditorHost")
-            hostBridgeAttached = false
-        }
-        webView.settings.allowFileAccess = false
     }
 
     private fun loadBootPage() {
         showingEditor = false
-        attachBootBridge()
-        webView.loadUrl("file:///android_asset/boot.html")
-        webView.requestFocus()
+        webView.visibility = View.GONE
+        bootView.visibility = View.VISIBLE
+        bootView.requestFocus()
     }
 
     private fun loadEditorIfReady() {
-        val status = runtimeManager.getStatus()
-        if (status.state == PosixRuntimeManager.State.READY && status.serverUrl.isNotEmpty()) {
-            showingEditor = true
-            detachBootBridge()
-            webView.loadUrl(status.serverUrl)
-            webView.requestFocus()
+        val url = runtimeManager.editorLaunchUrl() ?: return
+        if (loadedEditorUrl != url) {
+            webView.loadUrl(url)
+            loadedEditorUrl = url
         }
+        showingEditor = true
+        bootView.visibility = View.GONE
+        webView.visibility = View.VISIBLE
+        webView.requestFocus()
     }
 
     private fun openAllFilesPermissionSettings() {

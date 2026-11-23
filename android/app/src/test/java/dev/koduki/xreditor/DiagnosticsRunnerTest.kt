@@ -45,9 +45,9 @@ class DiagnosticsRunnerTest {
         assertTrue(watcherCmd.contains("@parcel/watcher"))
         assertTrue(watcherCmd.contains("max_user_watches"))
 
-        val netCmd = DiagnosticsRunner.buildNetworkAndCliProbeCommand()
-        assertTrue(netCmd.contains("deb.debian.org"))
-        assertTrue(netCmd.contains("api.github.com"))
-        assertTrue(netCmd.contains("dpkg --version"))
+        val checks = DiagnosticsRunner.networkChecks()
+        assertTrue(checks.getValue("DNS (deb.debian.org)").contains("getent hosts"))
+        assertTrue(checks.getValue("Debian apt HTTP").contains("deb.debian.org"))
+        assertTrue(checks.getValue("GitHub HTTPS").contains("api.github.com"))
     }
 }

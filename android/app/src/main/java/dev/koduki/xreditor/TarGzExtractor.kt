@@ -5,10 +5,11 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.BufferedInputStream
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardOpenOption
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 
@@ -27,16 +28,18 @@ object TarGzExtractor {
     object DefaultPosixFsOps : PosixFsOps {
         override fun symlink(target: String, linkPath: File) {
             if (linkPath.exists() || Files.isSymbolicLink(linkPath.toPath())) {
-                linkPath.delete()
+                Files.delete(linkPath.toPath())
             }
             linkPath.parentFile?.mkdirs()
             Files.createSymbolicLink(linkPath.toPath(), Paths.get(target))
         }
 
         override fun hardlinkOrCopy(existingTarget: File, linkPath: File) {
-            if (!existingTarget.exists()) return
+            if (!Files.isRegularFile(existingTarget.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                throw IOException("Missing or invalid hardlink target: $existingTarget")
+            }
             if (linkPath.exists() || Files.isSymbolicLink(linkPath.toPath())) {
-                linkPath.delete()
+                Files.delete(linkPath.toPath())
             }
             linkPath.parentFile?.mkdirs()
             try {
@@ -105,7 +108,7 @@ object TarGzExtractor {
                     val outFile = resolveSafeChild(canonicalRoot, relPath)
                     when {
                         entry.isDirectory -> {
-                            outFile.mkdirs()
+                            Files.createDirectories(outFile.toPath())
                             dirModes.add(outFile to entry.mode)
                             dirCount++
                         }
@@ -131,9 +134,9 @@ object TarGzExtractor {
                         entry.isFile -> {
                             outFile.parentFile?.mkdirs()
                             if (outFile.exists() || Files.isSymbolicLink(outFile.toPath())) {
-                                outFile.delete()
+                                Files.delete(outFile.toPath())
                             }
-                            FileOutputStream(outFile).use { fos ->
+                            Files.newOutputStream(outFile.toPath(), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { fos ->
                                 while (true) {
                                     val read = tar.read(buffer)
                                     if (read <= 0) break
@@ -155,12 +158,15 @@ object TarGzExtractor {
         }
 
         for ((target, linkPath) in deferredHardlinks) {
+            verifyEntryPath(canonicalRoot, target)
+            verifyEntryPath(canonicalRoot, linkPath)
             fsOps.hardlinkOrCopy(target, linkPath)
         }
 
         // Apply directory modes bottom-up so read-only dirs don't block extracting children
         for ((dir, mode) in dirModes.asReversed()) {
             val safeMode = mode or 0b111_000_000 // ensure owner rwx so app can update/clean later
+            verifyEntryPath(canonicalRoot, dir)
             fsOps.chmod(dir, safeMode)
         }
 
@@ -187,11 +193,18 @@ object TarGzExtractor {
 
     internal fun resolveSafeChild(canonicalRoot: File, relPath: String): File {
         val candidate = File(canonicalRoot, relPath)
-        val rootPath = canonicalRoot.path.trimEnd(File.separatorChar) + File.separatorChar
-        val normalizedCandidate = candidate.toPath().normalize().toString()
-        if (!normalizedCandidate.startsWith(rootPath) && normalizedCandidate != canonicalRoot.path) {
-            throw IOException("Tar entry escapes extraction root: $relPath")
-        }
+        verifyEntryPath(canonicalRoot, candidate)
         return candidate
+    }
+
+    // Guest symlinks may be absolute. Only PRoot may resolve them, never the host extractor.
+    private fun verifyEntryPath(root: File, entry: File) {
+        val relative = root.toPath().relativize(entry.toPath())
+        var current = root.toPath()
+        for (component in relative) {
+            if (component.toString() == "..") throw IOException("Tar entry escapes extraction root: $entry")
+            current = current.resolve(component)
+            if (Files.isSymbolicLink(current)) throw IOException("Symlink in extraction path: $current")
+        }
     }
 }

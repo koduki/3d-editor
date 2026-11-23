@@ -14,7 +14,6 @@
 1. **ユーザーデータの `rootfs/` 外への完全分離**
    - 作業領域：`filesDir/workspace` をゲスト `/workspace` にバインドマウント。
    - ホーム領域：`filesDir/home` をゲスト `/root` にバインドマウント（初回に `.bashrc` を自動生成）。
-   - 既存端末向けに、旧 `rootfs/workspace` や `rootfs/root` にファイルがある場合は起動時に自動で分離先へマイグレーションする。
 2. **Android → POSIX（`XrDocumentsProvider`）**
    - Android 標準 SDK の `DocumentsProvider` をゼロから Kotlin 実装し、`filesDir/workspace` を「Files」アプリや他アプリから通常フォルダとして読み書き・作成・リネーム・再帰削除・検索可能にする。
    - `/workspace/android` のようなシンボリックリンク経由で `/android` や `/` へ脱出されないよう、`canonicalPath` ジェイル検証でルート外パスを必ず拒否する。

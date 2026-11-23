@@ -12,12 +12,11 @@ import android.system.OsConstants
 import android.view.InputDevice
 import android.webkit.WebView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -149,8 +148,10 @@ object DiagnosticsRunner {
                             runtime = runtime,
                             command = """
                                 set -e
-                                TEST_F=/workspace/.xr-diag-rw-test
-                                echo ok > "${'$'}TEST_F" && cat "${'$'}TEST_F" >/dev/null && rm -f "${'$'}TEST_F"
+                                TEST_F=$(mktemp /workspace/.xr-diag.XXXXXXXX)
+                                trap 'rm -f -- "${'$'}TEST_F"' EXIT
+                                echo ok > "${'$'}TEST_F"
+                                test "$(cat "${'$'}TEST_F")" = ok
                                 echo "workspace_rw=OK"
                                 ls -ld /workspace /workspace/android /android/shared /android/sdcard 2>&1 || true
                                 echo "android_shared_entries=$(ls -A /android/shared 2>/dev/null | wc -l)"
@@ -159,27 +160,21 @@ object DiagnosticsRunner {
                             timeoutSeconds = 15,
                         )
                     }
-                    val netTask = async {
-                        runTimedCommand(
-                            name = "DNS・Debian apt / GitHub 疎通・CLI (apt/git/gh) 確認",
-                            runtime = runtime,
-                            command = buildNetworkAndCliProbeCommand(),
-                            timeoutSeconds = 15,
-                        )
+                    val networkTasks = networkChecks().map { (name, command) ->
+                        async { runTimedCommand(name, runtime, command, timeoutSeconds = 15) }
                     }
                     listOf(
                         nodeTask.await(),
                         ptyTask.await(),
                         watcherTask.await(),
                         mountTask.await(),
-                        netTask.await(),
-                    )
+                    ) + networkTasks.awaitAll()
                 }
                 checks.addAll(parallelChecks)
             }
 
             // 10. Embedded HTTP server health check
-            checks.add(checkLocalServerHttp(status))
+            checks.add(checkLocalServerHttp(runtime, status))
 
             val tailLogs = runtime.getLogsText()
                 .lines()
@@ -232,30 +227,28 @@ object DiagnosticsRunner {
         """.trimIndent()
     }
 
-    internal fun buildNetworkAndCliProbeCommand(): String {
+    internal fun networkChecks(): Map<String, String> {
         val node = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node"
-        return """
-            cat /etc/resolv.conf 2>&1 || true
-            (getent hosts deb.debian.org 2>&1 | head -n 2) || echo "dns_lookup=FAILED"
+        fun httpProbe(url: String) = """
             $node -e '
-              async function probe(name, url) {
-                try {
-                  const r = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(5000) });
-                  console.log(name + "=HTTP_" + r.status);
-                } catch (e) {
-                  console.log(name + "=ERR:" + (e.cause?.code || e.message));
-                }
-              }
-              Promise.all([
-                probe("debian_apt_http", "http://deb.debian.org/debian/dists/bookworm/Release"),
-                probe("github_https", "https://api.github.com/zen"),
-              ]);
-            '
-            dpkg --version 2>&1 | head -n 1 || true
-            for bin in bash apt git gh curl; do
-              printf '%s=%s\n' "${'$'}bin" "$(command -v "${'$'}bin" 2>/dev/null || echo missing)"
-            done
+              fetch(process.argv[1], { method: "HEAD", signal: AbortSignal.timeout(5000) })
+                .then(r => { console.log("HTTP " + r.status); process.exitCode = r.ok ? 0 : 1; })
+                .catch(e => { console.error(e.cause?.code || e.message); process.exitCode = 1; });
+            ' '$url'
         """.trimIndent()
+        return linkedMapOf(
+            "DNS (deb.debian.org)" to "getent hosts deb.debian.org",
+            "Debian apt HTTP" to httpProbe("http://deb.debian.org/debian/dists/bookworm/Release"),
+            "GitHub HTTPS" to httpProbe("https://api.github.com/zen"),
+            "CLI (必須: bash/apt, 任意: git/gh/curl)" to """
+                set -e
+                command -v bash
+                command -v apt
+                for bin in git gh curl; do
+                    printf '%s=%s\n' "${'$'}bin" "$(command -v "${'$'}bin" || echo 未導入)"
+                done
+            """.trimIndent(),
+        )
     }
 
     private fun queryPageSize(): String {
@@ -459,40 +452,18 @@ object DiagnosticsRunner {
         )
     }
 
-    private fun checkLocalServerHttp(status: PosixRuntimeManager.StatusSnapshot): CheckItem {
-        if (status.port <= 0) {
-            return CheckItem(
-                name = "内蔵 openvscode-server HTTP 応答 (Gate 2)",
-                ok = false,
-                detail = "state=${status.state}, port=${status.port}, message=${status.message}",
-            )
-        }
+    private fun checkLocalServerHttp(
+        runtime: PosixRuntimeManager,
+        status: PosixRuntimeManager.StatusSnapshot,
+    ): CheckItem {
         val t0 = System.currentTimeMillis()
-        var conn: HttpURLConnection? = null
-        return try {
-            conn = (URL("http://127.0.0.1:${status.port}/").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 2000
-                readTimeout = 2000
-                instanceFollowRedirects = false
-            }
-            val code = conn.responseCode
-            val elapsed = System.currentTimeMillis() - t0
-            CheckItem(
-                name = "内蔵 openvscode-server HTTP 応答 (Gate 2)",
-                ok = code in 200..399,
-                detail = "url=http://127.0.0.1:${status.port}/ -> HTTP $code (state=${status.state})",
-                durationMs = elapsed,
-            )
-        } catch (t: Throwable) {
-            CheckItem(
-                name = "内蔵 openvscode-server HTTP 応答 (Gate 2)",
-                ok = false,
-                detail = "url=http://127.0.0.1:${status.port}/ -> ${t.javaClass.simpleName}: ${t.message}",
-                durationMs = System.currentTimeMillis() - t0,
-            )
-        } finally {
-            conn?.disconnect()
-        }
+        val ok = status.state == PosixRuntimeManager.State.READY && status.port > 0 &&
+            runtime.editorRejectsAnonymousRequests(status.port)
+        return CheckItem(
+            name = "内蔵 openvscode-server 認証 (Gate 2)",
+            ok = ok,
+            detail = "state=${status.state}, port=${status.port}, readyAndRejectsAnonymous=$ok",
+            durationMs = System.currentTimeMillis() - t0,
+        )
     }
 }

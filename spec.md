@@ -127,3 +127,5 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
    - Android XR の Files アプリから `/workspace` を開いてファイル読み書きできること。
    - `/workspace/android` から Android 側ファイルを開いて保存できること。
    - 内蔵ターミナル（またはフォールバック CLI）で `apt update && apt install -y ca-certificates gh` → `gh --version` が通ること。
+
+4. **XR 作業の往復**：日本語 IME の変換確定後に保存し、統合ターミナルで開発サーバーを起動する。隣のプレビューから戻り、カーソル位置と最初のキー入力を確認する。未保存の変更がある状態で管理画面を往復し、編集内容・選択位置・ターミナルセッションが保持されることを確認する。
