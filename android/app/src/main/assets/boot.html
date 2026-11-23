@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XR-Editor</title>
+  <style>
+    :root {
+      --bg: #000000;
+      --surface: #0b0b0c;
+      --border: #26262a;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --accent: #38bdf8;
+      --ok: #34d399;
+      --err: #f87171;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 28px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-height: 100%;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .badge {
+      font-size: 12px;
+      padding: 3px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+    }
+    .badge.ready { border-color: var(--ok); color: var(--ok); }
+    .badge.error { border-color: var(--err); color: var(--err); }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .bar-bg {
+      width: 100%;
+      height: 8px;
+      background: #18181b;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 0.25s ease;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button {
+      background: #141418;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary {
+      background: #082f49;
+      border-color: var(--accent);
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    pre {
+      margin: 0;
+      padding: 12px;
+      background: #040405;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .cli-row {
+      display: flex;
+      gap: 8px;
+    }
+    input[type="text"] {
+      flex: 1;
+      background: #040405;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 14px;
+    }
+    input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <div class="title">XR-Editor</div>
+        <div class="hint">Debian minimal + 内蔵 openvscode-server（Ctrl+Alt+D でこの画面とエディタを切替）</div>
+      </div>
+      <span id="stateBadge" class="badge">起動中</span>
+    </header>
+
+    <section class="card">
+      <div id="statusMessage">ランタイム状態を確認しています...</div>
+      <div class="bar-bg"><div id="progressBar" class="bar-fill"></div></div>
+      <div class="actions">
+        <button id="openEditorBtn" class="primary" disabled>エディタを開く</button>
+        <button id="storageBtn">Android ストレージをマウント許可</button>
+        <button id="restartBtn">サーバー再起動</button>
+      </div>
+      <div id="storageHint" class="hint"></div>
+    </section>
+
+    <section class="card">
+      <div><strong>POSIX ミニターミナル（フォールバック / CLI 確認用）</strong></div>
+      <div class="hint">例: <code>ls -la /workspace</code> / <code>apt update &amp;&amp; apt install -y ca-certificates git gh</code> / <code>gh --version</code></div>
+      <div class="cli-row">
+        <input id="cliInput" type="text" placeholder="Debian POSIX コマンドを入力して Enter" autocomplete="off" spellcheck="false" />
+        <button id="cliRunBtn">実行</button>
+      </div>
+      <pre id="cliOutput">(出力なし)</pre>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <strong>起動ログ</strong>
+        <button id="refreshLogsBtn">ログ更新</button>
+      </div>
+      <pre id="serverLogs"></pre>
+    </section>
+  </div>
+
+  <script>
+    const stateBadge = document.getElementById('stateBadge');
+    const statusMessage = document.getElementById('statusMessage');
+    const progressBar = document.getElementById('progressBar');
+    const openEditorBtn = document.getElementById('openEditorBtn');
+    const storageBtn = document.getElementById('storageBtn');
+    const restartBtn = document.getElementById('restartBtn');
+    const storageHint = document.getElementById('storageHint');
+    const cliInput = document.getElementById('cliInput');
+    const cliRunBtn = document.getElementById('cliRunBtn');
+    const cliOutput = document.getElementById('cliOutput');
+    const serverLogs = document.getElementById('serverLogs');
+    const refreshLogsBtn = document.getElementById('refreshLogsBtn');
+
+    function renderStatus(status) {
+      if (!status) return;
+      stateBadge.textContent = status.state;
+      stateBadge.className = 'badge' + (status.state === 'READY' ? ' ready' : status.state === 'ERROR' ? ' error' : '');
+      statusMessage.textContent = status.message || status.state;
+      progressBar.style.width = Math.max(0, Math.min(100, status.progress || 0)) + '%';
+      openEditorBtn.disabled = status.state !== 'READY';
+
+      if (status.hasAllFilesAccess) {
+        storageBtn.textContent = 'Android 全ストレージ許可済み (/android/sdcard)';
+        storageHint.textContent = 'POSIX の /workspace/android/sdcard から Android ストレージを直接読み書きできます。Android の Files アプリからは「XR-Editor」として /workspace が見えます。';
+      } else {
+        storageBtn.textContent = 'Android ストレージをマウント許可';
+        storageHint.textContent = '未許可でも /workspace と /android/shared は利用できます。Documents 等を直接開く場合は許可後に「サーバー再起動」してください。';
+      }
+      refreshLogs();
+    }
+
+    function refreshLogs() {
+      if (!window.XREditorHost) return;
+      const txt = window.XREditorHost.getLogs() || '(ログなし)';
+      serverLogs.textContent = txt;
+      serverLogs.scrollTop = serverLogs.scrollHeight;
+    }
+
+    window.__onHostStatus = function(status) {
+      renderStatus(status);
+    };
+
+    openEditorBtn.addEventListener('click', () => window.XREditorHost?.openEditor());
+    storageBtn.addEventListener('click', () => window.XREditorHost?.requestAllFilesAccess());
+    restartBtn.addEventListener('click', () => window.XREditorHost?.restartServer());
+    refreshLogsBtn.addEventListener('click', refreshLogs);
+
+    function runCli() {
+      const cmd = cliInput.value.trim();
+      if (!cmd || !window.XREditorHost) return;
+      cliRunBtn.disabled = true;
+      cliOutput.textContent = '$ ' + cmd + '\n(実行中...)';
+      setTimeout(() => {
+        try {
+          const res = JSON.parse(window.XREditorHost.runCommand(cmd));
+          cliOutput.textContent = '$ ' + cmd + '\n' + (res.output || '') + '\n[exit ' + res.exitCode + ']';
+        } catch (err) {
+          cliOutput.textContent = 'Error: ' + err;
+        } finally {
+          cliRunBtn.disabled = false;
+        }
+      }, 20);
+    }
+
+    cliRunBtn.addEventListener('click', runCli);
+    cliInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        runCli();
+      }
+    });
+
+    if (window.XREditorHost) {
+      try {
+        renderStatus(JSON.parse(window.XREditorHost.getStatus()));
+      } catch (e) {
+        statusMessage.textContent = 'ステータス取得エラー: ' + e;
+      }
+      setInterval(() => {
+        try {
+          renderStatus(JSON.parse(window.XREditorHost.getStatus()));
+        } catch (_) {}
+      }, 1500);
+    }
+  </script>
+</body>
+</html>

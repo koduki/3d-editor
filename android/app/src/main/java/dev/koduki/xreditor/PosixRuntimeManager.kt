@@ -1,0 +1,516 @@
+package dev.koduki.xreditor
+
+import android.content.Context
+import android.os.Environment
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.File
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.ServerSocket
+import java.net.URL
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
+
+/**
+ * Manages the embedded PRoot + Debian minimal + openvscode-server lifecycle on-device:
+ * - Atomically extracts bundled runtime tar.gz assets on first boot
+ * - Sets up fake /proc files, /dev/shm, /etc/resolv.conf, /workspace, and Android mount points
+ * - Starts openvscode-server bound to 127.0.0.1:<port> with minimal OST settings.json
+ * - Provides a non-PTY POSIX shell execution fallback (for CLI / apt / gh)
+ */
+class PosixRuntimeManager private constructor(private val appContext: Context) {
+
+    enum class State {
+        IDLE,
+        EXTRACTING,
+        STARTING,
+        READY,
+        ERROR,
+    }
+
+    data class StatusSnapshot(
+        val state: State,
+        val message: String,
+        val progress: Int,
+        val serverUrl: String,
+        val port: Int,
+        val hasAllFilesAccess: Boolean,
+        val workspacePath: String,
+        val prootReady: Boolean,
+    ) {
+        fun toJsonString(): String = JSONObject()
+            .put("state", state.name)
+            .put("message", message)
+            .put("progress", progress)
+            .put("serverUrl", serverUrl)
+            .put("port", port)
+            .put("hasAllFilesAccess", hasAllFilesAccess)
+            .put("workspacePath", workspacePath)
+            .put("prootReady", prootReady)
+            .toString()
+    }
+
+    data class CommandResult(
+        val exitCode: Int,
+        val output: String,
+    ) {
+        fun toJsonString(): String = JSONObject()
+            .put("exitCode", exitCode)
+            .put("output", output)
+            .toString()
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lifecycleMutex = Mutex()
+    private val logs = CopyOnWriteArrayList<String>()
+
+    @Volatile
+    private var state: State = State.IDLE
+
+    @Volatile
+    private var statusMessage: String = "起動待機中..."
+
+    @Volatile
+    private var progress: Int = 0
+
+    @Volatile
+    private var serverPort: Int = 0
+
+    @Volatile
+    private var serverProcess: Process? = null
+
+    @Volatile
+    private var disableSeccomp: Boolean = false
+
+    @Volatile
+    private var onStatusChanged: ((StatusSnapshot) -> Unit)? = null
+
+    fun setStatusListener(listener: ((StatusSnapshot) -> Unit)?) {
+        onStatusChanged = listener
+    }
+
+    fun getPaths(): PosixRuntimeConfig.Paths {
+        val runtimeRoot = File(appContext.filesDir, "runtime")
+        val nativeLibDir = File(appContext.applicationInfo.nativeLibraryDir)
+        val sharedDir = appContext.getExternalFilesDir("shared")
+            ?: File(appContext.filesDir, "shared")
+        sharedDir.mkdirs()
+
+        val sdcardDir = if (hasAllFilesAccess()) {
+            Environment.getExternalStorageDirectory()
+        } else {
+            null
+        }
+
+        return PosixRuntimeConfig.Paths(
+            runtimeRoot = runtimeRoot,
+            nativeLibDir = nativeLibDir,
+            androidSharedDir = sharedDir,
+            androidSdcardDir = sdcardDir,
+        )
+    }
+
+    fun hasAllFilesAccess(): Boolean = Environment.isExternalStorageManager()
+
+    fun getStatus(): StatusSnapshot {
+        val paths = getPaths()
+        val url = if (state == State.READY && serverPort > 0) {
+            "http://127.0.0.1:$serverPort/?folder=${PosixRuntimeConfig.GUEST_WORKSPACE}"
+        } else {
+            ""
+        }
+        return StatusSnapshot(
+            state = state,
+            message = statusMessage,
+            progress = progress,
+            serverUrl = url,
+            port = serverPort,
+            hasAllFilesAccess = hasAllFilesAccess(),
+            workspacePath = paths.workspaceDir.absolutePath,
+            prootReady = paths.prootBin.exists() && paths.prootLoader.exists(),
+        )
+    }
+
+    fun getLogsText(): String = logs.joinToString("\n")
+
+    fun clearLogs() {
+        logs.clear()
+    }
+
+    fun startIfNeeded() {
+        scope.launch {
+            lifecycleMutex.withLock {
+                if (state == State.READY && isServerProcessAlive()) {
+                    emitStatus()
+                    return@withLock
+                }
+                startInternal()
+            }
+        }
+    }
+
+    fun restart() {
+        scope.launch {
+            lifecycleMutex.withLock {
+                stopInternal()
+                startInternal()
+            }
+        }
+    }
+
+    fun stop() {
+        scope.launch {
+            lifecycleMutex.withLock {
+                stopInternal()
+            }
+        }
+    }
+
+    suspend fun runShellCommand(command: String, timeoutSeconds: Long = 120): CommandResult =
+        withContext(Dispatchers.IO) {
+            val paths = getPaths()
+            if (!paths.prootBin.exists() || !paths.prootLoader.exists()) {
+                return@withContext CommandResult(
+                    exitCode = 127,
+                    output = "PRoot binaries not found in ${paths.nativeLibDir.absolutePath}",
+                )
+            }
+            if (!paths.rootfsDir.exists()) {
+                return@withContext CommandResult(
+                    exitCode = 1,
+                    output = "Debian rootfs is not extracted yet.",
+                )
+            }
+
+            prepareRuntimeDirectories(paths)
+            val prootCmd = PosixRuntimeConfig.buildProotCommand(
+                paths = paths,
+                guestCommand = PosixRuntimeConfig.buildShellCommand(command),
+            )
+            val pb = ProcessBuilder(prootCmd)
+            pb.redirectErrorStream(true)
+            pb.environment().putAll(PosixRuntimeConfig.buildProotEnvironment(paths, disableSeccomp))
+
+            val output = StringBuilder()
+            try {
+                val proc = pb.start()
+                val readerThread = Thread {
+                    BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                        var line: String?
+                        while (reader.readLine().also { line = it } != null) {
+                            output.append(line).append('\n')
+                        }
+                    }
+                }
+                readerThread.start()
+                val finished = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+                if (!finished) {
+                    proc.destroyForcibly()
+                    readerThread.join(1000)
+                    return@withContext CommandResult(
+                        exitCode = 124,
+                        output = output.toString() + "\n[Timed out after ${timeoutSeconds}s]",
+                    )
+                }
+                readerThread.join(2000)
+                CommandResult(proc.exitValue(), output.toString())
+            } catch (t: Throwable) {
+                CommandResult(1, "Failed to run command: ${t.message}")
+            }
+        }
+
+    private suspend fun startInternal() {
+        val paths = getPaths()
+        if (!paths.prootBin.exists() || !paths.prootLoader.exists()) {
+            updateStatus(
+                State.ERROR,
+                "PRoot バイナリが見つかりません (${paths.nativeLibDir.absolutePath})",
+                0,
+            )
+            appendLog("[error] Missing libproot.so or libproot-loader.so in ${paths.nativeLibDir}")
+            return
+        }
+
+        try {
+            ensureExtracted(paths)
+            prepareRuntimeDirectories(paths)
+            ensureMinimalVsCodeSettings(paths)
+            launchOpenVsCodeServer(paths, allowSeccompRetry = true)
+        } catch (t: Throwable) {
+            appendLog("[error] Startup failed: ${t.stackTraceToString()}")
+            updateStatus(State.ERROR, "起動失敗: ${t.message}", progress)
+        }
+    }
+
+    private fun stopInternal() {
+        val proc = serverProcess
+        serverProcess = null
+        if (proc != null) {
+            appendLog("[runtime] Stopping openvscode-server...")
+            runCatching { proc.destroy() }
+            runCatching {
+                if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+                    proc.destroyForcibly()
+                }
+            }
+        }
+        serverPort = 0
+        updateStatus(State.IDLE, "停止しました", 0)
+    }
+
+    private fun ensureExtracted(paths: PosixRuntimeConfig.Paths) {
+        val installed = paths.versionMarker.takeIf { it.exists() }?.readText()?.trim()
+        val hasServerBin = File(paths.openvscodeDir, "bin/openvscode-server").exists()
+        if (installed == PosixRuntimeConfig.RUNTIME_VERSION && hasServerBin) {
+            appendLog("[runtime] Existing Debian + openvscode-server installation verified ($installed)")
+            return
+        }
+
+        updateStatus(State.EXTRACTING, "初回セットアップ: Debian minimal rootfs を展開中...", 10)
+        appendLog("[runtime] Extracting embedded Debian minimal rootfs...")
+
+        paths.runtimeRoot.mkdirs()
+        if (paths.stagingDir.exists()) {
+            paths.stagingDir.deleteRecursively()
+        }
+        paths.stagingDir.mkdirs()
+
+        // Preserve user workspace across runtime upgrades
+        val existingWorkspaceBackup = File(paths.runtimeRoot, "workspace-backup")
+        if (paths.workspaceDir.exists()) {
+            if (existingWorkspaceBackup.exists()) existingWorkspaceBackup.deleteRecursively()
+            paths.workspaceDir.renameTo(existingWorkspaceBackup)
+        }
+
+        appContext.assets.open(PosixRuntimeConfig.ASSET_ROOTFS).use { stream ->
+            val stats = TarGzExtractor.extract(
+                input = stream,
+                destDir = paths.stagingDir,
+                stripComponents = 0,
+            ) { entries, current ->
+                val pct = (10 + (entries / 250).coerceAtMost(35))
+                updateStatus(State.EXTRACTING, "Debian rootfs 展開中 ($entries)... $current", pct)
+            }
+            appendLog("[runtime] Debian rootfs extracted: $stats")
+        }
+
+        updateStatus(State.EXTRACTING, "初回セットアップ: openvscode-server を展開中...", 50)
+        appendLog("[runtime] Extracting embedded openvscode-server...")
+        val stagingVscode = File(paths.stagingDir, "opt/openvscode-server")
+        appContext.assets.open(PosixRuntimeConfig.ASSET_OPENVSCODE).use { stream ->
+            val stats = TarGzExtractor.extract(
+                input = stream,
+                destDir = stagingVscode,
+                stripComponents = 1,
+            ) { entries, current ->
+                val pct = (50 + (entries / 200).coerceAtMost(35))
+                updateStatus(State.EXTRACTING, "openvscode-server 展開中 ($entries)... $current", pct)
+            }
+            appendLog("[runtime] openvscode-server extracted: $stats")
+        }
+
+        // Atomic swap into place
+        if (paths.rootfsDir.exists()) {
+            paths.rootfsDir.deleteRecursively()
+        }
+        if (!paths.stagingDir.renameTo(paths.rootfsDir)) {
+            throw IllegalStateException("Failed to move staging rootfs into place")
+        }
+
+        if (existingWorkspaceBackup.exists()) {
+            if (paths.workspaceDir.exists()) paths.workspaceDir.deleteRecursively()
+            existingWorkspaceBackup.renameTo(paths.workspaceDir)
+        }
+
+        paths.versionMarker.writeText(PosixRuntimeConfig.RUNTIME_VERSION)
+        updateStatus(State.EXTRACTING, "展開完了。サーバーを起動します...", 88)
+        appendLog("[runtime] Extraction finished cleanly.")
+    }
+
+    private fun prepareRuntimeDirectories(paths: PosixRuntimeConfig.Paths) {
+        paths.sysdataDir.mkdirs()
+        paths.shmDir.mkdirs()
+        paths.tmpDir.mkdirs()
+        paths.vscodeDataDir.mkdirs()
+        paths.workspaceDir.mkdirs()
+        paths.androidSharedDir.mkdirs()
+
+        // Ensure mount point directories exist inside rootfs
+        File(paths.rootfsDir, "android/shared").mkdirs()
+        File(paths.rootfsDir, "android/sdcard").mkdirs()
+        File(paths.rootfsDir, "var/lib/xr-vscode").mkdirs()
+        File(paths.rootfsDir, "dev/shm").mkdirs()
+        File(paths.rootfsDir, "tmp").mkdirs()
+        File(paths.rootfsDir, "root").mkdirs()
+
+        // Create /workspace/android -> /android symlink for convenient explorer access
+        val workspaceAndroidLink = File(paths.workspaceDir, "android")
+        runCatching {
+            TarGzExtractor.DefaultPosixFsOps.symlink("/android", workspaceAndroidLink)
+        }
+
+        // Seed welcome README.md if workspace has no regular files yet
+        val readme = File(paths.workspaceDir, "README.md")
+        if (!readme.exists()) {
+            readme.writeText(PosixRuntimeConfig.buildWelcomeReadme())
+        }
+
+        // Write fake /proc files to avoid Android SELinux denials in Node.js / Linux tools
+        val cpus = Runtime.getRuntime().availableProcessors()
+        for ((name, content) in PosixRuntimeConfig.buildFakeSysdataFiles(cpus)) {
+            File(paths.sysdataDir, name).writeText(content)
+        }
+
+        // Ensure DNS resolution works for apt / gh / git inside PRoot
+        val resolvConf = File(paths.rootfsDir, "etc/resolv.conf")
+        resolvConf.parentFile?.mkdirs()
+        if (resolvConf.exists() && resolvConf.isDirectory) {
+            resolvConf.deleteRecursively()
+        }
+        resolvConf.writeText(PosixRuntimeConfig.buildDefaultResolvConf())
+    }
+
+    private fun ensureMinimalVsCodeSettings(paths: PosixRuntimeConfig.Paths) {
+        val settingsContent = PosixRuntimeConfig.buildMinimalVsCodeSettingsJson()
+        val targets = listOf(
+            File(paths.vscodeDataDir, "data/Machine/settings.json"),
+            File(paths.vscodeDataDir, "user/User/settings.json"),
+        )
+        for (target in targets) {
+            if (!target.exists()) {
+                target.parentFile?.mkdirs()
+                target.writeText(settingsContent)
+            }
+        }
+    }
+
+    private suspend fun launchOpenVsCodeServer(
+        paths: PosixRuntimeConfig.Paths,
+        allowSeccompRetry: Boolean,
+    ) {
+        val port = pickFreeLocalPort()
+        serverPort = port
+        updateStatus(State.STARTING, "内蔵 openvscode-server を起動中 (127.0.0.1:$port)...", 92)
+
+        val guestCmd = PosixRuntimeConfig.buildOpenVsCodeServerCommand(port)
+        val prootCmd = PosixRuntimeConfig.buildProotCommand(paths, guestCmd)
+        appendLog("[runtime] Launching PRoot (disableSeccomp=$disableSeccomp) on 127.0.0.1:$port")
+
+        val pb = ProcessBuilder(prootCmd)
+        pb.redirectErrorStream(true)
+        pb.environment().putAll(PosixRuntimeConfig.buildProotEnvironment(paths, disableSeccomp))
+
+        val proc = pb.start()
+        serverProcess = proc
+
+        // Drain process output continuously into the ring buffer
+        scope.launch {
+            runCatching {
+                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                    while (isActive) {
+                        val line = reader.readLine() ?: break
+                        appendLog(line)
+                    }
+                }
+            }
+            val code = runCatching { proc.waitFor() }.getOrDefault(-1)
+            appendLog("[runtime] openvscode-server exited with code $code")
+            if (serverProcess === proc && state == State.READY) {
+                updateStatus(State.ERROR, "サーバーが終了しました (exit=$code)", 0)
+            }
+        }
+
+        // Wait up to 45s for HTTP readiness on 127.0.0.1:<port>
+        val deadline = System.currentTimeMillis() + 45_000L
+        while (System.currentTimeMillis() < deadline) {
+            if (!proc.isAlive) {
+                val exitCode = runCatching { proc.exitValue() }.getOrDefault(-1)
+                if (allowSeccompRetry && !disableSeccomp) {
+                    appendLog("[runtime] Early exit ($exitCode); retrying with PROOT_NO_SECCOMP=1...")
+                    disableSeccomp = true
+                    launchOpenVsCodeServer(paths, allowSeccompRetry = false)
+                    return
+                }
+                updateStatus(State.ERROR, "openvscode-server の起動に失敗しました (exit=$exitCode)", 0)
+                return
+            }
+            if (isHttpReady(port)) {
+                updateStatus(State.READY, "起動完了 (127.0.0.1:$port)", 100)
+                appendLog("[runtime] openvscode-server is READY at http://127.0.0.1:$port")
+                return
+            }
+            delay(350)
+        }
+
+        updateStatus(State.ERROR, "openvscode-server 応答タイムアウト (45s)", 0)
+    }
+
+    private fun isServerProcessAlive(): Boolean = serverProcess?.isAlive == true
+
+    private fun pickFreeLocalPort(): Int {
+        return try {
+            ServerSocket(0).use { it.localPort }
+        } catch (_: Throwable) {
+            18765
+        }
+    }
+
+    private fun isHttpReady(port: Int): Boolean {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 500
+                readTimeout = 500
+                instanceFollowRedirects = false
+            }
+            conn.responseCode in 200..399
+        } catch (_: Throwable) {
+            false
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun updateStatus(newState: State, message: String, newProgress: Int) {
+        state = newState
+        statusMessage = message
+        progress = newProgress
+        emitStatus()
+    }
+
+    private fun emitStatus() {
+        val snapshot = getStatus()
+        onStatusChanged?.invoke(snapshot)
+    }
+
+    private fun appendLog(line: String) {
+        logs.add(line)
+        while (logs.size > MAX_LOG_LINES) {
+            logs.removeAt(0)
+        }
+    }
+
+    companion object {
+        private const val MAX_LOG_LINES = 300
+
+        @Volatile
+        private var instance: PosixRuntimeManager? = null
+
+        fun getInstance(context: Context): PosixRuntimeManager {
+            return instance ?: synchronized(this) {
+                instance ?: PosixRuntimeManager(context.applicationContext).also { instance = it }
+            }
+        }
+    }
+}

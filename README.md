@@ -1,50 +1,40 @@
-# XR-ACP Workbench (Spatial Desktop IDE)
+# XR-Editor
 
-XREAL AURA（Android XR / OST 光学シースルー）および Meta Quest 3（Horizon OS / VST ビデオパススルー）などの **空間コンピューター** 向けに、**物理キーボード＋マウス／トラックパッド前提** で設計した **空間デスクトップ IDE ＆ ACP v1 AI ワークベンチ** です（スマホ・タブレット向けタッチ UI を想定しないデスクトップ設計）。
+Android XR（XREAL AURA 等）の空間デスクトップ環境（物理キーボード＋マウス／トラックパッド前提）向けに、**`openvscode-server` と最小 Debian POSIX 環境を APK 1 本に内蔵**したシンプルコードエディタです。
 
-- 仕様書: [spec.md](./spec.md)
-- Phase 2 Android 15 / Android XR ネイティブ化設計: [docs/android-xr-phase2.md](./docs/android-xr-phase2.md)
-- 実機検証チェックリスト（AURA / Quest 3）: [docs/device-verification.md](./docs/device-verification.md)
-- ストアパッケージ化ガイド（TWA / PWABuilder）: [docs/store-packaging.md](./docs/store-packaging.md)
+外部サーバーのインストール・起動や Termux の別途導入は不要です。
 
 ## 主な特徴
 
-- **4 ペイン可変空間デスクトップ UI（ビルド不要・依存ゼロ Vanilla ES Modules）:**
-  - **左:** ファイルツリー（絞り込み・Git バッジ・右クリックコンテキストメニュー）
-  - **中央:** タブ式コード＆Markdown エディタ（行番号・シンタックスハイライト・`.md` ライブプレビュー・AI 編集のリアルタイム自動同期・選択範囲の AI 添付）
-  - **下:** エージェント連動の **軽量コマンドコンソール**（`node-pty` 不使用・ANSI カラー・`↑`/`↓` 履歴・`Ctrl+C` 中断・クリックで `file:line` ジャンプ）
-  - **右:** ACP v1 AI エージェントパネル（ストリーミング思考／プラン・縦型 Unified Diff 承認・IME 安全送信・Push-to-Talk 音声入力・ローカル履歴復元）
-- **デスクトップ級キーボード操作:** `Ctrl+P`（クイックオープン）、`Ctrl+Shift+P` / `F1`（コマンドパレット）、`Ctrl+Shift+F`（全文検索）、`Ctrl+S`（保存）、`Ctrl+B`（ツリー）、`Ctrl+J` / `` Ctrl+` ``（コンソール）、`Ctrl+L`（AI 添付＆フォーカス）、`Alt+1..4`（ペイン移動）。
-- **ゼロネイティブ依存バックエンド (`server.mjs`):** 外部依存は `ws` のみ。Android 15 Linux（AVF）・Alpine PRoot・リモート Linux/macOS（Tailscale）どこでもビルド不要で動作します。
-- **オフラインデモ仮想ワークスペース (`/?demo=1`):** バックエンド未接続でもファイルツリー・エディタ・Markdown プレビュー・コンソール・AI Diff 承認をすべて単体体験できます。
+- **単体完結 APK**：`PRoot` + `Debian minimal (arm64 / apt)` + `openvscode-server (linux-arm64)` を内蔵し、アプリ起動だけでローカル自動起動
+- **最小構成の空間エディタ UI**：純黒 OST（`#000000`）初期テーマで、まず「ファイルを開く / 閉じる / 編集する / 保存する」に集中
+- **Android XR ↔ POSIX 双方向ファイルアクセス**：
+  - **Android → POSIX**：Android 標準「Files」アプリから本アプリの `/workspace` を通常のフォルダとして読み書き可能（`XrDocumentsProvider`）
+  - **POSIX → Android**：`/android/shared`（権限不要）および全ファイルアクセス許可時の `/android/sdcard`（`/storage/emulated/0`）を `/workspace/android` から直接参照
+- **最低限の内蔵ターミナル**：POSIX 環境で `apt install -y ca-certificates gh git` 等のパッケージ管理や CLI 操作が可能（統合ターミナル＋非 PTY フォールバックコンソール搭載）
 
-## クイックスタート
+## インストール（CI/CD ビルド済み APK）
 
-```bash
-npm install
-
-# モック AI エージェント付きで起動（すぐ全機能を体験）
-npm run start:mock
-
-# 本番: agy acp へ接続
-WORKSPACE_DIR=~/workspace npm start
-```
-
-ブラウザで `http://127.0.0.1:8765/` を開きます（バックエンド無しデモは `http://127.0.0.1:8765/?demo=1`）。
-
-### Tailscale 経由のリモート起動（Meta Quest 3 / AURA リモート）
+GitHub Actions の Artifacts（`xr-editor-debug-apk`）または [Releases](https://github.com/koduki/3d-editor/releases) から APK を取得してインストールします：
 
 ```bash
-BIND_HOST=0.0.0.0 \
-PORT=8765 \
-WORKSPACE_DIR=~/workspace \
-ACP_BRIDGE_TOKEN="your-strong-secret-token" \
-npm start
+adb install -r xr-editor-debug.apk
 ```
 
-## テスト
+## ローカルビルド手順
+
+前提：JDK 17、Android SDK（API 36 + NDK r27+）、Docker（Debian arm64 rootfs 生成用）、`curl`、`make`
 
 ```bash
-npm run check   # 全 JS/MJS 構文チェック
-npm test        # ユニット + FS/Git/Console/ACP 統合テスト + Headless Chromium UI E2E
+# 1. Android arm64-v8a 向け PRoot (libproot.so / libproot-loader.so) をビルド
+./scripts/build-proot-android.sh
+
+# 2. Debian minimal rootfs + openvscode-server (linux-arm64) を取得して assets/runtime へ配置
+./scripts/fetch-runtime-assets.sh
+
+# 3. ユニットテスト実行 & Debug APK ビルド
+cd android
+gradle :app:testDebugUnitTest :app:assembleDebug
 ```
+
+詳細は [spec.md](spec.md) および [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。

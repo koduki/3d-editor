@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Cross-compile Termux's PRoot + Samba talloc (static) for Android arm64-v8a
+# using Android NDK, producing:
+#   android/app/src/main/jniLibs/arm64-v8a/libproot.so
+#   android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so
+#
+# Both binaries are loaded from Android's nativeLibraryDir so PRoot executes
+# guest ELF binaries under targetSdk=35 (W^X) without execve() in app data.
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/android/app/src/main/jniLibs/arm64-v8a}"
+
+PROOT_VERSION="${PROOT_VERSION:-5.1.107.102}"
+PROOT_URL="https://github.com/termux/proot/archive/refs/tags/v${PROOT_VERSION}.tar.gz"
+TALLOC_VERSION="${TALLOC_VERSION:-2.5.0}"
+TALLOC_URL="https://www.samba.org/ftp/talloc/talloc-${TALLOC_VERSION}.tar.gz"
+ANDROID_API="${ANDROID_API:-34}"
+
+if [[ -f "$OUT_DIR/libproot.so" && -f "$OUT_DIR/libproot-loader.so" && "${FORCE_REBUILD:-0}" != "1" ]]; then
+  echo "[proot] Already built in $OUT_DIR (set FORCE_REBUILD=1 to rebuild)"
+  ls -lh "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"
+  exit 0
+fi
+
+# Locate Android NDK
+NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+if [[ -z "$NDK_DIR" && -n "${ANDROID_HOME:-}" && -d "$ANDROID_HOME/ndk" ]]; then
+  NDK_DIR="$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+fi
+if [[ -z "$NDK_DIR" || ! -d "$NDK_DIR" ]]; then
+  echo "ERROR: Android NDK not found. Set ANDROID_NDK_HOME or install ndk under \$ANDROID_HOME/ndk." >&2
+  exit 1
+fi
+
+HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+HOST_TAG="${HOST_OS}-x86_64"
+TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/$HOST_TAG"
+if [[ ! -d "$TOOLCHAIN" ]]; then
+  echo "ERROR: NDK toolchain not found at $TOOLCHAIN" >&2
+  exit 1
+fi
+
+CC="$TOOLCHAIN/bin/aarch64-linux-android${ANDROID_API}-clang"
+AR="$TOOLCHAIN/bin/llvm-ar"
+RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+STRIP="$TOOLCHAIN/bin/llvm-strip"
+OBJCOPY="$TOOLCHAIN/bin/llvm-objcopy"
+OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
+READELF="$TOOLCHAIN/bin/llvm-readelf"
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/xr-proot-build-XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+echo "[proot] Using NDK: $NDK_DIR"
+echo "[proot] Building in: $WORK_DIR"
+
+# 1. Fetch and cross-build Samba talloc as static libtalloc.a
+echo "[proot] Downloading talloc ${TALLOC_VERSION}..."
+curl -fSL "$TALLOC_URL" -o "$WORK_DIR/talloc.tar.gz"
+tar -xzf "$WORK_DIR/talloc.tar.gz" -C "$WORK_DIR"
+TALLOC_SRC="$WORK_DIR/talloc-${TALLOC_VERSION}"
+TALLOC_PREFIX="$WORK_DIR/talloc-install"
+
+cat > "$TALLOC_SRC/cross-answers.txt" <<'EOF'
+Checking uname sysname type: "Linux"
+Checking uname machine type: "aarch64"
+Checking uname release type: "6.1.0"
+Checking uname version type: "dontcare"
+Checking simple C program: OK
+building library support: OK
+Checking for large file support: OK
+Checking for -D_FILE_OFFSET_BITS=64: OK
+Checking for WORDS_BIGENDIAN: OK
+Checking for C99 vsnprintf: OK
+Checking for HAVE_SECURE_MKSTEMP: OK
+rpath library support: OK
+-Wl,--version-script support: FAIL
+Checking correct behavior of strtoll: OK
+Checking correct behavior of strptime: OK
+Checking for HAVE_IFACE_GETIFADDRS: OK
+Checking for HAVE_IFACE_IFCONF: OK
+Checking for HAVE_IFACE_IFREQ: OK
+Checking getconf LFS_CFLAGS: OK
+Checking for large file support without additional flags: OK
+Checking for working strptime: OK
+Checking for HAVE_SHARED_MMAP: OK
+Checking for HAVE_MREMAP: OK
+Checking for HAVE_INCOHERENT_MMAP: OK
+Checking getconf large file support flags work: OK
+EOF
+
+echo "[proot] Configuring & building static libtalloc.a..."
+(
+  cd "$TALLOC_SRC"
+  CC="$CC" AR="$AR" RANLIB="$RANLIB" \
+  CFLAGS="-O2 -fPIC" \
+  LDFLAGS="-Wl,-z,max-page-size=16384" \
+  PYTHONHASHSEED=1 \
+  ./configure \
+    --prefix="$TALLOC_PREFIX" \
+    --disable-rpath \
+    --disable-python \
+    --cross-compile \
+    --cross-answers=cross-answers.txt
+  make -j"$(nproc)"
+  mkdir -p "$TALLOC_PREFIX/include" "$TALLOC_PREFIX/lib"
+  cp talloc.h "$TALLOC_PREFIX/include/"
+  "$AR" rcu "$TALLOC_PREFIX/lib/libtalloc.a" bin/default/talloc*.o
+  "$RANLIB" "$TALLOC_PREFIX/lib/libtalloc.a"
+)
+
+# 2. Fetch and cross-build Termux PRoot with unbundled loader
+echo "[proot] Downloading termux/proot v${PROOT_VERSION}..."
+curl -fSL "$PROOT_URL" -o "$WORK_DIR/proot.tar.gz"
+tar -xzf "$WORK_DIR/proot.tar.gz" -C "$WORK_DIR"
+PROOT_SRC="$WORK_DIR/proot-${PROOT_VERSION}"
+
+echo "[proot] Compiling proot + unbundled loader for Android arm64-v8a..."
+(
+  cd "$PROOT_SRC/src"
+  # Ensure readelf is available on PATH (GNUmakefile uses `readelf` if loader-info is needed)
+  export PATH="$TOOLCHAIN/bin:$PATH"
+  make -j"$(nproc)" \
+    V=1 \
+    CC="$CC" \
+    LD="$CC" \
+    STRIP="$STRIP" \
+    OBJCOPY="$OBJCOPY" \
+    OBJDUMP="$OBJDUMP" \
+    PROOT_UNBUNDLE_LOADER="." \
+    CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -DARG_MAX=131072 -DVERSION=\\\"${PROOT_VERSION}\\\" -I. -I${TALLOC_PREFIX}/include" \
+    CFLAGS="-Wall -Wextra -O2 -fPIE -DPROOT_UNBUNDLE_LOADER=\\\".\\\"" \
+    LDFLAGS="-L${TALLOC_PREFIX}/lib -Wl,-Bstatic -ltalloc -Wl,-Bdynamic -Wl,-z,noexecstack -Wl,-z,max-page-size=16384" \
+    proot loader/loader
+)
+
+mkdir -p "$OUT_DIR"
+cp "$PROOT_SRC/src/proot" "$OUT_DIR/libproot.so"
+cp "$PROOT_SRC/src/loader/loader" "$OUT_DIR/libproot-loader.so"
+"$STRIP" "$OUT_DIR/libproot.so"
+"$STRIP" "$OUT_DIR/libproot-loader.so"
+chmod 755 "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"
+
+echo "[proot] Verifying built binaries..."
+file "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"
+"$READELF" -d "$OUT_DIR/libproot.so" | grep NEEDED || true
+ls -lh "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"

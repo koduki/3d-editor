@@ -3,23 +3,20 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val generatedWebAssetsRoot = layout.buildDirectory.dir("generated/web-assets")
-
-val syncWebAssets by tasks.registering(Sync::class) {
-    from(rootProject.file("../public"))
-    into(generatedWebAssetsRoot.map { it.dir("www") })
-}
-
 android {
-    namespace = "dev.koduki.xracp"
+    namespace = "dev.koduki.xreditor"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "dev.koduki.xracpcompanion"
+        applicationId = "dev.koduki.xreditor"
         minSdk = 34
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.5.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -39,7 +36,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
-            isShrinkResources = true
+            isShrinkResources = false
             signingConfigs.findByName("release")?.let { signingConfig = it }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -52,10 +49,9 @@ android {
         }
     }
 
-    sourceSets {
-        getByName("main") {
-            assets.srcDir(generatedWebAssetsRoot)
-        }
+    androidResources {
+        // Keep embedded Debian rootfs & openvscode-server tar.gz uncompressed inside the APK
+        noCompress += listOf("gz", "tar", "xz")
     }
 
     compileOptions {
@@ -72,26 +68,22 @@ android {
     }
 
     packaging {
+        jniLibs {
+            // Required so libproot.so & libproot-loader.so extract to nativeLibraryDir with +x
+            useLegacyPackaging = true
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
 }
 
-tasks.named("preBuild") {
-    dependsOn(syncWebAssets)
-}
-
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.webkit:webkit:1.12.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-
-    // Jetpack XR SDK (stable 1.0.0 runtime & SceneCore for Android XR spatial integration)
-    implementation("androidx.xr.runtime:runtime:1.0.0")
-    implementation("androidx.xr.scenecore:scenecore:1.0.0")
+    implementation("org.apache.commons:commons-compress:1.27.1")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

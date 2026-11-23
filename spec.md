@@ -1,111 +1,115 @@
-# XR-ACP Workbench 仕様書 (spec.md)
+# XR-Editor 仕様書 (spec.md)
 
-- **Version:** 0.4.0 (Phase 1 Spatial Desktop IDE)
-- **Date:** 2026-11-21
-- **Status:** Phase 1 実装・Headless Chromium E2E 検証完了 / Phase 2 Android XR ネイティブ殻設計済み
+- **Version:** 0.5.0
+- **Date:** 2026-11-22
+- **Status:** Active (Minimal Reboot)
 
 ---
 
 ## 1. プロジェクト概要
 
 ### 1.1 目的
-XREAL AURA（Android XR / 光学シースルー）および Meta Quest 3（Horizon OS / ビデオパススルー）などの **空間コンピューター** において、**物理キーボード＋マウス／トラックパッド前提** でブログ執筆・Web 開発を完結できる **空間デスクトップ IDE ＆ ACP v1 AI ワークベンチ（XR-ACP Workbench）** を構築する。
+Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理キーボード＋マウス／トラックパッド前提）において、**APK 1 本をインストールするだけで別途サーバー設定や Termux 導入なしに使える、最小構成の空間コードエディタ＋内蔵 POSIX ターミナル** を提供する。
 
-### 1.2 設計原則（スマートフォン・タブレット非想定）
-- **デスクトップ × 空間コンピューター専用 UX:** スマホ向けのドロワーや巨大タッチ UI を排し、4 ペイン可変レイアウト（左: ファイルツリー / 中央: タブ式コード＆Markdown エディタ / 下: 軽量コマンドコンソール / 右: ACP AI エージェント）と、ホバー・右クリックコンテキストメニュー・ドラッグリサイズ・キーボードショートカット（`Ctrl+P`, `Ctrl+Shift+P`, `Ctrl+S`, `Ctrl+J`, `Ctrl+L`, `Alt+1..4`）を標準装備する。
-- **エージェント主導 × 軽量コンソール:** 重い作業は ACP AI エージェントが担う前提とし、ターミナルは `node-pty` 不要（`child_process.spawn` ベース）の軽量コマンドコンソールとして内蔵する。これにより Android 15 Linux ターミナル（AVF）・Alpine PRoot・リモート Linux/macOS のいずれでもネイティブビルド不要で動作する。
-- **Android 15 (API 35) / Android XR ファーストの 2 段階設計:**
-  - **Phase 1（本実装）:** Web 空間デスクトップ IDE + ゼロネイティブ依存 Node.js バックエンド（`ws` のみ）。ローカル・Tailscale リモート・オフラインデモすべてで即戦力化。
-  - **Phase 2（[docs/android-xr-phase2.md](./docs/android-xr-phase2.md)）:** `window.XRHostBridge` を備えた薄い Android 15 / Android XR ネイティブ殻（ハードウェアショートカット優先捕捉・Jetpack XR `SpatialPanel` 分離・AVF / PRoot ローカル連携）。
+### 1.2 今回のスコープ（意図的に絞った 4 要件）
+1. **`openvscode-server` 完全内蔵（別途インストール・手動実行不要）**
+   - Debian minimal（`arm64` / `glibc` / `apt`）rootfs と公式 `openvscode-server`（`linux-arm64`）を APK に内蔵し、アプリ起動時に自動展開・自動起動する。
+2. **基礎的なエディタ UI**
+   - まずは「ファイルを開く / 閉じる / 編集する / 保存する」の基礎操作に集中。
+   - 初期 `settings.json` で純黒 OST テーマ（`#000000`）を適用し、Welcome・ミニマップ・パンくず・テレメトリ・ワークスペース信頼ダイアログ等のノイズをすべて無効化する。
+3. **Android XR ↔ POSIX 双方向ファイルアクセス**
+   - **POSIX → Android 領域（マウント）**：アプリ共有領域を `/android/shared` に常時マウントし、ユーザーが全ファイルアクセス（`MANAGE_EXTERNAL_STORAGE`）を許可した場合は `/storage/emulated/0` を `/android/sdcard` としてマウント（`/workspace/android` から直接参照可能）。
+   - **Android → POSIX 領域（通常フォルダ公開）**：Android 標準 `DocumentsProvider`（`XrDocumentsProvider`）を実装し、Android XR の標準「Files」アプリや他アプリから POSIX の `/workspace` を普通の特定ディレクトリとして読み書きできる。
+4. **最低限の内蔵ターミナル & パッケージ管理（`gh` 等）**
+   - 人間や将来の AI による単純な CLI 操作・`apt` パッケージ管理（`gh`, `git`, `curl` 等）を POSIX 世界で完結させる。
+   - `openvscode-server` 下部の統合ターミナルを標準としつつ、実機で `node-pty` が動作しない場合でも `boot.html` のフォールバック CLI コンソールから PRoot 経由で `bash -lc "<cmd>"` を直接実行できる。
 
----
-
-## 2. 対象デバイス・動作環境
-
-| 項目 | XREAL AURA (メイン) | Meta Quest 3 (サブ) |
-| :--- | :--- | :--- |
-| **OS / ランタイム** | Android XR (Android 15 / API 35+) | Meta Horizon OS / Meta Quest Browser |
-| **光学特性** | OST（光学シースルー）/ 70° FOV / 32 PPD | VST（ビデオパススルー）/ 約 110° FOV |
-| **バックエンド実行環境** | Android 15 Linux / PRoot ローカル または Tailscale リモート | Tailscale 経由のリモートホスト（Mac / PC / VPS） |
-| **入力デバイス（必須前提）** | Bluetooth 物理キーボード＋マウス／トラックパッド（Puck 含む） | Bluetooth 物理キーボード＋マウス／トラックパッド |
+### 1.3 今回対象外（v0.4.0 から削除したもの）
+- 自作 ACP AI チャット UI・Diff 承認 UI・音声入力・デモモード・接続プロファイル管理・セッション履歴 DB・Markdown プレビュー・外部 Node.js ブリッジサーバー必須構成。
 
 ---
 
-## 3. システムアーキテクチャ
+## 2. アーキテクチャ（Android XR 向けクリーン設計）
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│               XR-ACP Workbench (Spatial Desktop IDE / PWA)              │
-│  ┌──────────────┐ ┌───────────────────────────┐ ┌────────────────────┐ │
-│  │ 左: Explorer │ │ 中央: Tabbed Code/MD Ed.  │ │ 右: ACP AI Agent   │ │
-│  │  Git Status  │ │  Syntax HL / MD Preview   │ │  Unified Diff 承認 │ │
-│  │  右クリック  │ ├───────────────────────────┤ │  履歴 / 音声入力   │ │
-│  │              │ │ 下: Lightweight Console   │ │  コンテキスト添付  │ │
-│  └──────┬───────┘ └─────────────┬─────────────┘ └─────────┬──────────┘ │
-└─────────┼───────────────────────┼─────────────────────────┼────────────┘
-          │ HTTP /api/fs/* + SSE  │ WS /ws/console          │ WS / (ACP v1 NDJSON)
-          ▼                       ▼                         ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│             server.mjs (Node.js v20+ / 外部依存: ws のみ)               │
-│  ・Workspace FS Jail + Git API + fs.watch SSE                           │
-│  ・ConsoleRunner (child_process.spawn / node-pty 不要)                  │
-│  ・ACP stdio Bridge (プロセス保持 5 分 / initialize キャッシュ / 承認再送)│
-└─────────────────────────────────┬───────────────────────────────────────┘
-                                  ▼
-                    WORKSPACE_DIR ＆ ACP Agent (agy acp 等)
+┌────────────────────────────────────────────────────────────────┐
+│ XR-Editor APK (arm64-v8a / compileSdk=36 / targetSdk=35)       │
+│                                                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ MainActivity + WebView (純黒 #000000 OST 起動)           │  │
+│  │  ・初回: boot.html（展開進捗・ログ・権限・フォールバックCLI）│ │
+│  │  ・起動後: http://127.0.0.1:<port>/?folder=/workspace    │  │
+│  │  ・HardwareShortcutRouter（Ctrl+S/W/O/P/` を優先転送）    │  │
+│  └──────────────────────────┬───────────────────────────────┘  │
+│                             │ localhost HTTP/WS                │
+│  ┌──────────────────────────▼───────────────────────────────┐  │
+│  │ PosixRuntimeManager (PRoot + Debian minimal + openvscode)│  │
+│  │  ・jniLibs/arm64-v8a/libproot.so + libproot-loader.so    │  │
+│  │  ・PROOT_LOADER により targetSdk=35 (W^X) のまま実行     │  │
+│  │  ・ダミー /proc, /dev/shm, /etc/resolv.conf を自動生成    │  │
+│  │  ・--link2symlink --kill-on-exit で Android FS 互換      │  │
+│  └──────────────────────────┬───────────────────────────────┘  │
+│                             │                                  │
+│  ┌──────────────────────────▼───────────────────────────────┐  │
+│  │ Android ネイティブ連携（Android 標準 SDK クリーン実装）   │  │
+│  │  ・XrDocumentsProvider (Android Files → POSIX /workspace)│  │
+│  │  ・ServerKeepAliveService (Foreground DATA_SYNC)         │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Termux 方式からの主な代替ポイント
+- **`targetSdk = 35` を維持**（`targetSdk = 28` へ下げない）：`proot` と `proot-loader` を `jniLibs/arm64-v8a/`（`useLegacyPackaging = true`、16KB ページアライメント）に置き、`PROOT_LOADER` 環境変数で指定することで Android 15 W^X 下でゲスト ELF を実行。
+- **独自 `$PREFIX` / Bionic 移植を行わない**：標準 Debian minimal (`arm64` / `glibc` / `apt`) を使うことで、公式 `openvscode-server-linux-arm64` と `apt install gh git` が無改造で動作。
+- **スマホ用ネイティブ仮想端末を持たない**：物理キーボード＋マウス前提のため Web 側ターミナル（＋非 PTY フォールバックコンソール）に一本化。
+- **Termux の GPL-3.0 ソースを流用しない**：`XrDocumentsProvider`・インストーラー・サービスは Android 標準 SDK でゼロから Kotlin 実装。
+
+---
+
+## 3. ディレクトリ構成
+
+```text
+.
+├── spec.md
+├── README.md
+├── THIRD_PARTY_NOTICES.md
+├── .github/workflows/ci.yml              # NDK proot + Debian rootfs + openvscode-server 同梱 APK ビルド
+├── scripts/
+│   ├── build-proot-android.sh            # Android NDK で libproot.so / libproot-loader.so をビルド
+│   └── fetch-runtime-assets.sh           # Debian minimal rootfs + openvscode-server を取得
+└── android/
+    ├── settings.gradle.kts
+    ├── build.gradle.kts
+    ├── gradle.properties
+    └── app/
+        ├── build.gradle.kts
+        └── src/
+            ├── main/
+            │   ├── AndroidManifest.xml
+            │   ├── assets/boot.html
+            │   ├── assets/runtime/       # CI/スクリプトで tar.gz を配置
+            │   ├── jniLibs/arm64-v8a/    # CI/スクリプトで libproot*.so を配置
+            │   └── java/dev/koduki/xreditor/
+            │       ├── MainActivity.kt
+            │       ├── PosixRuntimeManager.kt
+            │       ├── TarGzExtractor.kt
+            │       ├── XrDocumentsProvider.kt
+            │       ├── HardwareShortcutRouter.kt
+            │       ├── BootHostBridge.kt
+            │       └── ServerKeepAliveService.kt
+            └── test/java/dev/koduki/xreditor/
+                ├── HardwareShortcutRouterTest.kt
+                ├── PosixRuntimeConfigTest.kt
+                └── TarGzExtractorTest.kt
 ```
 
 ---
 
-## 4. 機能要件
+## 4. 実機検証ゲート（XREAL AURA / Android XR）
 
-### 4.1 バックエンド (`server.mjs`, `lib/workspace-fs.mjs`, `lib/console-runner.mjs`)
-- **Workspace FS & Git API（すべて `WORKSPACE_DIR` 内に厳密隔離・symlink 脱出防御）:**
-  - `GET /api/fs/tree`, `GET /api/fs/file`, `PUT /api/fs/file`, `POST /api/fs/mkdir`, `POST /api/fs/rename`, `DELETE /api/fs/entry`, `GET /api/fs/search`
-  - `GET /api/git/status`, `GET /api/git/diff`
-  - `GET /api/fs/events` (SSE): `fs.watch` によるリアルタイム変更通知で AI 編集結果をエディタへ自動同期
-- **軽量コマンドコンソール (`WS /ws/console`):**
-  - `child_process.spawn` ベースでコマンド実行・stdout/stderr ストリーミング・stdin 転送・`SIGINT` (`Ctrl+C`) 中断を提供（`node-pty` 不使用）
-- **ACP v1 WebSocket ⇔ stdio ブリッジ (`WS /?agent=...&token=...`):**
-  - `agy` / `copilot` / `gemini` / `mock` / `ACP_AGENTS_JSON` 対応
-  - 切断後デフォルト 5 分保持、再アタッチ時の `initialize` キャッシュ応答、未応答 `session/request_permission` の再送
-- **フェイルクローズ認証:** 非ループバックバインド時は `ACP_BRIDGE_TOKEN` 必須（`crypto.timingSafeEqual`）、全 `/api/*` と全 WS へ適用（`/api/health` のみ疎通診断用に公開）
-
-### 4.2 フロントエンド (`public/` — ビルド不要 Vanilla ES Modules)
-- **4 ペイン可変デスクトップレイアウト:**
-  - ドラッグリサイズ（左右幅・下コンソール高さを `localStorage` 保存）、ペイン個別トグル、デスクトップステータスバー
-- **エクスプローラー (`app.js` / `workspace-client.js`):**
-  - ツリー表示・絞り込み・Git バッジ（`M`/`A`/`U`/`D`）・右クリックコンテキストメニュー（開く / AI 添付 / 新規ファイル / 新規フォルダ / 名前変更 / パスコピー / 削除）
-- **コード＆Markdown エディタ (`public/editor.js`):**
-  - マルチタブ（中クリック閉じ・未保存ドット `●`）、行番号ガター、軽量シンタックスハイライト、Tab/Shift+Tab インデント、`Ctrl+S` 保存、`.md` ライブプレビュー分割、外部変更自動再読込（未保存時は競合バナー表示）、選択範囲・開いているファイルの AI コンテキスト添付
-- **クイックオープン & コマンドパレット (`public/palette.js`):**
-  - `Ctrl+P`（ファイルファジー検索）、`Ctrl+Shift+P` / `F1`（コマンドパレット）、`Ctrl+Shift+F`（ワークスペース全文検索）
-- **軽量コマンドコンソール (`public/console.js`):**
-  - ANSI カラー表示、`↑`/`↓` 履歴、`Ctrl+C` 中断、クイックコマンドボタン、出力内 `path:line` クリックによるエディタ行ジャンプ、AI 実行コマンド出力のミラー表示
-- **ACP v1 AI パネル (`acp-client.js`, `diff.js`, `markdown.js`, `history-store.js`, `demo-client.js`):**
-  - ストリーミング思考・プラン・ツール・縦型 Unified Diff 承認（`y`/`a`/`n`/`Esc`）、IME 誤送信防止、Push-to-Talk 音声入力 (`ja-JP`)、ローカルセッション履歴復元、接続プロファイル＆ライブ診断、オフラインデモ仮想ワークスペース
-- **Android 15 / XR ホスト抽象化 (`public/xr-host.js`):**
-  - Phase 2 の `window.XRHostBridge` 連携ポイント（ショートカット優先捕捉・`SpatialPanel` 分離 `?focusPane=ai`）
-
----
-
-## 5. 光学最適化・キーボードショートカット仕様
-
-### 5.1 光学テーマ
-- **OST モード（XREAL AURA）:** `#000000` 透過黒背景・高コントラスト非発光シンタックス・`15px` コード / `17px` 対話本文・`window.blur` 時 50% 自動減光
-- **VST モード（Meta Quest 3）:** 半透明ダークガラス `rgba(16, 19, 26, 0.90)`・`13.5px` コード / `15px` 対話本文・`window.blur` 時 50% 自動減光
-
-### 5.2 デスクトップショートカット
-| ショートカット | 動作 |
-| :--- | :--- |
-| `Ctrl+P` / `Cmd+P` | クイックファイルオープン |
-| `Ctrl+Shift+P` / `F1` | コマンドパレット |
-| `Ctrl+Shift+F` | ワークスペース全文検索 |
-| `Ctrl+S` | アクティブファイルを保存 |
-| `Ctrl+B` | 左ファイルツリー開閉 |
-| `Ctrl+J` / `` Ctrl+` `` | 下コンソール開閉＆フォーカス |
-| `Ctrl+L` | 右 AI パネルへフォーカス（エディタ選択中は範囲を自動添付） |
-| `Alt+1` / `2` / `3` / `4` | Explorer / Editor / AI / Console へ直接フォーカス移動 |
-| `Ctrl+Enter` | IME 安全プロンプト送信 |
-| `Ctrl+Space` | Push-to-Talk 音声入力 ON / OFF |
-| `y` / `a` / `n` / `Esc` | 権限承認バーの許可 / 常時許可 / 拒否（非入力フォーカス時） |
+1. **PRoot 起動ゲート**：`targetSdk = 35` で `libproot.so` + `libproot-loader.so` が Debian `bash` / `node` を起動できること。
+2. **基礎エディタゲート**：`openvscode-server` が `http://127.0.0.1:<port>` で起動し、ファイルの開閉・編集・保存・物理キーボードショートカット（`Ctrl+S`, `Ctrl+W`）・日本語 IME が機能すること。
+3. **ファイル連携 & CLI ゲート**：
+   - Android XR の Files アプリから `/workspace` を開いてファイル読み書きできること。
+   - `/workspace/android` から Android 側ファイルを開いて保存できること。
+   - 内蔵ターミナル（またはフォールバック CLI）で `apt update && apt install -y ca-certificates gh` → `gh --version` が通ること。
