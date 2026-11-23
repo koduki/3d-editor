@@ -184,6 +184,7 @@ jobs:
       - name: Publish GitHub Release on v* tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           FILES=(release-files/debian-manifest.txt release-files/THIRD_PARTY_NOTICES.md)
@@ -192,6 +193,7 @@ jobs:
           fi
           FILES+=(release-files/kucode-debug.apk)
           gh release create "$TAG" "${FILES[@]}" \
+            --repo "$GH_REPO" \
             --title "KuCode $TAG" \
             --generate-notes || \
-          gh release upload "$TAG" "${FILES[@]}" --clobber
+          gh release upload "$TAG" "${FILES[@]}" --repo "$GH_REPO" --clobber
