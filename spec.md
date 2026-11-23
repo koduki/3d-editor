@@ -37,23 +37,26 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
 │                                                                │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │ MainActivity + WebView (純黒 #000000 OST 起動)           │  │
-│  │  ・初回: boot.html（展開進捗・ログ・権限・フォールバックCLI）│ │
-│  │  ・起動後: http://127.0.0.1:<port>/?folder=/workspace    │  │
-│  │  ・HardwareShortcutRouter（Ctrl+S/W/O/P/` を優先転送）    │  │
+│  │  ・初回: boot.html（展開進捗・ログ・実機診断・ミニCLI）   │  │
+│  │  ・起動後: http://127.0.0.1:18765/?folder=/workspace     │  │
+│  │  ・実 KeyEvent パススルー（Ctrl+Alt+D のみフック）       │  │
+│  │  ・フォーカス枠 + 非フォーカス自動減光 / 別ポート外部起動 │  │
 │  └──────────────────────────┬───────────────────────────────┘  │
 │                             │ localhost HTTP/WS                │
 │  ┌──────────────────────────▼───────────────────────────────┐  │
 │  │ PosixRuntimeManager (PRoot + Debian minimal + openvscode)│  │
 │  │  ・jniLibs/arm64-v8a/libproot.so + libproot-loader.so    │  │
 │  │  ・PROOT_LOADER により targetSdk=35 (W^X) のまま実行     │  │
-│  │  ・ダミー /proc, /dev/shm, /etc/resolv.conf を自動生成    │  │
-│  │  ・--link2symlink --kill-on-exit で Android FS 互換      │  │
+│  │  ・/workspace & /root を rootfs 外に永続分離マウント     │  │
+│  │  ・ダミー /proc, /dev/shm, 動的 /etc/resolv.conf 生成    │  │
+│  │  ・内蔵拡張 xr-editor-tools (左 Activity Bar メニュー)   │  │
 │  └──────────────────────────┬───────────────────────────────┘  │
 │                             │                                  │
 │  ┌──────────────────────────▼───────────────────────────────┐  │
 │  │ Android ネイティブ連携（Android 標準 SDK クリーン実装）   │  │
 │  │  ・XrDocumentsProvider (Android Files → POSIX /workspace)│  │
-│  │  ・ServerKeepAliveService (Foreground DATA_SYNC)         │  │
+│  │  ・LocalDiagnosticsServer + DiagnosticsRunner (トークン認証)│ │
+│  │  ・ServerKeepAliveService (Foreground DATA_SYNC + onTimeout)││
 │  └──────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -87,20 +90,26 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
             ├── main/
             │   ├── AndroidManifest.xml
             │   ├── assets/boot.html
-            │   ├── assets/runtime/       # CI/スクリプトで tar.gz を配置
+            │   ├── assets/runtime/       # CI/スクリプトで .tgz を配置 (noCompress)
             │   ├── jniLibs/arm64-v8a/    # CI/スクリプトで libproot*.so を配置
             │   └── java/dev/koduki/xreditor/
             │       ├── MainActivity.kt
+            │       ├── PosixRuntimeConfig.kt
             │       ├── PosixRuntimeManager.kt
             │       ├── TarGzExtractor.kt
             │       ├── XrDocumentsProvider.kt
+            │       ├── VsCodeExtensionAsset.kt
+            │       ├── LocalDiagnosticsServer.kt
+            │       ├── DiagnosticsRunner.kt
             │       ├── HardwareShortcutRouter.kt
             │       ├── BootHostBridge.kt
             │       └── ServerKeepAliveService.kt
             └── test/java/dev/koduki/xreditor/
+                ├── DiagnosticsRunnerTest.kt
                 ├── HardwareShortcutRouterTest.kt
                 ├── PosixRuntimeConfigTest.kt
-                └── TarGzExtractorTest.kt
+                ├── TarGzExtractorTest.kt
+                └── VsCodeExtensionAssetTest.kt
 ```
 
 ---
