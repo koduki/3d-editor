@@ -153,6 +153,75 @@ class RuntimeInstallerTest {
         }
     }
 
+    @Test
+    fun prepareRuntimeDirectories_syncsWorldReadableAptConfResolvConfCaBundleAndDirModes() {
+        val base = Files.createTempDirectory("xr-prepare-test").toFile()
+        try {
+            val paths = testPaths(base)
+            val caEntries = listOf(
+                CaCertificateEntry("system:root.0", byteArrayOf(0x30, 0x01, 0x02), isUserAdded = false),
+                CaCertificateEntry("user:corp.0", byteArrayOf(0x30, 0x03, 0x04), isUserAdded = true),
+            )
+            val installer = RuntimeInstaller(
+                openAsset = { throw AssertionError("unexpected asset open") },
+                querySystemDnsServers = { listOf("103.5.140.7", "103.5.140.8") },
+                loadHostCaCertificates = { caEntries },
+            )
+
+            installer.prepareRuntimeDirectories(paths, availableProcessors = 4)
+
+            val resolv = File(paths.rootfsDir, "etc/resolv.conf")
+            assertTrue(resolv.isFile)
+            assertEquals("nameserver 103.5.140.7\nnameserver 103.5.140.8\n", resolv.readText())
+            assertTrue(
+                java.nio.file.attribute.PosixFilePermission.OTHERS_READ in Files.getPosixFilePermissions(resolv.toPath()),
+            )
+
+            val aptConf = paths.aptProotConfFile
+            assertTrue(aptConf.isFile)
+            assertTrue(aptConf.readText().contains("""APT::Sandbox::User "root";"""))
+            assertTrue(aptConf.readText().contains("""Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";"""))
+            assertTrue(
+                java.nio.file.attribute.PosixFilePermission.OTHERS_READ in Files.getPosixFilePermissions(aptConf.toPath()),
+            )
+
+            assertTrue(paths.guestCaBundleHostFile.isFile)
+            assertEquals(2, CaTrustSync.countCertificatesInPem(paths.guestCaBundleHostFile.readText()))
+            assertTrue(
+                java.nio.file.attribute.PosixFilePermission.OTHERS_READ in
+                    Files.getPosixFilePermissions(paths.guestCaBundleHostFile.toPath()),
+            )
+            assertTrue(paths.androidUserCaBundleFile.isFile)
+
+            assertTrue(
+                java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE in
+                    Files.getPosixFilePermissions(paths.tmpDir.toPath()),
+            )
+            assertTrue(
+                java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE in
+                    Files.getPosixFilePermissions(paths.shmDir.toPath()),
+            )
+
+            // Confirm CLI clipboard helpers are installed in /usr/local/bin with 0755 permissions
+            for (helper in listOf("kucode-copy", "kucode-paste")) {
+                val scriptFile = File(paths.rootfsDir, "usr/local/bin/$helper")
+                assertTrue("$helper should be installed", scriptFile.isFile)
+                val perms = Files.getPosixFilePermissions(scriptFile.toPath())
+                assertTrue(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE in perms)
+                assertTrue(java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE in perms)
+            }
+
+            // Confirm secret atomic writes remain owner-only (0600) by default
+            val secret = File(paths.vscodeDataDir, ".editor-token")
+            writeTextAtomically(secret, "secret-token", Charsets.US_ASCII)
+            val secretPerms = Files.getPosixFilePermissions(secret.toPath())
+            assertFalse(java.nio.file.attribute.PosixFilePermission.GROUP_READ in secretPerms)
+            assertFalse(java.nio.file.attribute.PosixFilePermission.OTHERS_READ in secretPerms)
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
     private fun testPaths(base: File): PosixRuntimeConfig.Paths = PosixRuntimeConfig.Paths(
         runtimeRoot = File(base, "runtime"),
         workspaceDir = File(base, "workspace"),

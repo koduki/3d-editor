@@ -74,7 +74,7 @@ function callHost(method, path, body) {
       reject(new Error('KUCODE_ADMIN_PORT is not configured'));
       return;
     }
-    const payload = body ? Buffer.from(body, 'utf8') : null;
+    const payload = body !== undefined && body !== null ? Buffer.from(body, 'utf8') : null;
     const headers = { 'X-KuCode-Token': token };
     if (payload) {
       headers['Content-Type'] = 'text/plain; charset=utf-8';
@@ -104,21 +104,182 @@ function callHost(method, path, body) {
   });
 }
 
+function setStatusFeedback(message) {
+  if (typeof vscode.window.setStatusBarMessage === 'function') {
+    vscode.window.setStatusBarMessage(message, 1800);
+  }
+}
+
+async function writeHostClipboard(text) {
+  let hostOk = false;
+  let lastError = null;
+  try {
+    await callHost('POST', '/copy', text);
+    hostOk = true;
+  } catch (err) {
+    lastError = err;
+  }
+  let webOk = false;
+  try {
+    await vscode.env.clipboard.writeText(text);
+    webOk = true;
+  } catch (err) {
+    if (!lastError) lastError = err;
+  }
+  if (!hostOk && !webOk) {
+    throw lastError || new Error('Clipboard write failed');
+  }
+}
+
+async function readHostClipboard() {
+  // Always read via Android host ClipboardManager (`GET /clipboard`) instead of
+  // `vscode.env.clipboard.readText()`, which throws NotAllowedError and opens a
+  // sticky permission prompt in Android WebView.
+  return await callHost('GET', '/clipboard');
+}
+
+function getDocumentEol(document) {
+  const crlfValue = vscode.EndOfLine ? vscode.EndOfLine.CRLF : 2;
+  return document && document.eol === crlfValue ? '\r\n' : '\n';
+}
+
+function extractEditorCopyPlan(editor) {
+  const document = editor.document;
+  const selections = editor.selections || [];
+  const eol = getDocumentEol(document);
+  const nonEmpty = selections.filter((sel) => !sel.isEmpty);
+  if (nonEmpty.length > 0) {
+    return {
+      text: selections.map((sel) => document.getText(sel)).join(eol),
+      deleteRanges: nonEmpty,
+      lineCopy: false,
+    };
+  }
+  const lineNums = Array.from(new Set(selections.map((sel) => sel.active.line))).sort((a, b) => a - b);
+  const lines = lineNums.map((num) => document.lineAt(num));
+  return {
+    text: lines.map((line) => line.text + eol).join(''),
+    deleteRanges: lines.map((line) => line.rangeIncludingLineBreak),
+    lineCopy: true,
+  };
+}
+
+function normalizeTerminalPasteText(text) {
+  return String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+async function editorCopyCommand() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showInformationMessage('アクティブなエディタがありません');
+    return;
+  }
+  try {
+    const { text } = extractEditorCopyPlan(editor);
+    await writeHostClipboard(text);
+    setStatusFeedback('$(check) コピーしました');
+  } catch (err) {
+    vscode.window.showErrorMessage('コピーに失敗しました: ' + err.message);
+  }
+}
+
+async function editorCutCommand() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showInformationMessage('アクティブなエディタがありません');
+    return;
+  }
+  try {
+    const { text, deleteRanges } = extractEditorCopyPlan(editor);
+    await writeHostClipboard(text);
+    if (deleteRanges.length > 0) {
+      await editor.edit((editBuilder) => {
+        for (const range of deleteRanges) {
+          editBuilder.delete(range);
+        }
+      });
+    }
+    setStatusFeedback('$(check) 切り取りました');
+  } catch (err) {
+    vscode.window.showErrorMessage('切り取りに失敗しました: ' + err.message);
+  }
+}
+
+async function editorPasteCommand() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    if (vscode.window.activeTerminal) {
+      await terminalPasteCommand();
+      return;
+    }
+    vscode.window.showInformationMessage('アクティブなエディタがありません');
+    return;
+  }
+  try {
+    const text = await readHostClipboard();
+    if (!text) {
+      setStatusFeedback('クリップボードは空です');
+      return;
+    }
+    const selections = editor.selections || [];
+    const splitLines = selections.length > 1 ? text.split(/\r?\n/) : null;
+    const pasteLinePerCursor = Boolean(splitLines && splitLines.length === selections.length);
+    await editor.edit((editBuilder) => {
+      selections.forEach((sel, idx) => {
+        editBuilder.replace(sel, pasteLinePerCursor ? splitLines[idx] : text);
+      });
+    });
+    setStatusFeedback('$(check) 貼り付けました');
+  } catch (err) {
+    vscode.window.showErrorMessage('貼り付けに失敗しました: ' + err.message);
+  }
+}
+
+async function terminalCopyCommand() {
+  const terminal = vscode.window.activeTerminal;
+  if (!terminal) {
+    vscode.window.showInformationMessage('アクティブなターミナルがありません');
+    return;
+  }
+  try {
+    await vscode.commands.executeCommand('workbench.action.terminal.copySelection');
+    setStatusFeedback('$(check) ターミナル選択をコピーしました');
+  } catch (err) {
+    vscode.window.showErrorMessage('ターミナルのコピーに失敗しました: ' + err.message);
+  }
+}
+
+async function terminalPasteCommand() {
+  const terminal = vscode.window.activeTerminal;
+  if (!terminal) {
+    vscode.window.showInformationMessage('アクティブなターミナルがありません');
+    return;
+  }
+  try {
+    const text = await readHostClipboard();
+    if (!text) {
+      setStatusFeedback('クリップボードは空です');
+      return;
+    }
+    terminal.sendText(normalizeTerminalPasteText(text), false);
+    if (typeof terminal.show === 'function') {
+      terminal.show(false);
+    }
+    setStatusFeedback('$(check) ターミナルへ貼り付けました');
+  } catch (err) {
+    vscode.window.showErrorMessage('ターミナルへの貼り付けに失敗しました: ' + err.message);
+  }
+}
+
 async function openTextTabAndCopy(content, language, copiedMessage) {
   const doc = await vscode.workspace.openTextDocument({ content, language });
   await vscode.window.showTextDocument(doc, { preview: false });
   let copied = false;
   try {
-    await callHost('POST', '/copy', content);
+    await writeHostClipboard(content);
     copied = true;
   } catch (_) {
-    // Fallback to VS Code clipboard API below
-  }
-  try {
-    await vscode.env.clipboard.writeText(content);
-    copied = true;
-  } catch (_) {
-    // Ignore when WebView clipboard permission is restricted
+    // Ignore when clipboard is unavailable
   }
   if (copied) {
     vscode.window.showInformationMessage(copiedMessage);
@@ -230,6 +391,31 @@ async function requestStorageCommand() {
 async function openMenuCommand() {
   const items = [
     {
+      label: '$(copy) エディタをコピー (Ctrl+C)',
+      description: '選択テキストまたは現在行を Android クリップボードへコピー',
+      action: editorCopyCommand,
+    },
+    {
+      label: '$(scissors) エディタを切り取り (Ctrl+X)',
+      description: '選択テキストまたは現在行をコピーして削除',
+      action: editorCutCommand,
+    },
+    {
+      label: '$(clippy) エディタへ貼り付け (Ctrl+V)',
+      description: 'Android クリップボードの内容をエディタへ貼り付け',
+      action: editorPasteCommand,
+    },
+    {
+      label: '$(copy) ターミナル選択をコピー (Ctrl+Shift+C)',
+      description: '統合ターミナルの選択範囲をクリップボードへコピー',
+      action: terminalCopyCommand,
+    },
+    {
+      label: '$(terminal) ターミナルへ貼り付け (Ctrl+Shift+V)',
+      description: 'Android クリップボードの内容をアクティブなターミナルへ貼り付け',
+      action: terminalPasteCommand,
+    },
+    {
       label: '$(checklist) 実機チェックを実行（レポートを開く & 自動コピー）',
       description: '端末情報・PRoot・node-pty・マウント・疎通・エラーログを一括確認',
       action: runDiagnosticsCommand,
@@ -276,6 +462,36 @@ async function openMenuCommand() {
 
 function createSidebarMenuProvider() {
   const entries = [
+    {
+      label: 'エディタをコピー',
+      description: 'Ctrl+C',
+      icon: 'copy',
+      command: 'kucode.editorCopy',
+    },
+    {
+      label: 'エディタを切り取り',
+      description: 'Ctrl+X',
+      icon: 'scissors',
+      command: 'kucode.editorCut',
+    },
+    {
+      label: 'エディタへ貼り付け',
+      description: 'Ctrl+V',
+      icon: 'clippy',
+      command: 'kucode.editorPaste',
+    },
+    {
+      label: 'ターミナル選択をコピー',
+      description: 'Ctrl+Shift+C',
+      icon: 'copy',
+      command: 'kucode.terminalCopy',
+    },
+    {
+      label: 'ターミナルへ貼り付け',
+      description: 'Ctrl+Shift+V',
+      icon: 'terminal',
+      command: 'kucode.terminalPaste',
+    },
     {
       label: '実機チェックを実行',
       description: 'レポート表示 & 自動コピー',
@@ -337,6 +553,11 @@ function createSidebarMenuProvider() {
 function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('kucode.openMenu', openMenuCommand),
+    vscode.commands.registerCommand('kucode.editorCopy', editorCopyCommand),
+    vscode.commands.registerCommand('kucode.editorCut', editorCutCommand),
+    vscode.commands.registerCommand('kucode.editorPaste', editorPasteCommand),
+    vscode.commands.registerCommand('kucode.terminalCopy', terminalCopyCommand),
+    vscode.commands.registerCommand('kucode.terminalPaste', terminalPasteCommand),
     vscode.commands.registerCommand('kucode.runDiagnostics', runDiagnosticsCommand),
     vscode.commands.registerCommand('kucode.openLogs', openLogsCommand),
     vscode.commands.registerCommand('kucode.toggleTerminal', toggleTerminalCommand),
@@ -349,7 +570,7 @@ function activate(context) {
 
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusItem.text = '$(pulse) KuCode';
-  statusItem.tooltip = 'KuCode 実機チェック・表示サイズ・光学テーマ・管理画面を開く';
+  statusItem.tooltip = 'KuCode コピー/貼り付け・実機チェック・表示サイズ・光学テーマ・管理画面を開く';
   statusItem.command = 'kucode.openMenu';
   statusItem.show();
   context.subscriptions.push(statusItem);
@@ -363,5 +584,9 @@ module.exports = {
   OST_COLORS,
   VST_COLORS,
   callHost,
+  writeHostClipboard,
+  readHostClipboard,
+  extractEditorCopyPlan,
+  normalizeTerminalPasteText,
   createSidebarMenuProvider,
 };

@@ -179,7 +179,7 @@
       <div class="card-head">
         <div>
           <strong>実機チェック &amp; 診断レポート（コピペ用）</strong>
-          <div class="hint">端末/WebView/入力/16KBページ/SELinux・DocumentsProvider・PRoot(seccomp有無)・Node・node-pty実起動・@parcel/watcher・マウント・Debian/GitHub疎通・直近エラーログを一括チェックします</div>
+          <div class="hint">端末/WebView/入力/16KBページ/SELinux・DocumentsProvider・PRoot(seccomp有無)・Node・node-pty実起動・@parcel/watcher・マウント・CA証明書/apt設定・Debian/GitHub疎通・直近エラーログを一括チェックします</div>
         </div>
         <div class="actions">
           <button id="runDiagBtn" class="primary">実機チェックを実行</button>
@@ -190,8 +190,15 @@
     </section>
 
     <section class="card">
-      <div><strong>POSIX ミニターミナル（フォールバック / CLI 確認用）</strong></div>
-      <div class="hint">例: <code>ls -la /workspace</code> / <code>apt update &amp;&amp; apt install -y ca-certificates git gh</code> / <code>gh --version</code></div>
+      <div class="card-head">
+        <div>
+          <strong>POSIX ミニターミナル（フォールバック / CLI 確認用）</strong>
+          <div class="hint">例: <code>ls -la /workspace</code> / <code>apt update &amp;&amp; apt install -y ca-certificates git gh</code> / <code>gh --version</code></div>
+        </div>
+        <div class="actions">
+          <button id="copyCliBtn">出力をコピー</button>
+        </div>
+      </div>
       <div class="cli-row">
         <input id="cliInput" type="text" placeholder="Debian POSIX コマンドを入力して Enter" autocomplete="off" spellcheck="false" />
         <button id="cliRunBtn">実行</button>
@@ -246,6 +253,7 @@
     const cliInput = document.getElementById('cliInput');
     const cliRunBtn = document.getElementById('cliRunBtn');
     const cliOutput = document.getElementById('cliOutput');
+    const copyCliBtn = document.getElementById('copyCliBtn');
     const serverLogs = document.getElementById('serverLogs');
     const refreshLogsBtn = document.getElementById('refreshLogsBtn');
     const copyLogsBtn = document.getElementById('copyLogsBtn');
@@ -343,6 +351,7 @@
     copyDiagBtn.addEventListener('click', () => copyText(latestReportText, copyDiagBtn, '結果をコピー'));
     refreshLogsBtn.addEventListener('click', refreshLogs);
     copyLogsBtn.addEventListener('click', () => copyText(serverLogs.textContent || '', copyLogsBtn, 'ログをコピー'));
+    copyCliBtn.addEventListener('click', () => copyText(cliOutput.textContent || '', copyCliBtn, '出力をコピー'));
 
     function runCli() {
       const cmd = cliInput.value.trim();

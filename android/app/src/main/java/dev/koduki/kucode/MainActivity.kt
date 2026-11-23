@@ -24,7 +24,7 @@ import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Single-window Android XR Activity hosting:
@@ -106,6 +106,22 @@ class MainActivity : AppCompatActivity() {
             }
 
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    val parsed = url?.let { runCatching { Uri.parse(it) }.getOrNull() } ?: return
+                    val editorPort = runtimeManager.getStatus().port
+                    if (PosixRuntimeConfig.shouldKeepInsideWebView(parsed.scheme, parsed.host, parsed.port, editorPort)) {
+                        // Android WebView permanently denies navigator.clipboard.readText(); masking it
+                        // keeps writeText (for right-click auto-copy) intact while preventing VS Code's
+                        // terminal rightClickBehavior="copyPaste" from raising a sticky permission modal
+                        // when right-clicked without a selection (paste runs via kucode-tools GET /clipboard).
+                        view.evaluateJavascript(
+                            "try{if(navigator.clipboard&&'readText' in navigator.clipboard){Object.defineProperty(navigator.clipboard,'readText',{value:undefined,configurable:true});}}catch(_){}",
+                            null,
+                        )
+                    }
+                }
+
                 override fun shouldOverrideUrlLoading(
                     view: WebView,
                     request: WebResourceRequest,
@@ -170,6 +186,7 @@ class MainActivity : AppCompatActivity() {
                 onOpenBootPage = { runOnUiThread { loadBootPage() } },
                 onRequestStoragePermission = { runOnUiThread { openAllFilesPermissionSettings() } },
                 onCopyToClipboard = { text -> copyTextToClipboard(text) },
+                onReadFromClipboard = { readTextFromClipboard() },
             ),
         )
 
@@ -274,25 +291,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Always executes ClipboardManager.setPrimaryClip on the Android MainLooper so calls from
+     * Always executes ClipboardManager operations on the Android MainLooper so calls from
      * LocalDiagnosticsServer worker threads or WebView's JavaBridge thread never fail silently.
      */
-    private fun copyTextToClipboard(text: String): Boolean {
-        val action = {
-            runCatching {
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                    ?: return@runCatching false
-                val clip = ClipData.newPlainText("KuCode Diagnostics", text)
-                clipboard.setPrimaryClip(clip)
-                true
-            }.getOrDefault(false)
-        }
+    private fun copyTextToClipboard(text: String): Boolean = runOnMainThreadBlocking(false) {
+        runCatching {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                ?: return@runCatching false
+            val clip = ClipData.newPlainText("KuCode", text)
+            clipboard.setPrimaryClip(clip)
+            true
+        }.getOrDefault(false)
+    }
 
+    private fun readTextFromClipboard(): String? = runOnMainThreadBlocking<String?>(null) {
+        runCatching {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                ?: return@runCatching null
+            val clip = clipboard.primaryClip ?: return@runCatching ""
+            if (clip.itemCount <= 0) return@runCatching ""
+            clip.getItemAt(0).coerceToText(this)?.toString() ?: ""
+        }.getOrNull()
+    }
+
+    private fun <T> runOnMainThreadBlocking(defaultValue: T, action: () -> T): T {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return action()
         }
-
-        val result = AtomicBoolean(false)
+        val result = AtomicReference(defaultValue)
         val latch = CountDownLatch(1)
         mainHandler.post {
             try {

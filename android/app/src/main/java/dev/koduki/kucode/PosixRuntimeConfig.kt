@@ -22,6 +22,10 @@ object PosixRuntimeConfig {
     const val GUEST_OPENVSCODE_DIR = "/opt/openvscode-server"
     const val GUEST_OPENVSCODE_BIN = "$GUEST_OPENVSCODE_DIR/bin/openvscode-server"
     const val GUEST_VSCODE_DATA = "/var/lib/kucode-vscode"
+    const val GUEST_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+    const val GUEST_CA_DIR = "/etc/ssl/certs"
+    const val GUEST_ANDROID_USER_CA_BUNDLE = "/etc/ssl/kucode-android-user-ca.crt"
+    const val GUEST_APT_PROOT_CONF = "/etc/apt/apt.conf.d/99kucode-proot"
 
     data class Paths(
         val runtimeRoot: File,
@@ -41,6 +45,9 @@ object PosixRuntimeConfig {
         val machineSettingsFile: File get() = File(vscodeDataDir, "data/Machine/settings.json")
         val versionMarker: File get() = File(rootfsDir, ".kucode-runtime-version")
         val backupRootfsDir: File get() = File(runtimeRoot, "rootfs.previous")
+        val guestCaBundleHostFile: File get() = File(rootfsDir, "etc/ssl/certs/ca-certificates.crt")
+        val androidUserCaBundleFile: File get() = File(rootfsDir, "etc/ssl/kucode-android-user-ca.crt")
+        val aptProotConfFile: File get() = File(rootfsDir, "etc/apt/apt.conf.d/99kucode-proot")
 
         val prootBin: File get() = File(nativeLibDir, "libproot.so")
         val prootLoader: File get() = File(nativeLibDir, "libproot-loader.so")
@@ -106,10 +113,12 @@ object PosixRuntimeConfig {
         disableSeccomp: Boolean = false,
         adminPort: Int = 0,
         adminToken: String = "",
+        includeNodeExtraCaCerts: Boolean = paths.androidUserCaBundleFile.isFile,
     ): Map<String, String> {
         val env = linkedMapOf(
             "PROOT_LOADER" to paths.prootLoader.absolutePath,
             "PROOT_TMP_DIR" to paths.tmpDir.absolutePath,
+            "TMPDIR" to "/tmp",
             "HOME" to GUEST_HOME,
             "USER" to "root",
             "TERM" to "xterm-256color",
@@ -118,7 +127,16 @@ object PosixRuntimeConfig {
             "LC_ALL" to "C.UTF-8",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "VSCODE_AGENT_FOLDER" to GUEST_VSCODE_DATA,
+            "SSL_CERT_FILE" to GUEST_CA_BUNDLE,
+            "SSL_CERT_DIR" to GUEST_CA_DIR,
+            "CURL_CA_BUNDLE" to GUEST_CA_BUNDLE,
+            "GIT_SSL_CAINFO" to GUEST_CA_BUNDLE,
+            "REQUESTS_CA_BUNDLE" to GUEST_CA_BUNDLE,
+            "PIP_CERT" to GUEST_CA_BUNDLE,
         )
+        if (includeNodeExtraCaCerts) {
+            env["NODE_EXTRA_CA_CERTS"] = GUEST_ANDROID_USER_CA_BUNDLE
+        }
         if (disableSeccomp) {
             env["PROOT_NO_SECCOMP"] = "1"
         }
@@ -220,6 +238,11 @@ object PosixRuntimeConfig {
             .put("terminal.integrated.fontSize", 15)
             .put("terminal.integrated.defaultProfile.linux", "bash")
             .put("terminal.integrated.profiles.linux", JSONObject().put("bash", bashProfile))
+            .put("terminal.integrated.rightClickBehavior", "copyPaste")
+            .put(
+                "terminal.integrated.commandsToSkipShell",
+                JSONArray().put("kucode.terminalCopy").put("kucode.terminalPaste"),
+            )
     }
 
     fun buildMinimalVsCodeSettingsJson(): String =
@@ -356,6 +379,132 @@ object PosixRuntimeConfig {
         return servers.joinToString("\n", postfix = "\n") { "nameserver $it" }
     }
 
+    fun buildAptProotConf(): String = """
+        // Managed by KuCode for Android PRoot + TLS compatibility
+        APT::Sandbox::User "root";
+        APT::Sandbox::Seccomp "false";
+        Acquire::https::CaInfo "$GUEST_CA_BUNDLE";
+    """.trimIndent() + "\n"
+
+    fun buildClipboardHelperScripts(
+        nodeBin: String = "$GUEST_OPENVSCODE_DIR/node",
+    ): Map<String, String> = linkedMapOf(
+        "kucode-copy" to """
+            #!$nodeBin
+            'use strict';
+            const http = require('node:http');
+            const port = Number(process.env.KUCODE_ADMIN_PORT || 0);
+            const token = process.env.KUCODE_ADMIN_TOKEN || '';
+            if (!port || !token) {
+              console.error('kucode-copy: KuCode host clipboard service is unavailable in this shell.');
+              process.exit(1);
+            }
+            const MAX_BYTES = 1024 * 1024;
+            function send(payload) {
+              if (payload.length > MAX_BYTES) {
+                console.error('kucode-copy: input exceeds 1 MiB limit.');
+                process.exit(1);
+              }
+              const req = http.request(
+                {
+                  hostname: '127.0.0.1',
+                  port,
+                  path: '/copy',
+                  method: 'POST',
+                  headers: {
+                    'X-KuCode-Token': token,
+                    'Content-Type': 'text/plain; charset=utf-8',
+                    'Content-Length': String(payload.length),
+                  },
+                  timeout: 5000,
+                },
+                (res) => {
+                  const chunks = [];
+                  res.on('data', (c) => chunks.push(c));
+                  res.on('end', () => {
+                    if (res.statusCode >= 200 && res.statusCode < 300) {
+                      process.exit(0);
+                    } else {
+                      console.error('kucode-copy: HTTP ' + res.statusCode + ': ' + Buffer.concat(chunks).toString('utf8'));
+                      process.exit(1);
+                    }
+                  });
+                },
+              );
+              req.on('timeout', () => req.destroy(new Error('timeout')));
+              req.on('error', (err) => {
+                console.error('kucode-copy: ' + err.message);
+                process.exit(1);
+              });
+              req.end(payload);
+            }
+            if (process.argv.length > 2) {
+              send(Buffer.from(process.argv.slice(2).join(' '), 'utf8'));
+            } else {
+              const chunks = [];
+              let total = 0;
+              process.stdin.on('data', (chunk) => {
+                total += chunk.length;
+                if (total > MAX_BYTES) {
+                  console.error('kucode-copy: input exceeds 1 MiB limit.');
+                  process.exit(1);
+                }
+                chunks.push(chunk);
+              });
+              process.stdin.on('end', () => send(Buffer.concat(chunks)));
+              process.stdin.on('error', (err) => {
+                console.error('kucode-copy: ' + err.message);
+                process.exit(1);
+              });
+            }
+        """.trimIndent() + "\n",
+        "kucode-paste" to """
+            #!$nodeBin
+            'use strict';
+            const http = require('node:http');
+            const port = Number(process.env.KUCODE_ADMIN_PORT || 0);
+            const token = process.env.KUCODE_ADMIN_TOKEN || '';
+            if (!port || !token) {
+              console.error('kucode-paste: KuCode host clipboard service is unavailable in this shell.');
+              process.exit(1);
+            }
+            const req = http.request(
+              {
+                hostname: '127.0.0.1',
+                port,
+                path: '/clipboard',
+                method: 'GET',
+                headers: { 'X-KuCode-Token': token },
+                timeout: 5000,
+              },
+              (res) => {
+                const chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', () => {
+                  const buf = Buffer.concat(chunks);
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    process.stdout.on('error', (err) => {
+                      if (err && err.code === 'EPIPE') process.exit(0);
+                      console.error('kucode-paste: ' + err.message);
+                      process.exit(1);
+                    });
+                    process.stdout.write(buf, () => process.exit(0));
+                  } else {
+                    console.error('kucode-paste: HTTP ' + res.statusCode + ': ' + buf.toString('utf8'));
+                    process.exit(1);
+                  }
+                });
+              },
+            );
+            req.on('timeout', () => req.destroy(new Error('timeout')));
+            req.on('error', (err) => {
+              console.error('kucode-paste: ' + err.message);
+              process.exit(1);
+            });
+            req.end();
+        """.trimIndent() + "\n",
+    )
+
     fun buildDefaultBashrc(): String = """
         # KuCode persistent Debian shell config (/root is mounted outside rootfs)
         export LANG=C.UTF-8
@@ -374,6 +523,8 @@ object PosixRuntimeConfig {
 
 ## 基本操作（物理キーボード）
 - **ファイルを開く**: 左サイドバーをクリック、または `Ctrl+P` / `Ctrl+O`
+- **コピー / 切り取り / 貼り付け（エディタ）**: `Ctrl+C` / `Ctrl+X` / `Ctrl+V`、または右クリックメニュー
+- **コピー / 貼り付け（ターミナル）**: 選択後に**右クリックで自動コピー**（または `Ctrl+Shift+C`）、貼り付けは `Ctrl+Shift+V` / `Ctrl+V`（`Shift+右クリック` でメニュー）、CLI では `kucode-copy` / `kucode-paste`
 - **保存する**: `Ctrl+S`
 - **タブを閉じる**: `Ctrl+W`
 - **ターミナル開閉**: `Ctrl+J` または左端 **KuCode** メニューの「ターミナル開閉」

@@ -26,6 +26,7 @@ import java.nio.file.StandardCopyOption
 internal class RuntimeInstaller(
     private val openAsset: (String) -> InputStream,
     private val querySystemDnsServers: () -> List<String> = { emptyList() },
+    private val loadHostCaCertificates: () -> List<CaCertificateEntry> = { emptyList() },
     private val expectedVersion: String = PosixRuntimeConfig.RUNTIME_VERSION,
     private val installExtension: (File) -> File = { dir -> VsCodeExtensionAsset.installInto(dir, openAsset) },
     private val onProgress: (message: String, progress: Int) -> Unit = { _, _ -> },
@@ -118,7 +119,7 @@ internal class RuntimeInstaller(
      */
     fun commitInstallation(paths: PosixRuntimeConfig.Paths) {
         if (readInstalledVersion(paths) != expectedVersion) {
-            writeTextAtomically(paths.versionMarker, expectedVersion, Charsets.US_ASCII)
+            writeTextAtomically(paths.versionMarker, expectedVersion, Charsets.US_ASCII, worldReadable = true)
         }
         if (Files.exists(paths.backupRootfsDir.toPath(), LinkOption.NOFOLLOW_LINKS)) {
             deleteTreeNoFollow(paths.backupRootfsDir)
@@ -141,22 +142,27 @@ internal class RuntimeInstaller(
     }
 
     fun ensureMountPointDirsExist(paths: PosixRuntimeConfig.Paths) {
-        paths.sysdataDir.mkdirs()
-        paths.shmDir.mkdirs()
-        paths.tmpDir.mkdirs()
+        ensureDirectoryWithMode(paths.sysdataDir, 0b111_101_101)
+        ensureDirectoryWithMode(paths.shmDir, 0b111_111_111)
+        ensureDirectoryWithMode(paths.tmpDir, 0b111_111_111)
         paths.vscodeDataDir.mkdirs()
         paths.workspaceDir.mkdirs()
         paths.homeDir.mkdirs()
         paths.androidSharedDir.mkdirs()
 
-        // Ensure mount target directories exist inside rootfs
+        // Ensure mount target directories exist inside rootfs with POSIX-appropriate modes
+        // (Android's default process umask 0077 would otherwise create 0700 directories).
         File(paths.rootfsDir, "workspace").mkdirs()
         File(paths.rootfsDir, "android/shared").mkdirs()
         File(paths.rootfsDir, "android/sdcard").mkdirs()
         File(paths.rootfsDir, PosixRuntimeConfig.GUEST_VSCODE_DATA.trimStart('/')).mkdirs()
-        File(paths.rootfsDir, "dev/shm").mkdirs()
-        File(paths.rootfsDir, "tmp").mkdirs()
+        ensureDirectoryWithMode(File(paths.rootfsDir, "dev/shm"), 0b111_111_111)
+        ensureDirectoryWithMode(File(paths.rootfsDir, "tmp"), 0b111_111_111)
         File(paths.rootfsDir, "root").mkdirs()
+        ensureDirectoryWithMode(File(paths.rootfsDir, "etc/ssl"), 0b111_101_101)
+        ensureDirectoryWithMode(File(paths.rootfsDir, "etc/ssl/certs"), 0b111_101_101)
+        ensureDirectoryWithMode(File(paths.rootfsDir, "usr/local/share/ca-certificates"), 0b111_101_101)
+        ensureDirectoryWithMode(File(paths.rootfsDir, "etc/apt/apt.conf.d"), 0b111_101_101)
     }
 
     fun prepareRuntimeDirectories(
@@ -174,18 +180,18 @@ internal class RuntimeInstaller(
         // Seed welcome README.md if workspace has no README yet
         val readme = File(paths.workspaceDir, "README.md")
         if (!readme.exists()) {
-            writeTextAtomically(readme, PosixRuntimeConfig.buildWelcomeReadme(), Charsets.UTF_8)
+            writeTextAtomically(readme, PosixRuntimeConfig.buildWelcomeReadme(), Charsets.UTF_8, worldReadable = true)
         }
 
         // Seed persistent .bashrc in decoupled /root if absent
         val bashrc = File(paths.homeDir, ".bashrc")
         if (!bashrc.exists()) {
-            writeTextAtomically(bashrc, PosixRuntimeConfig.buildDefaultBashrc(), Charsets.UTF_8)
+            writeTextAtomically(bashrc, PosixRuntimeConfig.buildDefaultBashrc(), Charsets.UTF_8, worldReadable = true)
         }
 
         // Write fake /proc files to avoid Android SELinux denials in Node.js / Linux tools
         for ((name, content) in PosixRuntimeConfig.buildFakeSysdataFiles(availableProcessors)) {
-            writeTextAtomically(File(paths.sysdataDir, name), content, Charsets.UTF_8)
+            writeTextAtomically(File(paths.sysdataDir, name), content, Charsets.UTF_8, worldReadable = true)
         }
 
         // Sync active Android DNS servers into /etc/resolv.conf (fallback: 1.1.1.1 / 8.8.8.8)
@@ -197,7 +203,44 @@ internal class RuntimeInstaller(
         ) {
             deleteTreeNoFollow(resolvConf)
         }
-        writeTextAtomically(resolvConf, PosixRuntimeConfig.buildResolvConf(dnsServers), Charsets.UTF_8)
+        writeTextAtomically(
+            resolvConf,
+            PosixRuntimeConfig.buildResolvConf(dnsServers),
+            Charsets.UTF_8,
+            worldReadable = true,
+        )
+
+        // Configure apt for PRoot compatibility (avoid _apt setgroups/sandbox drops) and HTTPS CA trust
+        val aptProotConf = paths.aptProotConfFile
+        aptProotConf.parentFile?.let { ensureDirectoryWithMode(it, 0b111_101_101) }
+        if (Files.isSymbolicLink(aptProotConf.toPath()) ||
+            Files.isDirectory(aptProotConf.toPath(), LinkOption.NOFOLLOW_LINKS)
+        ) {
+            deleteTreeNoFollow(aptProotConf)
+        }
+        writeTextAtomically(
+            aptProotConf,
+            PosixRuntimeConfig.buildAptProotConf(),
+            Charsets.UTF_8,
+            worldReadable = true,
+        )
+
+        // Sync Android trusted CA certificates (Conscrypt APEX system roots + user CAs) into Debian
+        CaTrustSync.syncIntoRootfs(paths, loadHostCaCertificates(), onLog)
+
+        // Install CLI clipboard helpers (`kucode-copy` / `kucode-paste`) into /usr/local/bin
+        val localBinDir = File(paths.rootfsDir, "usr/local/bin")
+        ensureDirectoryWithMode(localBinDir, 0b111_101_101)
+        for ((name, script) in PosixRuntimeConfig.buildClipboardHelperScripts()) {
+            val target = File(localBinDir, name)
+            if (Files.isSymbolicLink(target.toPath()) ||
+                Files.isDirectory(target.toPath(), LinkOption.NOFOLLOW_LINKS)
+            ) {
+                deleteTreeNoFollow(target)
+            }
+            writeTextAtomically(target, script, Charsets.UTF_8, worldReadable = true)
+            TarGzExtractor.DefaultPosixFsOps.chmod(target, 0b111_101_101)
+        }
 
         // Always sync the built-in extension (`kucode-tools`) so upgrades take effect
         // immediately without re-extracting the entire rootfs/openvscode-server archive

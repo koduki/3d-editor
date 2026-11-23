@@ -45,11 +45,26 @@ class PosixRuntimeConfigTest {
             disableSeccomp = true,
             adminPort = 43210,
             adminToken = "secret-token",
+            includeNodeExtraCaCerts = false,
         )
         assertEquals("/data/app/kucode/lib/arm64/libproot-loader.so", env["PROOT_LOADER"])
         assertEquals("1", env["PROOT_NO_SECCOMP"])
         assertEquals("43210", env["KUCODE_ADMIN_PORT"])
         assertEquals("secret-token", env["KUCODE_ADMIN_TOKEN"])
+        assertEquals("/tmp", env["TMPDIR"])
+        assertEquals("/etc/ssl/certs/ca-certificates.crt", env["SSL_CERT_FILE"])
+        assertEquals("/etc/ssl/certs", env["SSL_CERT_DIR"])
+        assertEquals("/etc/ssl/certs/ca-certificates.crt", env["CURL_CA_BUNDLE"])
+        assertEquals("/etc/ssl/certs/ca-certificates.crt", env["GIT_SSL_CAINFO"])
+        assertEquals("/etc/ssl/certs/ca-certificates.crt", env["REQUESTS_CA_BUNDLE"])
+        assertEquals("/etc/ssl/certs/ca-certificates.crt", env["PIP_CERT"])
+        assertFalse(env.containsKey("NODE_EXTRA_CA_CERTS"))
+
+        val envWithUserCa = PosixRuntimeConfig.buildProotEnvironment(
+            paths = paths,
+            includeNodeExtraCaCerts = true,
+        )
+        assertEquals(PosixRuntimeConfig.GUEST_ANDROID_USER_CA_BUNDLE, envWithUserCa["NODE_EXTRA_CA_CERTS"])
     }
 
     @Test
@@ -83,6 +98,12 @@ class PosixRuntimeConfigTest {
         assertEquals("#000000", colors.getString("editor.background"))
         assertEquals("#000000", colors.getString("terminal.background"))
         assertEquals("#38bdf8", colors.getString("tab.activeBorderTop"))
+
+        val skipShell = json.getJSONArray("terminal.integrated.commandsToSkipShell")
+        val skipList = (0 until skipShell.length()).map { skipShell.getString(it) }
+        assertTrue(skipList.contains("kucode.terminalCopy"))
+        assertTrue(skipList.contains("kucode.terminalPaste"))
+        assertEquals("copyPaste", json.getString("terminal.integrated.rightClickBehavior"))
     }
 
     @Test
@@ -96,6 +117,8 @@ class PosixRuntimeConfigTest {
         assertEquals("off", merged.getString("terminal.integrated.gpuAcceleration"))
         assertEquals("500", merged.getString("editor.fontWeight"))
         assertEquals(3, merged.getInt("editor.cursorWidth"))
+        assertEquals("copyPaste", merged.getString("terminal.integrated.rightClickBehavior"))
+        assertTrue(merged.has("terminal.integrated.commandsToSkipShell"))
     }
 
     @Test
@@ -146,6 +169,26 @@ class PosixRuntimeConfigTest {
     }
 
     @Test
+    fun buildAptProotConf_configuresRootSandboxNoSeccompAndCaInfo() {
+        val conf = PosixRuntimeConfig.buildAptProotConf()
+        assertTrue(conf.contains("""APT::Sandbox::User "root";"""))
+        assertTrue(conf.contains("""APT::Sandbox::Seccomp "false";"""))
+        assertTrue(conf.contains("""Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";"""))
+    }
+
+    @Test
+    fun buildClipboardHelperScripts_providesCopyAndPasteCliScripts() {
+        val scripts = PosixRuntimeConfig.buildClipboardHelperScripts()
+        assertEquals(setOf("kucode-copy", "kucode-paste"), scripts.keys)
+        val copy = scripts.getValue("kucode-copy")
+        val paste = scripts.getValue("kucode-paste")
+        assertTrue(copy.startsWith("#!/opt/openvscode-server/node\n"))
+        assertTrue(paste.startsWith("#!/opt/openvscode-server/node\n"))
+        assertTrue(copy.contains("path: '/copy'"))
+        assertTrue(paste.contains("path: '/clipboard'"))
+    }
+
+    @Test
     fun buildFakeSysdataFiles_providesRequiredProcEntries() {
         val files = PosixRuntimeConfig.buildFakeSysdataFiles(cpuCount = 4)
         assertTrue(files.containsKey("stat"))
@@ -157,3 +200,4 @@ class PosixRuntimeConfigTest {
         assertFalse(files.getValue("stat").contains("cpu4 "))
     }
 }
+

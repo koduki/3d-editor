@@ -61,6 +61,8 @@ adb install -r kucode-release.apk
 | 操作 | 方法 |
 | --- | --- |
 | ファイルを開く / クイックオープン | 左エクスプローラー、または `Ctrl+P` / `Ctrl+O` |
+| コピー / 切り取り / 貼り付け（エディタ） | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`、右クリックメニュー、または左端 **KuCode** メニュー |
+| コピー / 貼り付け（統合ターミナル） | 選択後に**右クリックで自動コピー**（または `Ctrl+Shift+C`）、貼り付けは `Ctrl+Shift+V` / `Ctrl+V`（`Shift+右クリック` でメニュー）、CLI では `kucode-copy` / `kucode-paste` |
 | 保存 / タブを閉じる | `Ctrl+S` / `Ctrl+W` |
 | 統合ターミナルを開閉 | `Ctrl+J`、または左端 **KuCode** アイコン →「ターミナル開閉」 |
 | 表示サイズ / OST・VST テーマ切替 | 左端 **KuCode** アイコン（`標準 / 大 / 特大`、`OST 純黒 / VST 暗灰`） |
@@ -140,9 +142,9 @@ flowchart TB
 
 ## 主な機能
 
-- **ランタイム起動 & 耐障害性**：`.tgz` アトミック展開（symlink/hardlink/chmod 保持＆パストラバーサル防御）、rootfs 内バージョン管理と READY コミット／失敗時ロールバック、優先固定ポート `18765`、Android システム DNS 動的同期、起動失敗時 `PROOT_NO_SECCOMP=1` 自動リトライ、Android 15 FGS 6 時間上限対策。
+- **ランタイム起動 & 耐障害性**：`.tgz` アトミック展開（symlink/hardlink/chmod 保持＆パストラバーサル防御）、rootfs 内バージョン管理と READY コミット／失敗時ロールバック、優先固定ポート `18765`、Android システム DNS & 信頼済み CA 証明書（システム＋ユーザー CA）の自動同期、PRoot 向け `apt` 設定（`APT::Sandbox::User "root"` / `Acquire::https::CaInfo`）、起動失敗時 `PROOT_NO_SECCOMP=1` 自動リトライ、Android 15 FGS 6 時間上限対策。
 - **空間デスクトップ UX**：OST 純黒 `#000000` / VST 暗灰 `#12141a` 切替、表示サイズ 3 段階、フォーカス枠（`#38BDF8` / `#18181B`）＋非フォーカス自動減光（`alpha = 0.55f`）、ピンチズーム抑止、Back 誤終了ガード、別ポート `localhost`（例 `:3000`）および外部 URL の隣ウィンドウ起動、統合ターミナル `gpuAcceleration: "off"`。
-- **内蔵拡張 & 実機診断**：左 Activity Bar の `KuCode` メニュー（`kucode-tools` を起動時自動同期）、並列実行する実機診断レポート生成＆自動クリップボードコピー、起動エラー時自動診断、非 PTY フォールバック CLI コンソール（`boot.html`）。
+- **内蔵拡張 & 実機診断**：左 Activity Bar の `KuCode` メニュー（`kucode-tools` を起動時自動同期）、Android `ClipboardManager` 連携によるエディタ／統合ターミナルのコピー＆貼り付け（`POST /copy`・`GET /clipboard`・CLI 補助コマンド `kucode-copy` / `kucode-paste`）、並列実行する実機診断レポート生成＆自動クリップボードコピー、起動エラー時自動診断、非 PTY フォールバック CLI コンソール（`boot.html`）。
 - **双方向ファイル共有 & コンプライアンス**：`KuCodeDocumentsProvider`（`NOFOLLOW_LINKS` 境界制御付き）、APK 内 `assets/licenses/` へのライセンス全文＋Debian パッケージマニフェスト自動同梱とアプリ内ライセンスビューア。
 
 ---
@@ -182,6 +184,7 @@ flowchart TB
 │       │       ├── PosixRuntimeManager.kt      # ランタイムライフサイクル調停ファサード
 │       │       ├── RuntimeStatusStore.kt       # アトミック状態スナップショット & リングバッファログ
 │       │       ├── RuntimeInstaller.kt         # rootfs アトミック展開・ロールバック・Machine 設定マージ
+│       │       ├── CaTrustSync.kt              # Android 信頼済み CA 証明書ストア（システム＋ユーザー CA）同期
 │       │       ├── OpenVsCodeLauncher.kt       # openvscode-server 起動・seccomp 自動リトライ・疎通検証
 │       │       ├── PosixShellExecutor.kt       # 非 PTY シェル実行・タイムアウト・キャンセル伝播
 │       │       ├── RuntimeFiles.kt             # アトミック書込み・NOFOLLOW_LINKS 再帰削除ユーティリティ

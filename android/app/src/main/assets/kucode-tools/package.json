@@ -1,7 +1,7 @@
 {
   "name": "kucode-tools",
   "displayName": "KuCode Diagnostics & Tools",
-  "description": "Built-in Android XR diagnostics, optical presets, log viewer, and storage menu for KuCode",
+  "description": "Built-in Android XR diagnostics, clipboard bridge, optical presets, log viewer, and storage menu for KuCode",
   "version": "0.6.0",
   "publisher": "koduki",
   "engines": {
@@ -20,6 +20,26 @@
         "command": "kucode.openMenu",
         "title": "KuCode: チェック & 管理メニューを開く",
         "icon": "$(pulse)"
+      },
+      {
+        "command": "kucode.editorCopy",
+        "title": "KuCode: コピー (エディタ)"
+      },
+      {
+        "command": "kucode.editorCut",
+        "title": "KuCode: 切り取り (エディタ)"
+      },
+      {
+        "command": "kucode.editorPaste",
+        "title": "KuCode: 貼り付け (エディタ)"
+      },
+      {
+        "command": "kucode.terminalCopy",
+        "title": "KuCode: 選択をコピー (ターミナル)"
+      },
+      {
+        "command": "kucode.terminalPaste",
+        "title": "KuCode: 貼り付け (ターミナル)"
       },
       {
         "command": "kucode.runDiagnostics",
@@ -50,6 +70,33 @@
         "title": "KuCode: Android ストレージアクセスを許可"
       }
     ],
+    "keybindings": [
+      {
+        "command": "kucode.editorCopy",
+        "key": "ctrl+c",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "kucode.editorCut",
+        "key": "ctrl+x",
+        "when": "editorTextFocus && !editorReadonly"
+      },
+      {
+        "command": "kucode.editorPaste",
+        "key": "ctrl+v",
+        "when": "editorTextFocus && !editorReadonly"
+      },
+      {
+        "command": "kucode.terminalPaste",
+        "key": "ctrl+shift+v",
+        "when": "terminalFocus"
+      },
+      {
+        "command": "kucode.terminalPaste",
+        "key": "ctrl+v",
+        "when": "terminalFocus"
+      }
+    ],
     "menus": {
       "editor/title": [
         {
@@ -58,6 +105,20 @@
         }
       ],
       "editor/context": [
+        {
+          "command": "kucode.editorCut",
+          "when": "!editorReadonly",
+          "group": "1_kucode_clipboard@1"
+        },
+        {
+          "command": "kucode.editorCopy",
+          "group": "1_kucode_clipboard@2"
+        },
+        {
+          "command": "kucode.editorPaste",
+          "when": "!editorReadonly",
+          "group": "1_kucode_clipboard@3"
+        },
         {
           "command": "kucode.runDiagnostics",
           "group": "z_kucode@1"
@@ -69,6 +130,16 @@
         {
           "command": "kucode.openManager",
           "group": "z_kucode@3"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "kucode.terminalCopy",
+          "group": "1_kucode_clipboard@1"
+        },
+        {
+          "command": "kucode.terminalPaste",
+          "group": "1_kucode_clipboard@2"
         }
       ],
       "explorer/context": [
