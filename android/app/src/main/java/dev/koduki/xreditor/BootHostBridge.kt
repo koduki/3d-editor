@@ -2,13 +2,16 @@ package dev.koduki.xreditor
 
 import android.content.Context
 import android.webkit.JavascriptInterface
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
- * Minimal JS bridge exposed on the local boot/diagnostics page (`boot.html`),
- * allowing users to inspect boot progress, run the built-in device diagnostic
- * checklist, copy reports/logs to the Android clipboard, grant storage access,
- * restart the embedded server, or run fallback POSIX CLI commands.
+ * Minimal, strictly non-blocking JS bridge exposed ONLY on `boot.html`
+ * (removed before navigating to openvscode-server).
+ * Long-running operations (diagnostics, fallback POSIX CLI) run on Dispatchers.IO
+ * and report back via callbacks so WebView's JavaBridge thread never blocks or ANRs.
  */
 class BootHostBridge(
     private val context: Context,
@@ -16,7 +19,10 @@ class BootHostBridge(
     private val onOpenEditor: () -> Unit,
     private val onRequestAllFilesAccess: () -> Unit,
     private val onCopyToClipboard: (text: String) -> Boolean,
+    private val onDiagnosticsCompleted: (reportText: String) -> Unit,
+    private val onCommandCompleted: (command: String, resultJson: String) -> Unit,
 ) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @JavascriptInterface
     fun getStatus(): String = runtimeManager.getStatus().toJsonString()
@@ -45,21 +51,34 @@ class BootHostBridge(
     }
 
     @JavascriptInterface
-    fun runDiagnostics(): String = runBlocking {
-        DiagnosticsRunner.collect(context, runtimeManager)
-    }
-
-    @JavascriptInterface
     fun copyToClipboard(text: String): Boolean = onCopyToClipboard(text)
 
     @JavascriptInterface
-    fun runCommand(command: String): String {
+    fun startDiagnostics() {
+        scope.launch {
+            val report = try {
+                DiagnosticsRunner.collect(context, runtimeManager)
+            } catch (t: Throwable) {
+                "Diagnostics Error: ${t.message}"
+            }
+            onDiagnosticsCompleted(report)
+        }
+    }
+
+    @JavascriptInterface
+    fun startCommand(command: String) {
         val trimmed = command.trim()
         if (trimmed.isEmpty()) {
-            return PosixRuntimeManager.CommandResult(0, "").toJsonString()
+            onCommandCompleted("", PosixRuntimeManager.CommandResult(0, "").toJsonString())
+            return
         }
-        return runBlocking {
-            runtimeManager.runShellCommand(trimmed).toJsonString()
+        scope.launch {
+            val resultJson = try {
+                runtimeManager.runShellCommand(trimmed).toJsonString()
+            } catch (t: Throwable) {
+                PosixRuntimeManager.CommandResult(1, "Error: ${t.message}").toJsonString()
+            }
+            onCommandCompleted(trimmed, resultJson)
         }
     }
 }

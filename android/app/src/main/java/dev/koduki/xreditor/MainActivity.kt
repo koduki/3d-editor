@@ -8,29 +8,38 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.KeyEvent
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Single-window Android XR Activity hosting:
- * 1. Minimal pure-black boot/diagnostics page (`file:///android_asset/boot.html`)
- *    during first-run extraction or when toggled via Ctrl+Alt+D
- * 2. Embedded `openvscode-server` (`http://127.0.0.1:<port>/?folder=/workspace`)
- *    once ready
+ * 1. Pure-black boot/diagnostics page (`file:///android_asset/boot.html`) with isolated `XREditorHost` bridge
+ * 2. Embedded `openvscode-server` (`http://127.0.0.1:18765/?folder=/workspace`) with `XREditorHost` removed
+ *    and native trusted KeyEvents flowing directly to Monaco / xterm.js
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var runtimeManager: PosixRuntimeManager
+    private lateinit var bootBridge: BootHostBridge
     private val shortcutRouter = HardwareShortcutRouter()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var showingEditor = false
     private var autoOpenedEditor = false
+    private var hostBridgeAttached = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,6 +47,34 @@ class MainActivity : AppCompatActivity() {
 
         window.decorView.setBackgroundColor(Color.BLACK)
         runtimeManager = PosixRuntimeManager.getInstance(this)
+
+        bootBridge = BootHostBridge(
+            context = applicationContext,
+            runtimeManager = runtimeManager,
+            onOpenEditor = { runOnUiThread { loadEditorIfReady() } },
+            onRequestAllFilesAccess = { runOnUiThread { openAllFilesPermissionSettings() } },
+            onCopyToClipboard = { text -> copyTextToClipboard(text) },
+            onDiagnosticsCompleted = { report ->
+                runOnUiThread {
+                    if (!showingEditor && ::webView.isInitialized) {
+                        webView.evaluateJavascript(
+                            "window.__onDiagnosticsResult && window.__onDiagnosticsResult(${JSONObject.quote(report)});",
+                            null,
+                        )
+                    }
+                }
+            },
+            onCommandCompleted = { command, resultJson ->
+                runOnUiThread {
+                    if (!showingEditor && ::webView.isInitialized) {
+                        webView.evaluateJavascript(
+                            "window.__onCommandResult && window.__onCommandResult(${JSONObject.quote(command)}, $resultJson);",
+                            null,
+                        )
+                    }
+                }
+            },
+        )
 
         webView = WebView(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -79,15 +116,19 @@ class MainActivity : AppCompatActivity() {
             webChromeClient = WebChromeClient()
         }
 
-        val bridge = BootHostBridge(
-            context = applicationContext,
-            runtimeManager = runtimeManager,
-            onOpenEditor = { runOnUiThread { loadEditorIfReady() } },
-            onRequestAllFilesAccess = { runOnUiThread { openAllFilesPermissionSettings() } },
-            onCopyToClipboard = { text -> copyTextToClipboard(text) },
-        )
-        webView.addJavascriptInterface(bridge, "XREditorHost")
         setContentView(webView)
+
+        // Prevent stray Back/Esc gestures in XR from accidentally killing the editor & server
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (!showingEditor && runtimeManager.getStatus().state == PosixRuntimeManager.State.READY) {
+                        loadEditorIfReady()
+                    }
+                }
+            },
+        )
 
         runtimeManager.setHostActions(
             PosixRuntimeManager.HostActions(
@@ -99,7 +140,7 @@ class MainActivity : AppCompatActivity() {
 
         runtimeManager.setStatusListener { snapshot ->
             runOnUiThread {
-                if (!showingEditor) {
+                if (!showingEditor && ::webView.isInitialized) {
                     webView.evaluateJavascript(
                         "window.__onHostStatus && window.__onHostStatus(${snapshot.toJsonString()});",
                         null,
@@ -119,6 +160,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Re-assert foreground keep-alive if Android 15 dataSync service timed out earlier
+        ServerKeepAliveService.start(this)
         if (!showingEditor && ::webView.isInitialized) {
             val snapshot = runtimeManager.getStatus()
             webView.evaluateJavascript(
@@ -129,7 +172,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // Ctrl+Alt+D toggles between embedded openvscode-server and the boot/fallback CLI view
+        // Only intercept host-owned Ctrl+Alt+D; let all real editor/terminal KeyEvents reach WebView untouched
         if (shortcutRouter.isDiagnosticsToggle(event)) {
             if (showingEditor) {
                 loadBootPage()
@@ -138,32 +181,6 @@ class MainActivity : AppCompatActivity() {
             }
             return true
         }
-
-        val matched = shortcutRouter.match(event)
-        if (matched != null && showingEditor && ::webView.isInitialized) {
-            val specJson = matched.toJsonString()
-            val js = """
-                (function(spec) {
-                  var target = document.activeElement || document.body || window;
-                  var ev = new KeyboardEvent('keydown', {
-                    key: spec.key,
-                    code: spec.code,
-                    keyCode: spec.keyCode,
-                    which: spec.keyCode,
-                    ctrlKey: spec.ctrlKey,
-                    shiftKey: spec.shiftKey,
-                    altKey: spec.altKey,
-                    metaKey: spec.metaKey,
-                    bubbles: true,
-                    cancelable: true
-                  });
-                  target.dispatchEvent(ev);
-                })($specJson);
-            """.trimIndent()
-            webView.evaluateJavascript(js, null)
-            return true
-        }
-
         return super.dispatchKeyEvent(event)
     }
 
@@ -175,14 +192,31 @@ class MainActivity : AppCompatActivity() {
             ServerKeepAliveService.stop(this)
         }
         if (::webView.isInitialized) {
-            webView.removeJavascriptInterface("XREditorHost")
+            detachBootBridge()
             webView.destroy()
         }
         super.onDestroy()
     }
 
+    private fun attachBootBridge() {
+        if (!hostBridgeAttached) {
+            webView.addJavascriptInterface(bootBridge, "XREditorHost")
+            hostBridgeAttached = true
+        }
+        webView.settings.allowFileAccess = true
+    }
+
+    private fun detachBootBridge() {
+        if (hostBridgeAttached) {
+            webView.removeJavascriptInterface("XREditorHost")
+            hostBridgeAttached = false
+        }
+        webView.settings.allowFileAccess = false
+    }
+
     private fun loadBootPage() {
         showingEditor = false
+        attachBootBridge()
         webView.loadUrl("file:///android_asset/boot.html")
         webView.requestFocus()
     }
@@ -191,6 +225,7 @@ class MainActivity : AppCompatActivity() {
         val status = runtimeManager.getStatus()
         if (status.state == PosixRuntimeManager.State.READY && status.serverUrl.isNotEmpty()) {
             showingEditor = true
+            detachBootBridge()
             webView.loadUrl(status.serverUrl)
             webView.requestFocus()
         }
@@ -205,13 +240,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Always executes ClipboardManager.setPrimaryClip on the Android MainLooper so calls from
+     * LocalDiagnosticsServer worker threads or WebView's JavaBridge thread never fail silently.
+     */
     private fun copyTextToClipboard(text: String): Boolean {
-        return runCatching {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                ?: return false
-            val clip = ClipData.newPlainText("XR-Editor Diagnostics", text)
-            clipboard.setPrimaryClip(clip)
-            true
-        }.getOrDefault(false)
+        val action = {
+            runCatching {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    ?: return@runCatching false
+                val clip = ClipData.newPlainText("XR-Editor Diagnostics", text)
+                clipboard.setPrimaryClip(clip)
+                true
+            }.getOrDefault(false)
+        }
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return action()
+        }
+
+        val result = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                result.set(action())
+            } finally {
+                latch.countDown()
+            }
+        }
+        latch.await(3, TimeUnit.SECONDS)
+        return result.get()
     }
 }

@@ -15,6 +15,9 @@ import androidx.core.app.NotificationCompat
 /**
  * Keeps the embedded PRoot + openvscode-server process alive while the user
  * focuses sibling windows in Android XR Home Space.
+ *
+ * Implements Android 15 (API 35) `onTimeout` for `dataSync` FGS so exceeding
+ * the OS 6-hour daily quota degrades gracefully instead of crashing the app.
  */
 class ServerKeepAliveService : Service() {
 
@@ -40,6 +43,13 @@ class ServerKeepAliveService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
         return START_STICKY
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Android 15 enforces a 6h/24h quota on dataSync foreground services;
+        // stop the service cleanly rather than letting the system throw RemoteServiceException.
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
     }
 
     private fun ensureNotificationChannel() {

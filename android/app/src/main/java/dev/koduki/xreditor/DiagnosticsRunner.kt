@@ -12,6 +12,8 @@ import android.system.OsConstants
 import android.view.InputDevice
 import android.webkit.WebView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
@@ -23,10 +25,8 @@ import java.util.TimeZone
 
 /**
  * Built-in on-device diagnostics script for XREAL AURA / Android XR verification.
- * Runs non-destructive checks across device/WebView/input metadata, page size & SELinux context,
- * DocumentsProvider self-test, PRoot (seccomp on/off), Node.js / openvscode-server,
- * node-pty (real PTY spawn), @parcel/watcher, filesystem mounts, Debian apt & GitHub HTTPS reachability,
- * and recent server/error logs — outputting a single copy-pasteable Markdown report.
+ * Runs non-destructive checks (parallelized after PRoot Gate 1 for fast completion)
+ * and outputs a single copy-pasteable Markdown report with recent error logs.
  */
 object DiagnosticsRunner {
 
@@ -80,6 +80,7 @@ object DiagnosticsRunner {
         withContext(Dispatchers.IO) {
             val paths = runtime.getPaths()
             val status = runtime.getStatus()
+            val systemDns = runtime.querySystemDnsServers()
 
             val deviceInfo = linkedMapOf<String, String>()
             deviceInfo["Device"] = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})"
@@ -90,6 +91,7 @@ object DiagnosticsRunner {
             deviceInfo["WebView"] = queryWebViewInfo()
             deviceInfo["Display / Window"] = queryDisplayInfo(context)
             deviceInfo["Input Devices (KB/Mouse)"] = queryInputDevices(context)
+            deviceInfo["System DNS"] = if (systemDns.isEmpty()) "(fallback 1.1.1.1/8.8.8.8)" else systemDns.joinToString(", ")
             deviceInfo["App"] = "${context.packageName} (targetSdk=${context.applicationInfo.targetSdkVersion})"
             deviceInfo["XR Spatial Feature"] =
                 context.packageManager.hasSystemFeature("android.software.xr.api.spatial").toString()
@@ -99,76 +101,80 @@ object DiagnosticsRunner {
             deviceInfo["Free Disk (filesDir)"] = "${context.filesDir.usableSpace / (1024 * 1024)} MB"
             deviceInfo["Memory"] = queryMemorySummary(context)
             deviceInfo["Runtime State"] = "${status.state} (port=${status.port}, msg=${status.message})"
+            deviceInfo["Workspace Path"] = paths.workspaceDir.absolutePath
             deviceInfo["NativeLibDir"] = paths.nativeLibDir.absolutePath
 
             val checks = mutableListOf<CheckItem>()
 
-            // 1. Embedded native PRoot binaries check
+            // 1-3. Fast local Android-side checks
             checks.add(checkNativeBinaries(paths))
-
-            // 2. Extracted Debian rootfs & openvscode-server check
             checks.add(checkExtractedRuntime(paths))
-
-            // 3. Android -> POSIX DocumentsProvider self-test
             checks.add(checkDocumentsProvider(context))
 
-            // 4. PRoot basic execution (with seccomp fallback probe if needed)
+            // 4. PRoot Gate 1
             val prootCheck = runProotProbe(runtime)
             checks.add(prootCheck)
 
+            // 5-9. Run independent POSIX probes in parallel to keep total runtime well under timeout
             if (prootCheck.ok) {
-                // 5. Bundled Node.js & openvscode-server --version
-                checks.add(
-                    runTimedCommand(
-                        name = "Node.js & openvscode-server 実行確認",
-                        runtime = runtime,
-                        command = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node -v && ${PosixRuntimeConfig.GUEST_OPENVSCODE_BIN} --version | head -n 3",
-                    ),
-                )
-
-                // 6. Real node-pty spawn test (critical for VS Code integrated terminal)
-                checks.add(
-                    runTimedCommand(
-                        name = "node-pty 実起動テスト（統合ターミナル検証）",
-                        runtime = runtime,
-                        command = buildNodePtyProbeCommand(),
-                    ),
-                )
-
-                // 7. @parcel/watcher native load & inotify limits
-                checks.add(
-                    runTimedCommand(
-                        name = "@parcel/watcher & inotify 確認",
-                        runtime = runtime,
-                        command = buildWatcherProbeCommand(),
-                    ),
-                )
-
-                // 8. Filesystem R/W & Android mount visibility
-                checks.add(
-                    runTimedCommand(
-                        name = "POSIX /workspace & /android マウント確認",
-                        runtime = runtime,
-                        command = """
-                            set -e
-                            TEST_F=/workspace/.xr-diag-rw-test
-                            echo ok > "${'$'}TEST_F" && cat "${'$'}TEST_F" >/dev/null && rm -f "${'$'}TEST_F"
-                            echo "workspace_rw=OK"
-                            ls -ld /workspace /workspace/android /android/shared /android/sdcard 2>&1 || true
-                            echo "android_shared_entries=$(ls -A /android/shared 2>/dev/null | wc -l)"
-                            echo "android_sdcard_entries=$(ls -A /android/sdcard 2>/dev/null | wc -l)"
-                        """.trimIndent(),
-                    ),
-                )
-
-                // 9. PTY device nodes, DNS, Debian apt repo & GitHub HTTPS reachability, CLI binaries
-                checks.add(
-                    runTimedCommand(
-                        name = "DNS・Debian apt / GitHub 疎通・CLI (apt/git/gh) 確認",
-                        runtime = runtime,
-                        command = buildNetworkAndCliProbeCommand(),
-                    ),
-                )
+                val parallelChecks = coroutineScope {
+                    val nodeTask = async {
+                        runTimedCommand(
+                            name = "Node.js & openvscode-server 実行確認",
+                            runtime = runtime,
+                            command = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node -v && ${PosixRuntimeConfig.GUEST_OPENVSCODE_BIN} --version | head -n 3",
+                            timeoutSeconds = 15,
+                        )
+                    }
+                    val ptyTask = async {
+                        runTimedCommand(
+                            name = "node-pty 実起動テスト（統合ターミナル検証）",
+                            runtime = runtime,
+                            command = buildNodePtyProbeCommand(),
+                            timeoutSeconds = 15,
+                        )
+                    }
+                    val watcherTask = async {
+                        runTimedCommand(
+                            name = "@parcel/watcher & inotify 確認",
+                            runtime = runtime,
+                            command = buildWatcherProbeCommand(),
+                            timeoutSeconds = 15,
+                        )
+                    }
+                    val mountTask = async {
+                        runTimedCommand(
+                            name = "POSIX /workspace & /android マウント確認",
+                            runtime = runtime,
+                            command = """
+                                set -e
+                                TEST_F=/workspace/.xr-diag-rw-test
+                                echo ok > "${'$'}TEST_F" && cat "${'$'}TEST_F" >/dev/null && rm -f "${'$'}TEST_F"
+                                echo "workspace_rw=OK"
+                                ls -ld /workspace /workspace/android /android/shared /android/sdcard 2>&1 || true
+                                echo "android_shared_entries=$(ls -A /android/shared 2>/dev/null | wc -l)"
+                                echo "android_sdcard_entries=$(ls -A /android/sdcard 2>/dev/null | wc -l)"
+                            """.trimIndent(),
+                            timeoutSeconds = 15,
+                        )
+                    }
+                    val netTask = async {
+                        runTimedCommand(
+                            name = "DNS・Debian apt / GitHub 疎通・CLI (apt/git/gh) 確認",
+                            runtime = runtime,
+                            command = buildNetworkAndCliProbeCommand(),
+                            timeoutSeconds = 15,
+                        )
+                    }
+                    listOf(
+                        nodeTask.await(),
+                        ptyTask.await(),
+                        watcherTask.await(),
+                        mountTask.await(),
+                        netTask.await(),
+                    )
+                }
+                checks.addAll(parallelChecks)
             }
 
             // 10. Embedded HTTP server health check
@@ -404,7 +410,7 @@ object DiagnosticsRunner {
     private suspend fun runProotProbe(runtime: PosixRuntimeManager): CheckItem {
         val probeCmd = "uname -a && id && grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release || true"
         val t0 = System.currentTimeMillis()
-        val res = runtime.runShellCommand(probeCmd, timeoutSeconds = 20)
+        val res = runtime.runShellCommand(probeCmd, timeoutSeconds = 15)
         val elapsed = System.currentTimeMillis() - t0
         val ok = res.exitCode == 0 && res.output.contains("Debian", ignoreCase = true)
         if (ok) {
@@ -418,7 +424,7 @@ object DiagnosticsRunner {
 
         // Retry with PROOT_NO_SECCOMP=1 to clearly identify kernel seccomp incompatibility
         val t1 = System.currentTimeMillis()
-        val retry = runtime.runShellCommand(probeCmd, timeoutSeconds = 20, forceNoSeccomp = true)
+        val retry = runtime.runShellCommand(probeCmd, timeoutSeconds = 15, forceNoSeccomp = true)
         val retryElapsed = System.currentTimeMillis() - t1
         val retryOk = retry.exitCode == 0 && retry.output.contains("Debian", ignoreCase = true)
         val combined = buildString {
@@ -439,9 +445,10 @@ object DiagnosticsRunner {
         name: String,
         runtime: PosixRuntimeManager,
         command: String,
+        timeoutSeconds: Long = 15,
     ): CheckItem {
         val t0 = System.currentTimeMillis()
-        val res = runtime.runShellCommand(command, timeoutSeconds = 25)
+        val res = runtime.runShellCommand(command, timeoutSeconds = timeoutSeconds)
         val elapsed = System.currentTimeMillis() - t0
         return CheckItem(
             name = name,

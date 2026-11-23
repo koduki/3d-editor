@@ -70,7 +70,6 @@ jobs:
           unzip -l "$APK" | grep -q "assets/runtime/debian-arm64-rootfs.tgz"
           unzip -l "$APK" | grep -q "assets/runtime/openvscode-server-linux-arm64.tgz"
           mkdir -p dist-apk
-          cp "$APK" "dist-apk/xr-editor-debug-${GITHUB_SHA::7}.apk"
           cp "$APK" "dist-apk/xr-editor-debug.apk"
           ls -lh dist-apk/
 
@@ -78,7 +77,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xr-editor-debug-apk
-          path: dist-apk/xr-editor-debug*.apk
+          path: dist-apk/xr-editor-debug.apk
           retention-days: 30
 
       - name: Build Signed Release APK & AAB (when signing secrets are configured)

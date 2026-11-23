@@ -66,7 +66,7 @@ class LocalDiagnosticsServer(
 
     private fun handleClient(socket: Socket) {
         socket.use { s ->
-            s.soTimeout = 15_000
+            s.soTimeout = 60_000
             val input = BufferedInputStream(s.getInputStream())
             val output = s.getOutputStream()
 

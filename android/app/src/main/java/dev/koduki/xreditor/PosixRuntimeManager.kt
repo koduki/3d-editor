@@ -1,6 +1,7 @@
 package dev.koduki.xreditor
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.os.Environment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,17 +17,20 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.URL
+import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
 /**
  * Manages the embedded PRoot + Debian minimal + openvscode-server lifecycle on-device:
- * - Atomically extracts bundled runtime tar.gz assets on first boot
- * - Sets up fake /proc files, /dev/shm, /etc/resolv.conf, /workspace, and Android mount points
- * - Starts openvscode-server bound to 127.0.0.1:<port> with minimal OST settings.json
- * - Provides a non-PTY POSIX shell execution fallback (for CLI / apt / gh)
+ * - Keeps user `/workspace` decoupled at `filesDir/workspace` so rootfs upgrades never risk user data
+ * - Atomically extracts bundled runtime .tgz assets on first boot
+ * - Dynamically syncs Android's active DNS servers into `/etc/resolv.conf`
+ * - Uses a stable preferred localhost port (18765) so VS Code Web preserves tabs & state across restarts
+ * - Provides a non-PTY POSIX shell execution fallback without disturbing live runtime state
  */
 class PosixRuntimeManager private constructor(private val appContext: Context) {
 
@@ -123,6 +127,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
     fun getPaths(): PosixRuntimeConfig.Paths {
         val runtimeRoot = File(appContext.filesDir, "runtime")
+        val workspaceDir = File(appContext.filesDir, "workspace")
         val nativeLibDir = File(appContext.applicationInfo.nativeLibraryDir)
         val sharedDir = appContext.getExternalFilesDir("shared")
             ?: File(appContext.filesDir, "shared")
@@ -136,6 +141,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
         return PosixRuntimeConfig.Paths(
             runtimeRoot = runtimeRoot,
+            workspaceDir = workspaceDir,
             nativeLibDir = nativeLibDir,
             androidSharedDir = sharedDir,
             androidSdcardDir = sdcardDir,
@@ -143,6 +149,16 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     }
 
     fun hasAllFilesAccess(): Boolean = Environment.isExternalStorageManager()
+
+    fun querySystemDnsServers(): List<String> {
+        return runCatching {
+            val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return emptyList()
+            val network = cm.activeNetwork ?: return emptyList()
+            val props = cm.getLinkProperties(network) ?: return emptyList()
+            props.dnsServers.mapNotNull { it.hostAddress }
+        }.getOrDefault(emptyList())
+    }
 
     fun getStatus(): StatusSnapshot {
         val paths = getPaths()
@@ -218,7 +234,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 )
             }
 
-            prepareRuntimeDirectories(paths)
+            // Ensure scratch/mount directories exist without rewriting live server config/extensions
+            ensureMountPointDirsExist(paths)
             val prootCmd = PosixRuntimeConfig.buildProotCommand(
                 paths = paths,
                 guestCommand = PosixRuntimeConfig.buildShellCommand(command),
@@ -269,6 +286,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
 
         try {
+            migrateLegacyWorkspaceIfNeeded(paths)
             ensureExtracted(paths)
             prepareRuntimeDirectories(paths)
             ensureMinimalVsCodeSettings(paths)
@@ -296,6 +314,33 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         updateStatus(State.IDLE, "停止しました", 0)
     }
 
+    /**
+     * One-time safe migration for early v0.5.0 installs where `/workspace` lived
+     * inside `runtime/rootfs/workspace` instead of decoupled `filesDir/workspace`.
+     */
+    private fun migrateLegacyWorkspaceIfNeeded(paths: PosixRuntimeConfig.Paths) {
+        val legacy = paths.legacyRootfsWorkspaceDir
+        if (!legacy.exists() || !legacy.isDirectory) return
+        val legacyEntries = legacy.listFiles() ?: return
+        val realEntries = legacyEntries.filter { !Files.isSymbolicLink(it.toPath()) }
+        if (realEntries.isEmpty()) return
+
+        paths.workspaceDir.mkdirs()
+        var migrated = 0
+        for (item in realEntries) {
+            val dest = File(paths.workspaceDir, item.name)
+            if (!dest.exists()) {
+                if (!item.renameTo(dest)) {
+                    runCatching { item.copyRecursively(dest, overwrite = false) }
+                }
+                migrated++
+            }
+        }
+        if (migrated > 0) {
+            appendLog("[runtime] Migrated $migrated item(s) from legacy rootfs/workspace to decoupled workspace")
+        }
+    }
+
     private fun ensureExtracted(paths: PosixRuntimeConfig.Paths) {
         val installed = paths.versionMarker.takeIf { it.exists() }?.readText()?.trim()
         val hasServerBin = File(paths.openvscodeDir, "bin/openvscode-server").exists()
@@ -312,13 +357,6 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             paths.stagingDir.deleteRecursively()
         }
         paths.stagingDir.mkdirs()
-
-        // Preserve user workspace across runtime upgrades
-        val existingWorkspaceBackup = File(paths.runtimeRoot, "workspace-backup")
-        if (paths.workspaceDir.exists()) {
-            if (existingWorkspaceBackup.exists()) existingWorkspaceBackup.deleteRecursively()
-            paths.workspaceDir.renameTo(existingWorkspaceBackup)
-        }
 
         appContext.assets.open(PosixRuntimeConfig.ASSET_ROOTFS).use { stream ->
             val stats = TarGzExtractor.extract(
@@ -347,7 +385,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             appendLog("[runtime] openvscode-server extracted: $stats")
         }
 
-        // Atomic swap into place
+        // Atomic swap of rootfs only — user filesDir/workspace is untouched
         if (paths.rootfsDir.exists()) {
             paths.rootfsDir.deleteRecursively()
         }
@@ -355,17 +393,12 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             throw IllegalStateException("Failed to move staging rootfs into place")
         }
 
-        if (existingWorkspaceBackup.exists()) {
-            if (paths.workspaceDir.exists()) paths.workspaceDir.deleteRecursively()
-            existingWorkspaceBackup.renameTo(paths.workspaceDir)
-        }
-
         paths.versionMarker.writeText(PosixRuntimeConfig.RUNTIME_VERSION)
         updateStatus(State.EXTRACTING, "展開完了。サーバーを起動します...", 88)
         appendLog("[runtime] Extraction finished cleanly.")
     }
 
-    private fun prepareRuntimeDirectories(paths: PosixRuntimeConfig.Paths) {
+    private fun ensureMountPointDirsExist(paths: PosixRuntimeConfig.Paths) {
         paths.sysdataDir.mkdirs()
         paths.shmDir.mkdirs()
         paths.tmpDir.mkdirs()
@@ -373,13 +406,18 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         paths.workspaceDir.mkdirs()
         paths.androidSharedDir.mkdirs()
 
-        // Ensure mount point directories exist inside rootfs
+        // Ensure mount target directories exist inside rootfs
+        File(paths.rootfsDir, "workspace").mkdirs()
         File(paths.rootfsDir, "android/shared").mkdirs()
         File(paths.rootfsDir, "android/sdcard").mkdirs()
         File(paths.rootfsDir, "var/lib/xr-vscode").mkdirs()
         File(paths.rootfsDir, "dev/shm").mkdirs()
         File(paths.rootfsDir, "tmp").mkdirs()
         File(paths.rootfsDir, "root").mkdirs()
+    }
+
+    private fun prepareRuntimeDirectories(paths: PosixRuntimeConfig.Paths) {
+        ensureMountPointDirsExist(paths)
 
         // Create /workspace/android -> /android symlink for convenient explorer access
         val workspaceAndroidLink = File(paths.workspaceDir, "android")
@@ -387,7 +425,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             TarGzExtractor.DefaultPosixFsOps.symlink("/android", workspaceAndroidLink)
         }
 
-        // Seed welcome README.md if workspace has no regular files yet
+        // Seed welcome README.md if workspace has no README yet
         val readme = File(paths.workspaceDir, "README.md")
         if (!readme.exists()) {
             readme.writeText(PosixRuntimeConfig.buildWelcomeReadme())
@@ -399,13 +437,14 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             File(paths.sysdataDir, name).writeText(content)
         }
 
-        // Ensure DNS resolution works for apt / gh / git inside PRoot
+        // Sync active Android DNS servers into /etc/resolv.conf (fallback: 1.1.1.1 / 8.8.8.8)
+        val dnsServers = querySystemDnsServers()
         val resolvConf = File(paths.rootfsDir, "etc/resolv.conf")
         resolvConf.parentFile?.mkdirs()
         if (resolvConf.exists() && resolvConf.isDirectory) {
             resolvConf.deleteRecursively()
         }
-        resolvConf.writeText(PosixRuntimeConfig.buildDefaultResolvConf())
+        resolvConf.writeText(PosixRuntimeConfig.buildResolvConf(dnsServers))
 
         // Always sync the built-in VS Code extension (`xr-editor-tools`) so upgrades take effect
         // immediately without re-extracting the entire rootfs/openvscode-server archive
@@ -416,15 +455,16 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     }
 
     private fun ensureMinimalVsCodeSettings(paths: PosixRuntimeConfig.Paths) {
-        val settingsContent = PosixRuntimeConfig.buildMinimalVsCodeSettingsJson()
         val targets = listOf(
             File(paths.vscodeDataDir, "data/Machine/settings.json"),
             File(paths.vscodeDataDir, "user/User/settings.json"),
         )
         for (target in targets) {
-            if (!target.exists()) {
+            val existing = target.takeIf { it.exists() }?.readText()
+            val merged = PosixRuntimeConfig.mergeDefaultVsCodeSettings(existing)
+            if (existing != merged) {
                 target.parentFile?.mkdirs()
-                target.writeText(settingsContent)
+                target.writeText(merged)
             }
         }
     }
@@ -434,7 +474,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         allowSeccompRetry: Boolean,
     ) {
         val adminPort = diagnosticsServer.start()
-        val port = pickFreeLocalPort()
+        val port = pickStableLocalPort()
         serverPort = port
         updateStatus(State.STARTING, "内蔵 openvscode-server を起動中 (127.0.0.1:$port)...", 92)
 
@@ -500,11 +540,23 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
     private fun isServerProcessAlive(): Boolean = serverProcess?.isAlive == true
 
-    private fun pickFreeLocalPort(): Int {
-        return try {
-            ServerSocket(0).use { it.localPort }
+    /**
+     * Prefers fixed port 18765 so WebView keeps a stable origin (preserving VS Code tabs,
+     * IndexedDB state, and layout across restarts), falling back to an ephemeral port if busy.
+     */
+    private fun pickStableLocalPort(): Int {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        try {
+            ServerSocket(PosixRuntimeConfig.PREFERRED_SERVER_PORT, 1, loopback).use {
+                return it.localPort
+            }
         } catch (_: Throwable) {
-            18765
+            // Preferred port busy — pick an available ephemeral port
+        }
+        return try {
+            ServerSocket(0, 1, loopback).use { it.localPort }
+        } catch (_: Throwable) {
+            PosixRuntimeConfig.PREFERRED_SERVER_PORT
         }
     }
 

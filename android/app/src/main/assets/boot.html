@@ -253,24 +253,24 @@
     }
 
     function runDiagnostics() {
-      if (!window.XREditorHost || typeof window.XREditorHost.runDiagnostics !== 'function') return;
+      if (!window.XREditorHost || typeof window.XREditorHost.startDiagnostics !== 'function') return;
       runDiagBtn.disabled = true;
       copyDiagBtn.disabled = true;
-      diagReport.textContent = '実機チェックを実行中（PRoot / Node / マウント / PTY / DNS / ログ収集）...';
-      setTimeout(() => {
-        try {
-          latestReportText = window.XREditorHost.runDiagnostics() || '(empty)';
-          diagReport.textContent = latestReportText;
-          copyDiagBtn.disabled = false;
-        } catch (err) {
-          latestReportText = 'Diagnostics Error: ' + err;
-          diagReport.textContent = latestReportText;
-          copyDiagBtn.disabled = false;
-        } finally {
-          runDiagBtn.disabled = false;
-        }
-      }, 30);
+      diagReport.textContent = '実機チェックを実行中（PRoot / PTY / マウント / 疎通 / ログ収集）...';
+      window.XREditorHost.startDiagnostics();
     }
+
+    window.__onDiagnosticsResult = function(report) {
+      latestReportText = report || '(empty)';
+      diagReport.textContent = latestReportText;
+      copyDiagBtn.disabled = false;
+      runDiagBtn.disabled = false;
+    };
+
+    window.__onCommandResult = function(cmd, res) {
+      cliOutput.textContent = '$ ' + cmd + '\n' + ((res && res.output) || '') + '\n[exit ' + (res ? res.exitCode : -1) + ']';
+      cliRunBtn.disabled = false;
+    };
 
     function renderStatus(status) {
       if (!status) return;
@@ -298,9 +298,14 @@
 
     function refreshLogs() {
       if (!window.XREditorHost) return;
+      const wasAtBottom = (serverLogs.scrollHeight - serverLogs.scrollTop - serverLogs.clientHeight) < 36;
       const txt = window.XREditorHost.getLogs() || '(ログなし)';
-      serverLogs.textContent = txt;
-      serverLogs.scrollTop = serverLogs.scrollHeight;
+      if (serverLogs.textContent !== txt) {
+        serverLogs.textContent = txt;
+        if (wasAtBottom) {
+          serverLogs.scrollTop = serverLogs.scrollHeight;
+        }
+      }
     }
 
     window.__onHostStatus = function(status) {
@@ -320,19 +325,10 @@
 
     function runCli() {
       const cmd = cliInput.value.trim();
-      if (!cmd || !window.XREditorHost) return;
+      if (!cmd || !window.XREditorHost || typeof window.XREditorHost.startCommand !== 'function') return;
       cliRunBtn.disabled = true;
       cliOutput.textContent = '$ ' + cmd + '\n(実行中...)';
-      setTimeout(() => {
-        try {
-          const res = JSON.parse(window.XREditorHost.runCommand(cmd));
-          cliOutput.textContent = '$ ' + cmd + '\n' + (res.output || '') + '\n[exit ' + res.exitCode + ']';
-        } catch (err) {
-          cliOutput.textContent = 'Error: ' + err;
-        } finally {
-          cliRunBtn.disabled = false;
-        }
-      }, 20);
+      window.XREditorHost.startCommand(cmd);
     }
 
     cliRunBtn.addEventListener('click', runCli);
@@ -350,6 +346,7 @@
         statusMessage.textContent = 'ステータス取得エラー: ' + e;
       }
       setInterval(() => {
+        if (document.hidden) return;
         try {
           renderStatus(JSON.parse(window.XREditorHost.getStatus()));
         } catch (_) {}

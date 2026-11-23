@@ -1,18 +1,21 @@
 package dev.koduki.xreditor
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 /**
  * Pure-JVM configuration builder for PRoot + Debian minimal + embedded openvscode-server.
  * Kept free of Android framework dependencies so every flag, bind mount, fake /proc file,
- * and initial VS Code OST settings.json can be unit-tested on JVM.
+ * DNS formatter, and initial VS Code OST settings.json can be unit-tested on JVM.
  */
 object PosixRuntimeConfig {
 
     const val RUNTIME_VERSION = "0.5.0-debian12-openvscode-1.109.5"
     const val ASSET_ROOTFS = "runtime/debian-arm64-rootfs.tgz"
     const val ASSET_OPENVSCODE = "runtime/openvscode-server-linux-arm64.tgz"
+
+    const val PREFERRED_SERVER_PORT = 18765
 
     const val GUEST_WORKSPACE = "/workspace"
     const val GUEST_OPENVSCODE_DIR = "/opt/openvscode-server"
@@ -21,13 +24,14 @@ object PosixRuntimeConfig {
 
     data class Paths(
         val runtimeRoot: File,
+        val workspaceDir: File,
         val nativeLibDir: File,
         val androidSharedDir: File,
         val androidSdcardDir: File? = null,
     ) {
         val rootfsDir: File get() = File(runtimeRoot, "rootfs")
         val stagingDir: File get() = File(runtimeRoot, "staging")
-        val workspaceDir: File get() = File(rootfsDir, "workspace")
+        val legacyRootfsWorkspaceDir: File get() = File(rootfsDir, "workspace")
         val openvscodeDir: File get() = File(rootfsDir, "opt/openvscode-server")
         val sysdataDir: File get() = File(runtimeRoot, "sysdata")
         val shmDir: File get() = File(runtimeRoot, "shm")
@@ -61,6 +65,7 @@ object PosixRuntimeConfig {
             "-b", "${File(paths.sysdataDir, "vmstat").absolutePath}:/proc/vmstat",
             "-b", "${paths.shmDir.absolutePath}:/dev/shm",
             "-b", "${paths.tmpDir.absolutePath}:/tmp",
+            "-b", "${paths.workspaceDir.absolutePath}:$GUEST_WORKSPACE",
             "-b", "${paths.vscodeDataDir.absolutePath}:$GUEST_VSCODE_DATA",
             "-b", "${paths.androidSharedDir.absolutePath}:/android/shared",
         )
@@ -125,9 +130,9 @@ object PosixRuntimeConfig {
 
     /**
      * Minimal spatial OST (#000000) VS Code settings:
-     * focuses on Open / Close / Edit / Save + minimal integrated terminal with zero UI clutter.
+     * focuses on Open / Close / Edit / Save + stable DOM-rendered integrated terminal.
      */
-    fun buildMinimalVsCodeSettingsJson(): String {
+    fun buildMinimalVsCodeSettingsObject(): JSONObject {
         val colorCustomizations = JSONObject()
             .put("editor.background", "#000000")
             .put("editorGutter.background", "#000000")
@@ -145,9 +150,9 @@ object PosixRuntimeConfig {
 
         val bashProfile = JSONObject()
             .put("path", "/bin/bash")
-            .put("args", org.json.JSONArray().put("-l"))
+            .put("args", JSONArray().put("-l"))
 
-        val root = JSONObject()
+        return JSONObject()
             .put("workbench.colorTheme", "Default Dark Modern")
             .put("workbench.colorCustomizations", colorCustomizations)
             .put("workbench.startupEditor", "readme")
@@ -162,10 +167,34 @@ object PosixRuntimeConfig {
             .put("security.workspace.trust.enabled", false)
             .put("telemetry.telemetryLevel", "off")
             .put("extensions.ignoreRecommendations", true)
+            // Disable WebGL terminal renderer to avoid black/garbled text on Android WebView
+            .put("terminal.integrated.gpuAcceleration", "off")
             .put("terminal.integrated.defaultProfile.linux", "bash")
             .put("terminal.integrated.profiles.linux", JSONObject().put("bash", bashProfile))
+    }
 
-        return root.toString(2) + "\n"
+    fun buildMinimalVsCodeSettingsJson(): String =
+        buildMinimalVsCodeSettingsObject().toString(2) + "\n"
+
+    /**
+     * Merges missing default keys into an existing settings.json without overwriting
+     * values the user has already customized.
+     */
+    fun mergeDefaultVsCodeSettings(existingJson: String?): String {
+        val defaults = buildMinimalVsCodeSettingsObject()
+        if (existingJson.isNullOrBlank()) {
+            return defaults.toString(2) + "\n"
+        }
+        val merged = runCatching { JSONObject(existingJson) }.getOrNull()
+            ?: return defaults.toString(2) + "\n"
+        val keys = defaults.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (!merged.has(key)) {
+                merged.put(key, defaults.get(key))
+            }
+        }
+        return merged.toString(2) + "\n"
     }
 
     fun buildFakeSysdataFiles(cpuCount: Int = 4): Map<String, String> {
@@ -186,8 +215,19 @@ object PosixRuntimeConfig {
         )
     }
 
-    fun buildDefaultResolvConf(): String =
-        "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
+    fun buildResolvConf(systemDnsServers: List<String> = emptyList()): String {
+        val cleaned = systemDnsServers
+            .map { it.trim().substringBefore('%') }
+            .filter { it.isNotEmpty() && !it.startsWith("127.") && it != "::1" }
+            .distinct()
+            .take(3)
+        val servers = if (cleaned.isNotEmpty()) {
+            cleaned
+        } else {
+            listOf("1.1.1.1", "8.8.8.8")
+        }
+        return servers.joinToString("\n", postfix = "\n") { "nameserver $it" }
+    }
 
     fun buildWelcomeReadme(): String = """
 # XR-Editor Workspace (`/workspace`)
@@ -199,6 +239,7 @@ Android XR 向けの単体完結エディタ（Debian minimal + 内蔵 `openvsco
 - **保存する**: `Ctrl+S`
 - **タブを閉じる**: `Ctrl+W`
 - **ターミナル開閉**: `Ctrl+` `（バッククォート）
+- **実機チェック / 管理画面**: 左端 Activity Bar の **XR-Editor** アイコン、または `Ctrl+Alt+D`
 
 ## Android ↔ POSIX ファイル共有
 - **POSIX → Android**: `/workspace/android`（`/android/shared` および全ファイルアクセス許可時は `/android/sdcard`）

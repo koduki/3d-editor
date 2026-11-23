@@ -48,7 +48,7 @@ class XrDocumentsProvider : DocumentsProvider() {
 
     private fun workspaceBaseDir(): File {
         val ctx = context ?: throw IllegalStateException("Context not available")
-        val dir = File(ctx.filesDir, "runtime/rootfs/workspace")
+        val dir = File(ctx.filesDir, "workspace")
         if (!dir.exists()) {
             dir.mkdirs()
         }
