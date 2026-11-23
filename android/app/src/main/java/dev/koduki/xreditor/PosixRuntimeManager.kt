@@ -70,6 +70,12 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             .toString()
     }
 
+    data class HostActions(
+        val onOpenBootPage: () -> Unit,
+        val onRequestStoragePermission: () -> Unit,
+        val onCopyToClipboard: (String) -> Boolean,
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
     private val logs = CopyOnWriteArrayList<String>()
@@ -95,8 +101,24 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     @Volatile
     private var onStatusChanged: ((StatusSnapshot) -> Unit)? = null
 
+    @Volatile
+    private var hostActions: HostActions? = null
+
+    private val diagnosticsServer = LocalDiagnosticsServer(
+        onRunDiagnostics = { DiagnosticsRunner.collect(appContext, this) },
+        onGetLogs = { getLogsText() },
+        onCopyToClipboard = { text -> hostActions?.onCopyToClipboard?.invoke(text) ?: false },
+        onOpenBootPage = { hostActions?.onOpenBootPage?.invoke() },
+        onRequestStoragePermission = { hostActions?.onRequestStoragePermission?.invoke() },
+        onRestartServer = { restart() },
+    )
+
     fun setStatusListener(listener: ((StatusSnapshot) -> Unit)?) {
         onStatusChanged = listener
+    }
+
+    fun setHostActions(actions: HostActions?) {
+        hostActions = actions
     }
 
     fun getPaths(): PosixRuntimeConfig.Paths {
@@ -270,6 +292,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             }
         }
         serverPort = 0
+        diagnosticsServer.stop()
         updateStatus(State.IDLE, "停止しました", 0)
     }
 
@@ -383,6 +406,13 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             resolvConf.deleteRecursively()
         }
         resolvConf.writeText(PosixRuntimeConfig.buildDefaultResolvConf())
+
+        // Always sync the built-in VS Code extension (`xr-editor-tools`) so upgrades take effect
+        // immediately without re-extracting the entire rootfs/openvscode-server archive
+        if (paths.openvscodeDir.exists()) {
+            val extDir = VsCodeExtensionAsset.installInto(paths.openvscodeDir)
+            appendLog("[runtime] Synced built-in VS Code extension: ${extDir.absolutePath}")
+        }
     }
 
     private fun ensureMinimalVsCodeSettings(paths: PosixRuntimeConfig.Paths) {
@@ -403,17 +433,25 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         paths: PosixRuntimeConfig.Paths,
         allowSeccompRetry: Boolean,
     ) {
+        val adminPort = diagnosticsServer.start()
         val port = pickFreeLocalPort()
         serverPort = port
         updateStatus(State.STARTING, "内蔵 openvscode-server を起動中 (127.0.0.1:$port)...", 92)
 
         val guestCmd = PosixRuntimeConfig.buildOpenVsCodeServerCommand(port)
         val prootCmd = PosixRuntimeConfig.buildProotCommand(paths, guestCmd)
-        appendLog("[runtime] Launching PRoot (disableSeccomp=$disableSeccomp) on 127.0.0.1:$port")
+        appendLog("[runtime] Launching PRoot (disableSeccomp=$disableSeccomp) on 127.0.0.1:$port (admin=$adminPort)")
 
         val pb = ProcessBuilder(prootCmd)
         pb.redirectErrorStream(true)
-        pb.environment().putAll(PosixRuntimeConfig.buildProotEnvironment(paths, disableSeccomp))
+        pb.environment().putAll(
+            PosixRuntimeConfig.buildProotEnvironment(
+                paths = paths,
+                disableSeccomp = disableSeccomp,
+                adminPort = adminPort,
+                adminToken = diagnosticsServer.authToken,
+            ),
+        )
 
         val proc = pb.start()
         serverProcess = proc

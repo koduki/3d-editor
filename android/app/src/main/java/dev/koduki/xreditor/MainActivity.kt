@@ -89,6 +89,14 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(bridge, "XREditorHost")
         setContentView(webView)
 
+        runtimeManager.setHostActions(
+            PosixRuntimeManager.HostActions(
+                onOpenBootPage = { runOnUiThread { loadBootPage() } },
+                onRequestStoragePermission = { runOnUiThread { openAllFilesPermissionSettings() } },
+                onCopyToClipboard = { text -> copyTextToClipboard(text) },
+            ),
+        )
+
         runtimeManager.setStatusListener { snapshot ->
             runOnUiThread {
                 if (!showingEditor) {
@@ -161,6 +169,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         runtimeManager.setStatusListener(null)
+        runtimeManager.setHostActions(null)
         if (isFinishing) {
             runtimeManager.stop()
             ServerKeepAliveService.stop(this)

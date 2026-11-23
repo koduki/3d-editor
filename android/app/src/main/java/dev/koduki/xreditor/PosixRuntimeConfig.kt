@@ -75,7 +75,12 @@ object PosixRuntimeConfig {
         return cmd
     }
 
-    fun buildProotEnvironment(paths: Paths, disableSeccomp: Boolean = false): Map<String, String> {
+    fun buildProotEnvironment(
+        paths: Paths,
+        disableSeccomp: Boolean = false,
+        adminPort: Int = 0,
+        adminToken: String = "",
+    ): Map<String, String> {
         val env = linkedMapOf(
             "PROOT_LOADER" to paths.prootLoader.absolutePath,
             "PROOT_TMP_DIR" to paths.tmpDir.absolutePath,
@@ -90,6 +95,10 @@ object PosixRuntimeConfig {
         )
         if (disableSeccomp) {
             env["PROOT_NO_SECCOMP"] = "1"
+        }
+        if (adminPort > 0 && adminToken.isNotEmpty()) {
+            env["XR_ADMIN_PORT"] = adminPort.toString()
+            env["XR_ADMIN_TOKEN"] = adminToken
         }
         return env
     }
