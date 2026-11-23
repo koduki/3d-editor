@@ -17,21 +17,30 @@ class VsCodeExtensionAssetTest {
         val dir = Files.createTempDirectory("xr-vscode-ext").toFile()
         try {
             val extDir = VsCodeExtensionAsset.installInto(dir)
+            assertTrue(extDir.resolve("icon.svg").exists())
             val pkgJson = JSONObject(extDir.resolve("package.json").readText())
             assertEquals("xr-editor-tools", pkgJson.getString("name"))
             assertEquals("./extension.js", pkgJson.getString("main"))
 
-            val commands = pkgJson.getJSONObject("contributes").getJSONArray("commands")
+            val contributes = pkgJson.getJSONObject("contributes")
+            val commands = contributes.getJSONArray("commands")
             val commandIds = (0 until commands.length()).map { commands.getJSONObject(it).getString("command") }
             assertTrue(commandIds.contains("xrEditor.openMenu"))
             assertTrue(commandIds.contains("xrEditor.runDiagnostics"))
             assertTrue(commandIds.contains("xrEditor.openLogs"))
             assertTrue(commandIds.contains("xrEditor.openManager"))
 
+            val menus = contributes.getJSONObject("menus")
+            assertTrue(menus.has("editor/context"))
+            assertTrue(menus.has("explorer/context"))
+            assertTrue(contributes.getJSONObject("viewsContainers").has("activitybar"))
+            assertTrue(contributes.getJSONObject("views").has("xr-editor"))
+
             val js = extDir.resolve("extension.js").readText()
             assertTrue(js.contains("XR_ADMIN_PORT"))
             assertTrue(js.contains("XR_ADMIN_TOKEN"))
-            assertTrue(js.contains("createStatusBarItem"))
+            assertTrue(js.contains("registerTreeDataProvider"))
+            assertTrue(js.contains("StatusBarAlignment.Left"))
         } finally {
             dir.deleteRecursively()
         }

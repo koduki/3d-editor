@@ -8,13 +8,23 @@ import java.io.File
  * Generates and installs the tiny built-in VS Code extension (`xr-editor-tools`)
  * directly into `/opt/openvscode-server/extensions/xr-editor-tools/`.
  *
- * Adds a status bar button, editor title button, and Command Palette menu inside
- * VS Code so the user can run on-device diagnostics, copy reports/logs, grant
- * Android storage access, or switch to the fallback CLI/boot screen with 1 click.
+ * Exposes an easy-to-hit left Activity Bar menu (`XR-Editor` sidebar view),
+ * right-click context menus (`editor/context`, `explorer/context`), editor title icon,
+ * left status bar item, and Command Palette commands so the user never has to hunt
+ * for the bottom-right corner in XR space.
  */
 object VsCodeExtensionAsset {
 
     const val EXTENSION_DIR_NAME = "xr-editor-tools"
+
+    fun buildIconSvg(): String = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="6" width="20" height="12" rx="4" />
+          <path d="M9 18l3-4 3 4" />
+          <circle cx="8" cy="11.5" r="1.2" fill="currentColor" />
+          <circle cx="16" cy="11.5" r="1.2" fill="currentColor" />
+        </svg>
+    """.trimIndent() + "\n"
 
     fun buildPackageJson(): String {
         val commands = JSONArray()
@@ -52,18 +62,60 @@ object VsCodeExtensionAsset {
                     .put("group", "navigation@999"),
             )
 
+        val contextMenuItems = JSONArray()
+            .put(
+                JSONObject()
+                    .put("command", "xrEditor.runDiagnostics")
+                    .put("group", "z_xreditor@1"),
+            )
+            .put(
+                JSONObject()
+                    .put("command", "xrEditor.openLogs")
+                    .put("group", "z_xreditor@2"),
+            )
+            .put(
+                JSONObject()
+                    .put("command", "xrEditor.openManager")
+                    .put("group", "z_xreditor@3"),
+            )
+
         val menus = JSONObject()
             .put("editor/title", editorTitleMenu)
+            .put("editor/context", contextMenuItems)
+            .put("explorer/context", contextMenuItems)
+
+        val viewsContainers = JSONObject()
+            .put(
+                "activitybar",
+                JSONArray().put(
+                    JSONObject()
+                        .put("id", "xr-editor")
+                        .put("title", "XR-Editor")
+                        .put("icon", "icon.svg"),
+                ),
+            )
+
+        val views = JSONObject()
+            .put(
+                "xr-editor",
+                JSONArray().put(
+                    JSONObject()
+                        .put("id", "xrEditor.menuView")
+                        .put("name", "実機チェック & 管理"),
+                ),
+            )
 
         val contributes = JSONObject()
             .put("commands", commands)
             .put("menus", menus)
+            .put("viewsContainers", viewsContainers)
+            .put("views", views)
 
         val pkg = JSONObject()
             .put("name", "xr-editor-tools")
             .put("displayName", "XR-Editor Diagnostics & Tools")
             .put("description", "Built-in Android XR diagnostics, log viewer, and storage menu")
-            .put("version", "0.5.0")
+            .put("version", "0.5.1")
             .put("publisher", "koduki")
             .put("engines", JSONObject().put("vscode", "^1.80.0"))
             .put("categories", JSONArray().put("Other"))
@@ -220,16 +272,60 @@ object VsCodeExtensionAsset {
           }
         }
 
+        function createSidebarMenuProvider() {
+          const entries = [
+            {
+              label: '実機チェックを実行',
+              description: 'レポート表示 & 自動コピー',
+              icon: 'checklist',
+              command: 'xrEditor.runDiagnostics',
+            },
+            {
+              label: '起動・エラーログを開く',
+              description: '自動コピー',
+              icon: 'output',
+              command: 'xrEditor.openLogs',
+            },
+            {
+              label: '管理画面を開く',
+              description: 'ミニCLI / 再起動',
+              icon: 'terminal',
+              command: 'xrEditor.openManager',
+            },
+            {
+              label: 'Android ストレージ許可',
+              description: '/android/sdcard マウント',
+              icon: 'folder-opened',
+              command: 'xrEditor.requestStorage',
+            },
+          ];
+
+          return {
+            getTreeItem(entry) {
+              const item = new vscode.TreeItem(entry.label, vscode.TreeItemCollapsibleState.None);
+              item.description = entry.description;
+              item.iconPath = new vscode.ThemeIcon(entry.icon);
+              item.command = { command: entry.command, title: entry.label };
+              return item;
+            },
+            getChildren(element) {
+              return element ? [] : entries;
+            },
+          };
+        }
+
         function activate(context) {
           context.subscriptions.push(
             vscode.commands.registerCommand('xrEditor.openMenu', openMenuCommand),
             vscode.commands.registerCommand('xrEditor.runDiagnostics', runDiagnosticsCommand),
             vscode.commands.registerCommand('xrEditor.openLogs', openLogsCommand),
             vscode.commands.registerCommand('xrEditor.openManager', openManagerCommand),
-            vscode.commands.registerCommand('xrEditor.requestStorage', requestStorageCommand)
+            vscode.commands.registerCommand('xrEditor.requestStorage', requestStorageCommand),
+            vscode.window.registerTreeDataProvider('xrEditor.menuView', createSidebarMenuProvider())
           );
 
-          const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
+          // Place status bar shortcut on the easier-to-reach left side instead of bottom-right
+          const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
           statusItem.text = '$(pulse) XRチェック';
           statusItem.tooltip = 'XR-Editor 実機チェック・エラーログ・管理画面メニューを開く';
           statusItem.command = 'xrEditor.openMenu';
@@ -245,6 +341,7 @@ object VsCodeExtensionAsset {
     fun installInto(openVsCodeDir: File): File {
         val extDir = File(openVsCodeDir, "extensions/$EXTENSION_DIR_NAME")
         extDir.mkdirs()
+        File(extDir, "icon.svg").writeText(buildIconSvg())
         File(extDir, "package.json").writeText(buildPackageJson())
         File(extDir, "extension.js").writeText(buildExtensionJs())
         return extDir
