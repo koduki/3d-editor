@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/kucode-logo.png" alt="KuCode — 空間に、書く。 A code editor for spatial computing." width="620" />
+</p>
+
 # KuCode
 
 **空間に、書く。**
