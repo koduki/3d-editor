@@ -202,14 +202,15 @@ class RuntimeInstallerTest {
                     Files.getPosixFilePermissions(paths.shmDir.toPath()),
             )
 
-            // Confirm CLI clipboard helpers are installed in /usr/local/bin with 0755 permissions
-            for (helper in listOf("kucode-copy", "kucode-paste")) {
+            // Confirm CLI host helpers are installed in /usr/local/bin with 0755 permissions
+            for (helper in listOf("kucode-copy", "kucode-paste", "kucode-open", "xdg-open", "kucode-logs")) {
                 val scriptFile = File(paths.rootfsDir, "usr/local/bin/$helper")
                 assertTrue("$helper should be installed", scriptFile.isFile)
                 val perms = Files.getPosixFilePermissions(scriptFile.toPath())
                 assertTrue(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE in perms)
                 assertTrue(java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE in perms)
             }
+            assertTrue(File(paths.rootfsDir, "var/log/kucode").isDirectory)
 
             // Confirm secret atomic writes remain owner-only (0600) by default
             val secret = File(paths.vscodeDataDir, ".editor-token")

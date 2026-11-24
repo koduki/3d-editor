@@ -39,6 +39,7 @@ internal class PosixShellExecutor(
         command: String,
         timeoutSeconds: Long = 120,
         disableSeccomp: Boolean = false,
+        extraEnv: Map<String, String> = emptyMap(),
     ): PosixRuntimeManager.CommandResult = withContext(Dispatchers.IO) {
         if (checkPrereqs) {
             if (!paths.prootBin.exists() || !paths.prootLoader.exists()) {
@@ -57,7 +58,12 @@ internal class PosixShellExecutor(
 
         // Ensure scratch/mount directories exist without rewriting live server config/extensions
         ensureMountDirs(paths)
-        val (cmd, env) = commandBuilder(paths, command, disableSeccomp)
+        val (cmd, baseEnv) = commandBuilder(paths, command, disableSeccomp)
+        val env = if (extraEnv.isEmpty()) {
+            baseEnv
+        } else {
+            LinkedHashMap(baseEnv).apply { putAll(extraEnv) }
+        }
 
         val output = StringBuilder()
         var proc: Process? = null

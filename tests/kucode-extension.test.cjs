@@ -500,3 +500,113 @@ test('editor and terminal copy/cut/paste bridge uses Android host clipboard safe
   assert.equal(mock.infoMessages.at(-1), 'アクティブなターミナルがありません');
 });
 
+test('openSessionLogs lists current and past abnormal sessions and opens AI bundle', async (t) => {
+  const expectedToken = 'session-test-token';
+  const postedEvents = [];
+  let copiedBundle = '';
+
+  const sessionsPayload = {
+    schemaVersion: 'kucode-session-v1',
+    currentSessionId: '20261124-010000-aa11bb',
+    previousAbnormalSessionId: '20261124-003000-cc22dd',
+    sessions: [
+      {
+        sessionId: '20261124-010000-aa11bb',
+        status: 'RUNNING',
+        exitCategory: 'RUNNING',
+        exitSummary: 'active',
+        startedAtUtc: '2026-11-24T01:00:00Z',
+        durationHuman: '2m 10s',
+        errorCount: 0,
+        warnCount: 1,
+        isCurrentSession: true,
+      },
+      {
+        sessionId: '20261124-003000-cc22dd',
+        status: 'ENDED_ABNORMALLY',
+        exitCategory: 'LOW_MEMORY',
+        exitSummary: 'Killed by Android LMKD',
+        startedAtUtc: '2026-11-24T00:30:00Z',
+        durationHuman: '18m 5s',
+        errorCount: 2,
+        warnCount: 3,
+        isCurrentSession: false,
+      },
+    ],
+  };
+
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
+      if (req.headers['x-kucode-token'] !== expectedToken) {
+        res.writeHead(403);
+        res.end('Forbidden');
+        return;
+      }
+      if (req.method === 'GET' && req.url === '/sessions') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(sessionsPayload));
+      } else if (req.method === 'GET' && req.url === '/sessions/20261124-003000-cc22dd?format=ai') {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('# AI Bundle for 20261124-003000-cc22dd\nREASON_LOW_MEMORY');
+      } else if (req.method === 'POST' && req.url === '/copy') {
+        copiedBundle = body;
+        res.writeHead(200);
+        res.end('ok');
+      } else if (req.method === 'POST' && req.url === '/event') {
+        postedEvents.push(JSON.parse(body));
+        res.writeHead(200);
+        res.end('ok');
+      } else {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const prevPort = process.env.KUCODE_ADMIN_PORT;
+  const prevToken = process.env.KUCODE_ADMIN_TOKEN;
+  process.env.KUCODE_ADMIN_PORT = String(server.address().port);
+  process.env.KUCODE_ADMIN_TOKEN = expectedToken;
+  t.after(() => {
+    if (prevPort === undefined) delete process.env.KUCODE_ADMIN_PORT;
+    else process.env.KUCODE_ADMIN_PORT = prevPort;
+    if (prevToken === undefined) delete process.env.KUCODE_ADMIN_TOKEN;
+    else process.env.KUCODE_ADMIN_TOKEN = prevToken;
+  });
+
+  const mock = createMockVscode();
+  let closeTerminalHandler = null;
+  mock.vscode.window.onDidCloseTerminal = (fn) => {
+    closeTerminalHandler = fn;
+    return { dispose() {} };
+  };
+
+  const ext = loadExtensionWithMockVscode(mock.vscode);
+  ext.activate({ subscriptions: [] });
+
+  let presentedItems = [];
+  mock.setQuickPick((items) => {
+    presentedItems = items;
+    return items[0]; // Top item should be the previous abnormal session shortcut
+  });
+
+  await mock.commands.get('kucode.openSessionLogs')();
+  assert.ok(presentedItems.length >= 3);
+  assert.match(presentedItems[0].label, /前回異常終了/);
+  assert.equal(mock.openedDocs.at(-1).language, 'markdown');
+  assert.match(mock.openedDocs.at(-1).content, /REASON_LOW_MEMORY/);
+  assert.match(copiedBundle, /REASON_LOW_MEMORY/);
+
+  assert.equal(typeof closeTerminalHandler, 'function');
+  closeTerminalHandler({ name: 'bash', exitStatus: { code: 137, reason: 1 } });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(postedEvents.some((e) => e.source === 'ext.terminal' && e.level === 'WARN' && e.msg.includes('code=137')));
+});
+
+

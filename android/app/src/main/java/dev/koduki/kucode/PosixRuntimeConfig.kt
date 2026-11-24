@@ -22,6 +22,7 @@ object PosixRuntimeConfig {
     const val GUEST_OPENVSCODE_DIR = "/opt/openvscode-server"
     const val GUEST_OPENVSCODE_BIN = "$GUEST_OPENVSCODE_DIR/bin/openvscode-server"
     const val GUEST_VSCODE_DATA = "/var/lib/kucode-vscode"
+    const val GUEST_DIAGNOSTICS_DIR = "/var/log/kucode"
     const val GUEST_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
     const val GUEST_CA_DIR = "/etc/ssl/certs"
     const val GUEST_ANDROID_USER_CA_BUNDLE = "/etc/ssl/kucode-android-user-ca.crt"
@@ -34,6 +35,7 @@ object PosixRuntimeConfig {
         val nativeLibDir: File,
         val androidSharedDir: File,
         val androidSdcardDir: File? = null,
+        val diagnosticsDir: File = File(runtimeRoot.parentFile ?: runtimeRoot, "diagnostics"),
     ) {
         val rootfsDir: File get() = File(runtimeRoot, "rootfs")
         val stagingDir: File get() = File(runtimeRoot, "staging")
@@ -56,18 +58,68 @@ object PosixRuntimeConfig {
     /**
      * Decides whether a URL navigation stays inside the editor WebView or should open in
      * an external Android XR browser window (e.g. a dev server on 127.0.0.1:3000 or GitHub auth).
+     *
+     * Allows VS Code's own sandboxed webview subframes (`*.vscode-cdn.net`, `about:blank`, `blob:`,
+     * `data:`) when [isForMainFrame] is `false` so Markdown previews and extension pages work
+     * without misfiring external browser intents.
      */
     fun shouldKeepInsideWebView(
         scheme: String?,
         host: String?,
         port: Int,
         editorServerPort: Int,
+        isForMainFrame: Boolean = true,
     ): Boolean {
-        if (scheme != "http") return false
-        if ((host == "127.0.0.1" || host == "localhost") && editorServerPort > 0 && port == editorServerPort) {
+        val normalizedScheme = scheme?.lowercase()
+        val normalizedHost = host?.lowercase()
+        if (normalizedScheme == "http" &&
+            (normalizedHost == "127.0.0.1" || normalizedHost == "localhost") &&
+            editorServerPort > 0 &&
+            port == editorServerPort
+        ) {
             return true
         }
+        if (!isForMainFrame) {
+            if (normalizedScheme == "about" || normalizedScheme == "blob" || normalizedScheme == "data") {
+                return true
+            }
+            if (normalizedScheme == "https" &&
+                normalizedHost != null &&
+                (normalizedHost == "vscode-cdn.net" || normalizedHost.endsWith(".vscode-cdn.net"))
+            ) {
+                return true
+            }
+        }
         return false
+    }
+
+    /**
+     * Validates that a target URI is safe to open in an external Android XR browser window
+     * (`http`/`https` only, never exposing the embedded editor's connection token or own port).
+     */
+    fun isSafeExternalBrowserUri(
+        scheme: String?,
+        host: String?,
+        port: Int,
+        rawQuery: String?,
+        editorServerPort: Int,
+    ): Boolean {
+        val normalizedScheme = scheme?.lowercase() ?: return false
+        if (normalizedScheme != "http" && normalizedScheme != "https") return false
+        val normalizedHost = host?.lowercase()?.takeIf { it.isNotBlank() } ?: return false
+        if ((normalizedHost == "127.0.0.1" || normalizedHost == "localhost") &&
+            editorServerPort > 0 &&
+            port == editorServerPort
+        ) {
+            return false
+        }
+        if (!rawQuery.isNullOrEmpty()) {
+            val hasConnectionToken = rawQuery.split('&').any { param ->
+                param.substringBefore('=').equals("tkn", ignoreCase = true)
+            }
+            if (hasConnectionToken) return false
+        }
+        return true
     }
 
     fun buildProotCommand(
@@ -95,6 +147,7 @@ object PosixRuntimeConfig {
             "-b", "${paths.workspaceDir.absolutePath}:$GUEST_WORKSPACE",
             "-b", "${paths.homeDir.absolutePath}:$GUEST_HOME",
             "-b", "${paths.vscodeDataDir.absolutePath}:$GUEST_VSCODE_DATA",
+            "-b", "${paths.diagnosticsDir.absolutePath}:$GUEST_DIAGNOSTICS_DIR",
             "-b", "${paths.androidSharedDir.absolutePath}:/android/shared",
         )
 
@@ -143,6 +196,8 @@ object PosixRuntimeConfig {
         if (adminPort > 0 && adminToken.isNotEmpty()) {
             env["KUCODE_ADMIN_PORT"] = adminPort.toString()
             env["KUCODE_ADMIN_TOKEN"] = adminToken
+            env["BROWSER"] = "/usr/local/bin/kucode-open"
+            env["GH_BROWSER"] = "/usr/local/bin/kucode-open"
         }
         return env
     }
@@ -155,6 +210,7 @@ object PosixRuntimeConfig {
         "--accept-server-license-terms",
         "--telemetry-level", "off",
         "--disable-workspace-trust",
+        "--without-browser-env-var",
         "--default-folder", GUEST_WORKSPACE,
         "--server-data-dir", GUEST_VSCODE_DATA,
         "--user-data-dir", "$GUEST_VSCODE_DATA/user",
@@ -505,6 +561,171 @@ object PosixRuntimeConfig {
         """.trimIndent() + "\n",
     )
 
+    fun buildHostCliHelperScripts(
+        nodeBin: String = "$GUEST_OPENVSCODE_DIR/node",
+    ): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        result.putAll(buildClipboardHelperScripts(nodeBin))
+
+        val openScript = """
+            #!$nodeBin
+            'use strict';
+            const http = require('node:http');
+            const port = Number(process.env.KUCODE_ADMIN_PORT || 0);
+            const token = process.env.KUCODE_ADMIN_TOKEN || '';
+            const args = process.argv.slice(2);
+            const target = args.find((a) => /^https?:\/\//i.test(a)) || args[0] || '';
+            if (!target) {
+              console.error('Usage: kucode-open <http(s)://url>');
+              process.exit(1);
+            }
+            if (!/^https?:\/\//i.test(target)) {
+              console.error('kucode-open: only http:// and https:// URLs are supported.');
+              process.exit(1);
+            }
+            if (!port || !token) {
+              console.error('kucode-open: KuCode host browser bridge is unavailable in this shell. Open manually: ' + target);
+              process.exit(1);
+            }
+            const payload = Buffer.from(target, 'utf8');
+            const req = http.request(
+              {
+                hostname: '127.0.0.1',
+                port,
+                path: '/open-url',
+                method: 'POST',
+                headers: {
+                  'X-KuCode-Token': token,
+                  'Content-Type': 'text/plain; charset=utf-8',
+                  'Content-Length': String(payload.length),
+                },
+                timeout: 5000,
+              },
+              (res) => {
+                const chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    process.exit(0);
+                  } else {
+                    console.error('kucode-open: HTTP ' + res.statusCode + ': ' + Buffer.concat(chunks).toString('utf8'));
+                    process.exit(1);
+                  }
+                });
+              },
+            );
+            req.on('timeout', () => req.destroy(new Error('timeout')));
+            req.on('error', (err) => {
+              console.error('kucode-open: ' + err.message);
+              process.exit(1);
+            });
+            req.end(payload);
+        """.trimIndent() + "\n"
+
+        result["kucode-open"] = openScript
+        result["xdg-open"] = openScript
+
+        result["kucode-logs"] = """
+            #!$nodeBin
+            'use strict';
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const http = require('node:http');
+            const port = Number(process.env.KUCODE_ADMIN_PORT || 0);
+            const token = process.env.KUCODE_ADMIN_TOKEN || '';
+            const rawArgs = process.argv.slice(2);
+            let format = 'ai';
+            const positional = [];
+            for (const a of rawArgs) {
+              if (a === '--raw' || a === '--timeline') format = 'raw';
+              else if (a === '--json') format = 'json';
+              else if (a === '--ai') format = 'ai';
+              else if (a === '-h' || a === '--help') {
+                console.log('Usage:');
+                console.log('  kucode-logs [show] [latest|prev|prev-abnormal|<sessionId>] [--ai|--raw|--json]');
+                console.log('  kucode-logs list [--json]');
+                console.log('  kucode-logs export [latest|prev|prev-abnormal|<sessionId>] [outputPath]');
+                process.exit(0);
+              } else {
+                positional.push(a);
+              }
+            }
+            const sub = positional[0] || 'show';
+            function fetchHost(urlPath) {
+              return new Promise((resolve, reject) => {
+                if (!port || !token) {
+                  reject(new Error('admin API unavailable'));
+                  return;
+                }
+                const req = http.request(
+                  { hostname: '127.0.0.1', port, path: urlPath, method: 'GET', headers: { 'X-KuCode-Token': token }, timeout: 15000 },
+                  (res) => {
+                    const chunks = [];
+                    res.on('data', (c) => chunks.push(c));
+                    res.on('end', () => {
+                      const body = Buffer.concat(chunks).toString('utf8');
+                      if (res.statusCode >= 200 && res.statusCode < 300) resolve(body);
+                      else reject(new Error('HTTP ' + res.statusCode + ': ' + body));
+                    });
+                  },
+                );
+                req.on('timeout', () => req.destroy(new Error('timeout')));
+                req.on('error', reject);
+                req.end();
+              });
+            }
+            (async () => {
+              if (sub === 'list') {
+                const jsonText = await fetchHost('/sessions');
+                if (format === 'json') {
+                  process.stdout.write(jsonText + '\n');
+                  return;
+                }
+                const parsed = JSON.parse(jsonText);
+                const sessions = parsed.sessions || [];
+                if (sessions.length === 0) {
+                  console.log('(no recorded sessions)');
+                  return;
+                }
+                for (const s of sessions) {
+                  const tag = s.isCurrentSession ? '[CURRENT]' : '[' + s.status + ']';
+                  console.log(
+                    s.sessionId + '  ' + tag + '  ' + s.exitCategory +
+                    '  dur=' + s.durationHuman + '  err=' + s.errorCount + '  warn=' + s.warnCount +
+                    '  started=' + s.startedAtUtc + (s.exitSummary ? '  (' + s.exitSummary + ')' : ''),
+                  );
+                }
+                return;
+              }
+              const isExplicitCmd = (sub === 'show' || sub === 'export');
+              const selector = encodeURIComponent((isExplicitCmd ? positional[1] : positional[0]) || 'latest');
+              let content;
+              try {
+                content = await fetchHost('/sessions/' + selector + '?format=' + encodeURIComponent(format));
+              } catch (err) {
+                const fallback = '$GUEST_DIAGNOSTICS_DIR/latest-ai-report.md';
+                if (selector === 'latest' && fs.existsSync(fallback)) {
+                  content = fs.readFileSync(fallback, 'utf8');
+                } else {
+                  throw err;
+                }
+              }
+              if (sub === 'export') {
+                const dest = positional[2] || path.resolve(process.cwd(), 'kucode-session-' + decodeURIComponent(selector) + (format === 'json' ? '.json' : format === 'raw' ? '.log' : '-ai.md'));
+                fs.writeFileSync(dest, content, 'utf8');
+                console.log(dest);
+              } else {
+                process.stdout.write(content.endsWith('\n') ? content : content + '\n');
+              }
+            })().catch((err) => {
+              console.error('kucode-logs: ' + err.message);
+              process.exit(1);
+            });
+        """.trimIndent() + "\n"
+
+        return result
+    }
+
     fun buildDefaultBashrc(): String = """
         # KuCode persistent Debian shell config (/root is mounted outside rootfs)
         export LANG=C.UTF-8
@@ -525,6 +746,8 @@ object PosixRuntimeConfig {
 - **ファイルを開く**: 左サイドバーをクリック、または `Ctrl+P` / `Ctrl+O`
 - **コピー / 切り取り / 貼り付け（エディタ）**: `Ctrl+C` / `Ctrl+X` / `Ctrl+V`、または右クリックメニュー
 - **コピー / 貼り付け（ターミナル）**: 選択後に**右クリックで自動コピー**（または `Ctrl+Shift+C`）、貼り付けは `Ctrl+Shift+V` / `Ctrl+V`（`Shift+右クリック` でメニュー）、CLI では `kucode-copy` / `kucode-paste`
+- **外部ブラウザ起動（`gh auth` / 開発サーバー）**: `gh auth login` や `kucode-open <URL>` / `xdg-open <URL>` でエディタを維持したまま隣の XR ブラウザウィンドウを開きます
+- **セッション診断履歴（AI インプット対応）**: 左端 **KuCode** の「セッション診断履歴 & AI レポート」、または CLI で `kucode-logs list` / `kucode-logs show prev`（`/var/log/kucode` にも常時保存）
 - **保存する**: `Ctrl+S`
 - **タブを閉じる**: `Ctrl+W`
 - **ターミナル開閉**: `Ctrl+J` または左端 **KuCode** メニューの「ターミナル開閉」
@@ -532,13 +755,13 @@ object PosixRuntimeConfig {
 
 ## Android ↔ POSIX ファイル共有 & 永続領域
 - **POSIX → Android**: `/workspace/android`（`/android/shared` および全ファイルアクセス許可時は `/android/sdcard`）
-- **Android → POSIX**: Android XR の「Files」アプリから **KuCode** を開くと、この `/workspace` が通常のフォルダとして直接読み書きできます。
+- **Android → POSIX**: Android XR の「Files」アプリから **KuCode**（`/workspace`）および **KuCode Logs**（起動〜終了ごとの診断レポート）を直接参照できます。
 - **永続ホーム (`/root`)**: `~/.ssh`, `~/.gitconfig`, `~/.config/gh` は rootfs 外に分離保存されるため、アプリ更新後も引き継がれます。
 
 ## `gh` / `git` などの CLI 導入（POSIX ターミナル内）
 ```bash
 apt update && apt install -y ca-certificates git gh curl openssh-client
-gh --version
+gh auth login
 ```
 """.trimIndent() + "\n"
 }

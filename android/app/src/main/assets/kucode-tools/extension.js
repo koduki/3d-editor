@@ -308,6 +308,75 @@ async function runDiagnosticsCommand() {
   );
 }
 
+function reportHostEvent(level, source, msg) {
+  if (!process.env.KUCODE_ADMIN_PORT) return;
+  callHost('POST', '/event', JSON.stringify({ level, source, msg })).catch(() => {});
+}
+
+async function openSessionLogsCommand() {
+  try {
+    const rawJson = await callHost('GET', '/sessions');
+    const parsed = JSON.parse(rawJson || '{}');
+    const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    if (sessions.length === 0) {
+      vscode.window.showInformationMessage('記録されたセッション診断履歴がまだありません');
+      return;
+    }
+
+    const items = [];
+    if (parsed.previousAbnormalSessionId) {
+      const abn = sessions.find((s) => s.sessionId === parsed.previousAbnormalSessionId);
+      if (abn) {
+        items.push({
+          label: '$(warning) 前回異常終了の AI 診断レポートを開く (' + abn.exitCategory + ')',
+          description: abn.sessionId + ' | ' + (abn.durationHuman || ''),
+          detail: abn.exitSummary || '',
+          selector: abn.sessionId,
+          format: 'ai',
+        });
+      }
+    }
+
+    for (const s of sessions) {
+      const icon = s.isCurrentSession
+        ? '$(record)'
+        : s.status === 'ENDED_ABNORMALLY'
+          ? '$(error)'
+          : '$(pass)';
+      const badge = s.isCurrentSession
+        ? '現在稼働中'
+        : s.status === 'ENDED_ABNORMALLY'
+          ? '異常終了: ' + s.exitCategory
+          : '正常終了: ' + s.exitCategory;
+      items.push({
+        label: icon + ' [' + badge + '] ' + s.sessionId,
+        description: (s.startedAtUtc || '') + ' | ' + (s.durationHuman || '') + ' | err=' + (s.errorCount || 0) + ' warn=' + (s.warnCount || 0),
+        detail: s.exitSummary || '',
+        selector: s.sessionId,
+        format: 'ai',
+      });
+    }
+
+    const picked = await vscode.window.showQuickPick(items, {
+      title: 'KuCode セッション診断履歴 & AI インプット取得（起動〜終了単位）',
+      placeHolder: '閲覧・コピーするセッションを選択してください（Markdown を開きクリップボードへ自動コピーします）',
+    });
+    if (!picked) return;
+
+    const bundle = await callHost(
+      'GET',
+      '/sessions/' + encodeURIComponent(picked.selector) + '?format=' + encodeURIComponent(picked.format)
+    );
+    await openTextTabAndCopy(
+      bundle || '(データなし)',
+      'markdown',
+      'セッション診断レポート (' + picked.selector + ') を開き、AI インプット用にコピーしました'
+    );
+  } catch (err) {
+    vscode.window.showErrorMessage('セッション診断履歴の取得に失敗しました: ' + err.message);
+  }
+}
+
 async function openLogsCommand() {
   try {
     const logs = await callHost('GET', '/logs');
@@ -421,6 +490,11 @@ async function openMenuCommand() {
       action: runDiagnosticsCommand,
     },
     {
+      label: '$(history) セッション診断履歴 & AI レポートを開く（現在・過去・異常終了）',
+      description: '起動〜終了単位の全ログ・メトリクス・クラッシュ情報を AI インプット形式で取得',
+      action: openSessionLogsCommand,
+    },
+    {
       label: '$(terminal) 統合ターミナルを開閉',
       description: 'Debian POSIX bash / apt / git / gh（JISキーボード補助）',
       action: toggleTerminalCommand,
@@ -499,6 +573,12 @@ function createSidebarMenuProvider() {
       command: 'kucode.runDiagnostics',
     },
     {
+      label: 'セッション診断履歴 (AI用)',
+      description: '現在・過去・異常終了ログ',
+      icon: 'history',
+      command: 'kucode.openSessionLogs',
+    },
+    {
       label: 'ターミナル開閉',
       description: 'POSIX bash / gh',
       icon: 'terminal',
@@ -559,6 +639,7 @@ function activate(context) {
     vscode.commands.registerCommand('kucode.terminalCopy', terminalCopyCommand),
     vscode.commands.registerCommand('kucode.terminalPaste', terminalPasteCommand),
     vscode.commands.registerCommand('kucode.runDiagnostics', runDiagnosticsCommand),
+    vscode.commands.registerCommand('kucode.openSessionLogs', openSessionLogsCommand),
     vscode.commands.registerCommand('kucode.openLogs', openLogsCommand),
     vscode.commands.registerCommand('kucode.toggleTerminal', toggleTerminalCommand),
     vscode.commands.registerCommand('kucode.selectDisplayScale', selectDisplayScaleCommand),
@@ -568,9 +649,43 @@ function activate(context) {
     vscode.window.registerTreeDataProvider('kucode.menuView', createSidebarMenuProvider())
   );
 
+  if (typeof vscode.window.onDidChangeWindowState === 'function') {
+    context.subscriptions.push(
+      vscode.window.onDidChangeWindowState((state) => {
+        reportHostEvent(
+          'INFO',
+          'ext.window',
+          'VS Code window state: focused=' + Boolean(state && state.focused) + ', active=' + Boolean(state && state.active)
+        );
+      })
+    );
+  }
+  if (typeof vscode.window.onDidOpenTerminal === 'function') {
+    context.subscriptions.push(
+      vscode.window.onDidOpenTerminal((term) => {
+        reportHostEvent('INFO', 'ext.terminal', 'Terminal opened: ' + ((term && term.name) || 'shell'));
+      })
+    );
+  }
+  if (typeof vscode.window.onDidCloseTerminal === 'function') {
+    context.subscriptions.push(
+      vscode.window.onDidCloseTerminal((term) => {
+        const status = term && term.exitStatus;
+        const code = status ? status.code : undefined;
+        const reason = status ? status.reason : undefined;
+        const lvl = typeof code === 'number' && code !== 0 ? 'WARN' : 'INFO';
+        reportHostEvent(
+          lvl,
+          'ext.terminal',
+          'Terminal closed: name=' + ((term && term.name) || 'shell') + ', code=' + code + ', reason=' + reason
+        );
+      })
+    );
+  }
+
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusItem.text = '$(pulse) KuCode';
-  statusItem.tooltip = 'KuCode コピー/貼り付け・実機チェック・表示サイズ・光学テーマ・管理画面を開く';
+  statusItem.tooltip = 'KuCode コピー/貼り付け・実機チェック・セッション診断履歴・表示サイズ・光学テーマ・管理画面を開く';
   statusItem.command = 'kucode.openMenu';
   statusItem.show();
   context.subscriptions.push(statusItem);
@@ -584,6 +699,7 @@ module.exports = {
   OST_COLORS,
   VST_COLORS,
   callHost,
+  reportHostEvent,
   writeHostClipboard,
   readHostClipboard,
   extractEditorCopyPlan,

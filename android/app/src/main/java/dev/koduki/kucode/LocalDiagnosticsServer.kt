@@ -35,6 +35,12 @@ class LocalDiagnosticsServer(
     private val onGetLogs: () -> String,
     private val onCopyToClipboard: (String) -> Boolean,
     private val onReadFromClipboard: () -> String? = { null },
+    private val onOpenExternalUrl: (String) -> Boolean = { false },
+    private val currentEditorPortProvider: () -> Int = { 0 },
+    private val onListSessions: () -> String = { "{\"sessions\":[]}" },
+    private val onGetSessionBundle: (selector: String, format: String) -> String? = { _, _ -> null },
+    private val onRecordClientEvent: (level: String, source: String, message: String) -> Unit = { _, _, _ -> },
+    private val onAuditRequest: (method: String, path: String, statusCode: Int, durationMs: Long, detail: String) -> Unit = { _, _, _, _, _ -> },
     private val onOpenBootPage: () -> Unit,
     private val onRequestStoragePermission: () -> Unit,
     private val onRestartServer: () -> Unit,
@@ -114,6 +120,7 @@ class LocalDiagnosticsServer(
     }
 
     private fun handleClient(socket: Socket) {
+        val t0 = System.currentTimeMillis()
         socket.use { s ->
             s.soTimeout = preAuthTimeoutMs
             val input = BufferedInputStream(s.getInputStream())
@@ -137,7 +144,9 @@ class LocalDiagnosticsServer(
                 return
             }
             val method = parts[0].uppercase()
-            val path = parts[1].substringBefore('?')
+            val rawTarget = parts[1]
+            val path = rawTarget.substringBefore('?')
+            val rawQuery = if ('?' in rawTarget) rawTarget.substringAfter('?') else ""
 
             val headers = mutableMapOf<String, String>()
             var totalHeaderBytes = 0
@@ -173,6 +182,7 @@ class LocalDiagnosticsServer(
 
             if (!isTokenAuthorized(headers["x-kucode-token"])) {
                 safeWriteResponse(output, 403, "Forbidden")
+                runCatching { onAuditRequest(method, path, 403, System.currentTimeMillis() - t0, "unauthorized") }
                 return
             }
 
@@ -214,53 +224,150 @@ class LocalDiagnosticsServer(
                 ""
             }
 
+            fun audit(statusCode: Int, detail: String = "") {
+                if (path != "/event") {
+                    runCatching { onAuditRequest(method, path, statusCode, System.currentTimeMillis() - t0, detail) }
+                }
+            }
+
             try {
                 when {
                     method == "GET" && path == "/diagnostics" -> {
                         val report = runBlocking { onRunDiagnostics() }
                         writeResponse(output, 200, report)
+                        audit(200, "bytes=${report.length}")
                     }
 
                     method == "GET" && path == "/logs" -> {
-                        writeResponse(output, 200, onGetLogs())
+                        val logs = onGetLogs()
+                        writeResponse(output, 200, logs)
+                        audit(200, "bytes=${logs.length}")
+                    }
+
+                    method == "GET" && path == "/sessions" -> {
+                        val sessionsJson = onListSessions()
+                        writeResponse(output, 200, sessionsJson, contentType = "application/json; charset=utf-8")
+                        audit(200)
+                    }
+
+                    method == "GET" && path.startsWith("/sessions/") -> {
+                        val rawSelector = path.removePrefix("/sessions/")
+                        val selector = runCatching {
+                            java.net.URLDecoder.decode(rawSelector, Charsets.UTF_8.name())
+                        }.getOrDefault(rawSelector)
+                        val format = parseQueryParam(rawQuery, "format") ?: "ai"
+                        val bundle = onGetSessionBundle(selector, format)
+                        if (bundle == null) {
+                            writeResponse(output, 404, "Session not found")
+                            audit(404, "selector=$selector")
+                        } else {
+                            val ct = if (format.equals("json", ignoreCase = true)) {
+                                "application/json; charset=utf-8"
+                            } else {
+                                "text/plain; charset=utf-8"
+                            }
+                            writeResponse(output, 200, bundle, contentType = ct)
+                            audit(200, "selector=$selector,format=$format")
+                        }
+                    }
+
+                    method == "POST" && path == "/open-url" -> {
+                        val targetUrl = body.trim()
+                        val parsedUri = runCatching { java.net.URI(targetUrl) }.getOrNull()
+                        val editorPort = currentEditorPortProvider()
+                        val safe = parsedUri != null && PosixRuntimeConfig.isSafeExternalBrowserUri(
+                            scheme = parsedUri.scheme,
+                            host = parsedUri.host,
+                            port = parsedUri.port,
+                            rawQuery = parsedUri.rawQuery,
+                            editorServerPort = editorPort,
+                        )
+                        if (!safe) {
+                            writeResponse(output, 400, "Invalid or disallowed external URL")
+                            audit(400, "rejected_url")
+                        } else {
+                            val launched = onOpenExternalUrl(targetUrl)
+                            val code = if (launched) 200 else 500
+                            writeResponse(output, code, if (launched) "ok" else "failed to launch external browser")
+                            audit(code, LogRedactor.redact(targetUrl))
+                        }
+                    }
+
+                    method == "POST" && path == "/event" -> {
+                        val trimmed = body.trim()
+                        if (trimmed.isNotEmpty()) {
+                            val json = if (trimmed.startsWith("{")) {
+                                runCatching { org.json.JSONObject(trimmed) }.getOrNull()
+                            } else {
+                                null
+                            }
+                            if (json != null) {
+                                val lvl = json.optString("level", "INFO")
+                                val src = json.optString("source", "ext.kucode")
+                                val msg = json.optString("msg", "")
+                                if (msg.isNotBlank()) {
+                                    onRecordClientEvent(lvl, src, msg)
+                                }
+                            } else {
+                                onRecordClientEvent("INFO", "ext.kucode", trimmed)
+                            }
+                        }
+                        writeResponse(output, 200, "ok")
                     }
 
                     method == "POST" && path == "/copy" -> {
                         val ok = onCopyToClipboard(body)
-                        writeResponse(output, if (ok) 200 else 500, if (ok) "ok" else "clipboard unavailable")
+                        val code = if (ok) 200 else 500
+                        writeResponse(output, code, if (ok) "ok" else "clipboard unavailable")
+                        audit(code, "bytes=${body.length}")
                     }
 
                     method == "GET" && path == "/clipboard" -> {
                         val text = onReadFromClipboard()
                         when {
-                            text == null -> writeResponse(output, 503, "clipboard unavailable")
-                            text.toByteArray(Charsets.UTF_8).size > MAX_BODY_BYTES ->
+                            text == null -> {
+                                writeResponse(output, 503, "clipboard unavailable")
+                                audit(503)
+                            }
+                            text.toByteArray(Charsets.UTF_8).size > MAX_BODY_BYTES -> {
                                 writeResponse(output, 413, "Payload Too Large")
-                            else -> writeResponse(output, 200, text)
+                                audit(413)
+                            }
+                            else -> {
+                                writeResponse(output, 200, text)
+                                audit(200, "bytes=${text.length}")
+                            }
                         }
                     }
 
                     method == "POST" && path == "/open-boot" -> {
                         onOpenBootPage()
                         writeResponse(output, 200, "ok")
+                        audit(200)
                     }
 
                     method == "POST" && path == "/storage-permission" -> {
                         onRequestStoragePermission()
                         writeResponse(output, 200, "ok")
+                        audit(200)
                     }
 
                     method == "POST" && path == "/restart" -> {
                         onRestartServer()
                         writeResponse(output, 200, "ok")
+                        audit(200)
                     }
 
-                    else -> writeResponse(output, 404, "Not Found")
+                    else -> {
+                        writeResponse(output, 404, "Not Found")
+                        audit(404)
+                    }
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (e: Exception) {
                 safeWriteResponse(output, 500, "Internal Error: ${e.message}")
+                audit(500, e.javaClass.simpleName)
             }
         }
     }
@@ -302,7 +409,25 @@ class LocalDiagnosticsServer(
         }
     }
 
-    private fun writeResponse(output: OutputStream, statusCode: Int, body: String) {
+    private fun parseQueryParam(rawQuery: String, key: String): String? {
+        if (rawQuery.isEmpty()) return null
+        for (pair in rawQuery.split('&')) {
+            val eq = pair.indexOf('=')
+            val k = if (eq >= 0) pair.substring(0, eq) else pair
+            if (k == key) {
+                val rawVal = if (eq >= 0) pair.substring(eq + 1) else ""
+                return runCatching { java.net.URLDecoder.decode(rawVal, Charsets.UTF_8.name()) }.getOrDefault(rawVal)
+            }
+        }
+        return null
+    }
+
+    private fun writeResponse(
+        output: OutputStream,
+        statusCode: Int,
+        body: String,
+        contentType: String = "text/plain; charset=utf-8",
+    ) {
         val statusText = when (statusCode) {
             200 -> "OK"
             400 -> "Bad Request"
@@ -318,7 +443,7 @@ class LocalDiagnosticsServer(
         val bodyBytes = body.toByteArray(Charsets.UTF_8)
         val header = buildString {
             append("HTTP/1.1 $statusCode $statusText\r\n")
-            append("Content-Type: text/plain; charset=utf-8\r\n")
+            append("Content-Type: $contentType\r\n")
             append("Content-Length: ${bodyBytes.size}\r\n")
             append("Connection: close\r\n")
             append("\r\n")

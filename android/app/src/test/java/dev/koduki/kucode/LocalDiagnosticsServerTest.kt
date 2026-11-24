@@ -323,6 +323,118 @@ class LocalDiagnosticsServerTest {
         }
     }
 
+    @Test
+    fun openUrlAndSessionLogsCliRoundTripWithStrictValidation() {
+        val tmpDir = java.nio.file.Files.createTempDirectory("kucode-open-logs-cli").toFile()
+        val openedUrls = mutableListOf<String>()
+        val store = SessionLogStore(diagnosticsRootDir = java.io.File(tmpDir, "diag"))
+        val session1 = store.startSession(
+            pid = 9001,
+            env = SessionLogStore.SessionEnvMetadata(deviceSummary = "Test XR Device"),
+        )
+        store.recordEvent(SessionLogStore.EventLevel.ERROR, "test.err", "previous session error")
+        store.endSession("crash simulated", abnormal = true, exitCategory = "CRASH_JVM")
+
+        val session2 = store.startSession(
+            pid = 9002,
+            env = SessionLogStore.SessionEnvMetadata(deviceSummary = "Test XR Device"),
+        )
+
+        val server = LocalDiagnosticsServer(
+            onRunDiagnostics = { "ok" },
+            onGetLogs = { "ok" },
+            onCopyToClipboard = { true },
+            onOpenExternalUrl = { url -> openedUrls.add(url); true },
+            currentEditorPortProvider = { 18765 },
+            onListSessions = { store.listSessionsJson() },
+            onGetSessionBundle = { selector, format -> store.renderSessionBundle(selector, format) },
+            onRecordClientEvent = { level, src, msg ->
+                val lvl = runCatching { SessionLogStore.EventLevel.valueOf(level.uppercase()) }
+                    .getOrDefault(SessionLogStore.EventLevel.INFO)
+                store.recordEvent(lvl, src, msg)
+            },
+            onOpenBootPage = {},
+            onRequestStoragePermission = {},
+            onRestartServer = {},
+        )
+        val port = server.start()
+        try {
+            val scripts = PosixRuntimeConfig.buildHostCliHelperScripts()
+            val openScript = java.io.File(tmpDir, "kucode-open").apply { writeText(scripts.getValue("kucode-open")) }
+            val logsScript = java.io.File(tmpDir, "kucode-logs").apply { writeText(scripts.getValue("kucode-logs")) }
+
+            // 1. kucode-open opens https://github.com/login/device cleanly
+            val ghOpen = ProcessBuilder("node", openScript.absolutePath, "https://github.com/login/device").apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            assertEquals(0, ghOpen.waitFor())
+            assertEquals(listOf("https://github.com/login/device"), openedUrls)
+
+            // 2. kucode-open / server rejects editor port & token-bearing URLs with HTTP 400
+            val selfPortOpen = ProcessBuilder("node", openScript.absolutePath, "http://127.0.0.1:18765/?folder=/workspace").apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            assertTrue(selfPortOpen.waitFor() != 0)
+            assertEquals(1, openedUrls.size)
+
+            val tokenLeakOpen = ProcessBuilder("node", openScript.absolutePath, "https://example.com/?tkn=secret123").apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            assertTrue(tokenLeakOpen.waitFor() != 0)
+            assertEquals(1, openedUrls.size)
+
+            // 3. POST /event records extension telemetry into active session
+            val evConn = (URL("http://127.0.0.1:$port/event").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("X-KuCode-Token", server.authToken)
+            }
+            evConn.outputStream.use {
+                it.write("""{"level":"WARN","source":"ext.terminal","msg":"Terminal closed: code=130"}""".toByteArray())
+            }
+            assertEquals(200, evConn.responseCode)
+            evConn.disconnect()
+
+            // 4. kucode-logs list shows both current and previous abnormal sessions
+            val listProc = ProcessBuilder("node", logsScript.absolutePath, "list").apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            val listOut = listProc.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            assertEquals(0, listProc.waitFor())
+            assertTrue(listOut.contains(session1.sessionId))
+            assertTrue(listOut.contains(session2.sessionId))
+            assertTrue(listOut.contains("CRASH_JVM"))
+
+            // 5. kucode-logs show prev-abnormal outputs the AI bundle for session1
+            val showPrevProc = ProcessBuilder("node", logsScript.absolutePath, "show", "prev-abnormal").apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            val prevOut = showPrevProc.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            assertEquals(0, showPrevProc.waitFor())
+            assertTrue(prevOut.contains(session1.sessionId))
+            assertTrue(prevOut.contains("previous session error"))
+
+            // 6. kucode-logs export writes current session AI bundle to file
+            val exportTarget = java.io.File(tmpDir, "exported-ai.md")
+            val exportProc = ProcessBuilder("node", logsScript.absolutePath, "export", "latest", exportTarget.absolutePath).apply {
+                environment()["KUCODE_ADMIN_PORT"] = port.toString()
+                environment()["KUCODE_ADMIN_TOKEN"] = server.authToken
+            }.start()
+            assertEquals(0, exportProc.waitFor())
+            assertTrue(exportTarget.isFile)
+            assertTrue(exportTarget.readText().contains("Terminal closed: code=130"))
+        } finally {
+            store.endSession("cleanup")
+            server.stop()
+            deleteTreeNoFollow(tmpDir)
+        }
+    }
+
     private fun sendRawHttpStatus(port: Int, rawRequest: String): Int {
         Socket("127.0.0.1", port).use { socket ->
             socket.soTimeout = 3_000

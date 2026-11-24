@@ -13,3 +13,5 @@ KuCode の設計判断・採用理由・検討した代替案・トレードオ�
 | [ADR-0007](0007-on-device-diagnostics-and-non-pty-fallback.md) | 並列実機診断チェッカー（自動コピー）と非 PTY フォールバック CLI の内蔵 | Accepted | 2026-11-22 |
 | [ADR-0008](0008-oss-license-compliance-and-manifest-bundling.md) | 本体 MIT 化とライセンス全文・Debian パッケージマニフェストの APK 自動同梱 | Accepted | 2026-11-23 |
 | [ADR-0009](0009-brand-naming-kucode.md) | プロダクト名称と識別子を「KuCode」に統一する | Accepted | 2026-11-23 |
+| [ADR-0010](0010-multi-window-browser-bridge-and-session-flight-recorder.md) | XR 外部ブラウザ起動のエディタ保護（`onCreateWindow` / `kucode-open`）と起動〜終了単位フライトレコーダー（AI 診断バンドル） | Accepted | 2026-11-24 |
+

@@ -34,9 +34,11 @@ class PosixRuntimeConfigTest {
         assertTrue(cmd.contains("--kill-on-exit"))
         assertTrue(cmd.contains("/data/user/0/dev.koduki.kucode/files/workspace:/workspace"))
         assertTrue(cmd.contains("/data/user/0/dev.koduki.kucode/files/home:/root"))
+        assertTrue(cmd.contains("/data/user/0/dev.koduki.kucode/files/diagnostics:/var/log/kucode"))
         assertTrue(cmd.contains("/sdcard/Android/data/dev.koduki.kucode/files/shared:/android/shared"))
         assertTrue(cmd.contains("/storage/emulated/0:/android/sdcard"))
         assertFalse(cmd.contains("--without-connection-token"))
+        assertTrue(cmd.contains("--without-browser-env-var"))
         assertEquals("/var/lib/kucode-vscode/.editor-token", cmd[cmd.indexOf("--connection-token-file") + 1])
         assertTrue(cmd.contains("18765"))
 
@@ -51,6 +53,8 @@ class PosixRuntimeConfigTest {
         assertEquals("1", env["PROOT_NO_SECCOMP"])
         assertEquals("43210", env["KUCODE_ADMIN_PORT"])
         assertEquals("secret-token", env["KUCODE_ADMIN_TOKEN"])
+        assertEquals("/usr/local/bin/kucode-open", env["BROWSER"])
+        assertEquals("/usr/local/bin/kucode-open", env["GH_BROWSER"])
         assertEquals("/tmp", env["TMPDIR"])
         assertEquals("/etc/ssl/certs/ca-certificates.crt", env["SSL_CERT_FILE"])
         assertEquals("/etc/ssl/certs", env["SSL_CERT_DIR"])
@@ -68,7 +72,7 @@ class PosixRuntimeConfigTest {
     }
 
     @Test
-    fun shouldKeepInsideWebView_routesOtherLocalhostPortsToExternalBrowser() {
+    fun shouldKeepInsideWebView_routesOtherLocalhostPortsToExternalBrowserAndAllowsVsCodeSubframes() {
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("file", "", -1, 18765))
         assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 18765, 18765))
         assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 18765, 18765))
@@ -77,6 +81,24 @@ class PosixRuntimeConfigTest {
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 3000, 18765))
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 5173, 18765))
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("https", "github.com", -1, 18765))
+
+        // VS Code webview subframes (*.vscode-cdn.net, about:blank, blob:) stay inside iframe ONLY when !isForMainFrame
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("https", "abc123.vscode-cdn.net", -1, 18765, isForMainFrame = true))
+        assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("https", "abc123.vscode-cdn.net", -1, 18765, isForMainFrame = false))
+        assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("about", null, -1, 18765, isForMainFrame = false))
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("https", "github.com", -1, 18765, isForMainFrame = false))
+    }
+
+    @Test
+    fun isSafeExternalBrowserUri_allowsHttpHttpsDevAndAuthUrlsWhileBlockingTokensFilesAndEditorPort() {
+        assertTrue(PosixRuntimeConfig.isSafeExternalBrowserUri("https", "github.com", -1, "foo=1", 18765))
+        assertTrue(PosixRuntimeConfig.isSafeExternalBrowserUri("http", "127.0.0.1", 3000, null, 18765))
+        assertTrue(PosixRuntimeConfig.isSafeExternalBrowserUri("http", "localhost", 5173, null, 18765))
+
+        assertFalse(PosixRuntimeConfig.isSafeExternalBrowserUri("file", "", -1, null, 18765))
+        assertFalse(PosixRuntimeConfig.isSafeExternalBrowserUri("javascript", "", -1, null, 18765))
+        assertFalse(PosixRuntimeConfig.isSafeExternalBrowserUri("http", "127.0.0.1", 18765, "folder=/workspace", 18765))
+        assertFalse(PosixRuntimeConfig.isSafeExternalBrowserUri("https", "example.com", -1, "a=1&tkn=secret", 18765))
     }
 
     @Test

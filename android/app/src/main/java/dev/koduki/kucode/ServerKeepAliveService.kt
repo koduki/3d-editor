@@ -32,20 +32,29 @@ class ServerKeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val telemetry = SessionTelemetryManager.getInstance(this)
         when (resolveAction(intent?.action, hasIntent = intent != null)) {
             KeepAliveAction.STOP_RUNTIME_AND_SERVICE -> {
+                telemetry.info("android.service", "KeepAliveService stop requested via notification action")
                 PosixRuntimeManager.getInstance(this).stop()
+                telemetry.endCurrentSession(
+                    reason = "User tapped Stop on foreground notification",
+                    abnormal = false,
+                    exitCategory = "CLEAN",
+                )
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
 
             KeepAliveAction.STOP_SERVICE_ONLY -> {
+                telemetry.info("android.service", "KeepAliveService started with null intent; stopping ghost service")
                 stopSelf(startId)
                 return START_NOT_STICKY
             }
 
             KeepAliveAction.START_FOREGROUND_AND_RUNTIME -> {
+                telemetry.ensureSessionActive("keepalive_service_start")
                 ensureNotificationChannel()
                 val notification = buildNotification()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -57,15 +66,29 @@ class ServerKeepAliveService : Service() {
                 } else {
                     startForeground(NOTIFICATION_ID, notification)
                 }
+                telemetry.info("android.service", "KeepAliveService running in foreground (type=dataSync)")
                 PosixRuntimeManager.getInstance(this).startIfNeeded()
                 return START_NOT_STICKY
             }
         }
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val telemetry = SessionTelemetryManager.getInstance(this)
+        telemetry.info("android.service", "onTaskRemoved invoked (task swiped/closed)")
+        telemetry.captureMetricSnapshotAsync("task_removed", includePss = true)
+    }
+
     override fun onTimeout(startId: Int, fgsType: Int) {
         // Android 15 enforces a 6h/24h quota on dataSync foreground services;
         // stop the service cleanly rather than letting the system throw RemoteServiceException.
+        val telemetry = SessionTelemetryManager.getInstance(this)
+        telemetry.warn(
+            "android.service",
+            "Android 15 dataSync foreground service 6h quota timeout reached (startId=$startId, fgsType=$fgsType); degrading cleanly",
+        )
+        telemetry.captureMetricSnapshotAsync("fgs_timeout", includePss = true)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
     }

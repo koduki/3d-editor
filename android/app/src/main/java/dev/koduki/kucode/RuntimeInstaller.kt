@@ -145,6 +145,7 @@ internal class RuntimeInstaller(
         ensureDirectoryWithMode(paths.sysdataDir, 0b111_101_101)
         ensureDirectoryWithMode(paths.shmDir, 0b111_111_111)
         ensureDirectoryWithMode(paths.tmpDir, 0b111_111_111)
+        ensureDirectoryWithMode(paths.diagnosticsDir, 0b111_101_101)
         paths.vscodeDataDir.mkdirs()
         paths.workspaceDir.mkdirs()
         paths.homeDir.mkdirs()
@@ -156,6 +157,10 @@ internal class RuntimeInstaller(
         File(paths.rootfsDir, "android/shared").mkdirs()
         File(paths.rootfsDir, "android/sdcard").mkdirs()
         File(paths.rootfsDir, PosixRuntimeConfig.GUEST_VSCODE_DATA.trimStart('/')).mkdirs()
+        ensureDirectoryWithMode(
+            File(paths.rootfsDir, PosixRuntimeConfig.GUEST_DIAGNOSTICS_DIR.trimStart('/')),
+            0b111_101_101,
+        )
         ensureDirectoryWithMode(File(paths.rootfsDir, "dev/shm"), 0b111_111_111)
         ensureDirectoryWithMode(File(paths.rootfsDir, "tmp"), 0b111_111_111)
         File(paths.rootfsDir, "root").mkdirs()
@@ -228,10 +233,10 @@ internal class RuntimeInstaller(
         // Sync Android trusted CA certificates (Conscrypt APEX system roots + user CAs) into Debian
         CaTrustSync.syncIntoRootfs(paths, loadHostCaCertificates(), onLog)
 
-        // Install CLI clipboard helpers (`kucode-copy` / `kucode-paste`) into /usr/local/bin
+        // Install CLI host helpers (`kucode-copy`, `kucode-paste`, `kucode-open`, `xdg-open`, `kucode-logs`)
         val localBinDir = File(paths.rootfsDir, "usr/local/bin")
         ensureDirectoryWithMode(localBinDir, 0b111_101_101)
-        for ((name, script) in PosixRuntimeConfig.buildClipboardHelperScripts()) {
+        for ((name, script) in PosixRuntimeConfig.buildHostCliHelperScripts()) {
             val target = File(localBinDir, name)
             if (Files.isSymbolicLink(target.toPath()) ||
                 Files.isDirectory(target.toPath(), LinkOption.NOFOLLOW_LINKS)

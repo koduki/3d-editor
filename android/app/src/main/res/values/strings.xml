@@ -2,6 +2,8 @@
 <resources>
     <string name="app_name">KuCode</string>
     <string name="documents_root_summary">POSIX /workspace</string>
+    <string name="diagnostics_root_title">KuCode Logs</string>
+    <string name="diagnostics_root_summary">AI Session Diagnostics (/var/log/kucode)</string>
     <string name="keepalive_channel_name">KuCode サーバー維持</string>
     <string name="keepalive_notification_title">KuCode 起動中</string>
     <string name="keepalive_notification_text">内蔵 openvscode-server (Debian POSIX) が稼働しています</string>

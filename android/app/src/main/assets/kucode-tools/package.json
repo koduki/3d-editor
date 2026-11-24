@@ -46,6 +46,10 @@
         "title": "KuCode: 実機チェックを実行（レポートを開く & コピー）"
       },
       {
+        "command": "kucode.openSessionLogs",
+        "title": "KuCode: セッション診断履歴 & AI レポートを開く（現在・過去・異常終了）"
+      },
+      {
         "command": "kucode.openLogs",
         "title": "KuCode: 起動・エラーログを開く"
       },
@@ -124,12 +128,16 @@
           "group": "z_kucode@1"
         },
         {
-          "command": "kucode.openLogs",
+          "command": "kucode.openSessionLogs",
           "group": "z_kucode@2"
         },
         {
-          "command": "kucode.openManager",
+          "command": "kucode.openLogs",
           "group": "z_kucode@3"
+        },
+        {
+          "command": "kucode.openManager",
+          "group": "z_kucode@4"
         }
       ],
       "terminal/context": [
@@ -148,12 +156,16 @@
           "group": "z_kucode@1"
         },
         {
-          "command": "kucode.openLogs",
+          "command": "kucode.openSessionLogs",
           "group": "z_kucode@2"
         },
         {
-          "command": "kucode.openManager",
+          "command": "kucode.openLogs",
           "group": "z_kucode@3"
+        },
+        {
+          "command": "kucode.openManager",
+          "group": "z_kucode@4"
         }
       ]
     },

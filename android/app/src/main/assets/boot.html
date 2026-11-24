@@ -13,6 +13,7 @@
       --muted: #9ca3af;
       --accent: #38bdf8;
       --ok: #34d399;
+      --warn: #fbbf24;
       --err: #f87171;
     }
     * { box-sizing: border-box; }
@@ -68,6 +69,18 @@
       flex-direction: column;
       gap: 12px;
     }
+    .alert-banner {
+      background: #1f0a0d;
+      border: 1px solid var(--err);
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 13.5px;
+    }
     .card-head {
       display: flex;
       justify-content: space-between;
@@ -92,8 +105,9 @@
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
+      align-items: center;
     }
-    button {
+    button, select {
       background: #141418;
       color: var(--text);
       border: 1px solid var(--border);
@@ -102,10 +116,18 @@
       font-size: 14px;
       cursor: pointer;
     }
-    button:hover { border-color: var(--accent); }
+    select {
+      max-width: 100%;
+    }
+    button:hover, select:hover { border-color: var(--accent); }
     button.primary {
       background: #082f49;
       border-color: var(--accent);
+    }
+    button.danger {
+      background: #3b0d13;
+      border-color: var(--err);
+      color: #fecaca;
     }
     button.ok {
       border-color: var(--ok);
@@ -130,7 +152,7 @@
       line-height: 1.45;
       white-space: pre-wrap;
       word-break: break-word;
-      max-height: 280px;
+      max-height: 300px;
       overflow: auto;
       user-select: text;
     }
@@ -148,7 +170,7 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 14px;
     }
-    input[type="text"]:focus {
+    input[type="text"]:focus, select:focus {
       outline: none;
       border-color: var(--accent);
     }
@@ -170,9 +192,40 @@
       <div class="actions">
         <button id="openEditorBtn" class="primary" disabled>エディタを開く</button>
         <button id="storageBtn">Android ストレージをマウント許可</button>
+        <button id="notifSettingsBtn">通知設定</button>
+        <button id="batterySettingsBtn">バッテリー最適化除外</button>
         <button id="restartBtn">サーバー再起動</button>
       </div>
       <div id="storageHint" class="hint"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <strong>セッション診断履歴 &amp; AI インプット出力（起動〜終了単位 / 正常・異常終了対応）</strong>
+          <div class="hint">アプリの起動から終了（正常終了・クラッシュ・ANR・メモリ不足強制終了）までを 1 セッションとして全標準出力・WebView・Logcat・メトリクスを自動記録します。Android「Files」の <b>KuCode Logs</b> や CLI <code>kucode-logs</code> からも取得できます。</div>
+        </div>
+        <div class="actions">
+          <button id="refreshSessionsBtn">履歴更新</button>
+        </div>
+      </div>
+      <div id="abnormalBanner" class="alert-banner">
+        <span id="abnormalText">前回のセッションが異常終了しました。</span>
+        <button id="openAbnormalBtn" class="danger">前回異常終了レポートを表示 &amp; コピー</button>
+      </div>
+      <div class="actions">
+        <select id="sessionSelect" aria-label="対象セッション選択"></select>
+        <select id="sessionFormatSelect" aria-label="出力形式選択">
+          <option value="ai">AI インプット用バンドル (Markdown)</option>
+          <option value="raw">統合タイムライン生ログ (Raw)</option>
+          <option value="json">構造化データ (JSON)</option>
+        </select>
+        <button id="loadSessionBtn" class="primary">表示する</button>
+        <button id="copySessionBtn" disabled>AI レポートをコピー</button>
+        <button id="exportSessionBtn">共有フォルダへ保存</button>
+      </div>
+      <div id="sessionExportStatus" class="hint"></div>
+      <pre id="sessionReportViewer">（セッションを選択して「表示する」を押すと、AI にそのまま渡せる診断バンドルを表示します）</pre>
     </section>
 
     <section class="card">
@@ -193,7 +246,7 @@
       <div class="card-head">
         <div>
           <strong>POSIX ミニターミナル（フォールバック / CLI 確認用）</strong>
-          <div class="hint">例: <code>ls -la /workspace</code> / <code>apt update &amp;&amp; apt install -y ca-certificates git gh</code> / <code>gh --version</code></div>
+          <div class="hint">例: <code>kucode-logs list</code> / <code>apt update &amp;&amp; apt install -y ca-certificates git gh</code> / <code>gh auth login</code></div>
         </div>
         <div class="actions">
           <button id="copyCliBtn">出力をコピー</button>
@@ -208,7 +261,7 @@
 
     <section class="card">
       <div class="card-head">
-        <strong>起動 / エラーログ</strong>
+        <strong>リアルタイム起動 / サーバー出力ログ</strong>
         <div class="actions">
           <button id="refreshLogsBtn">ログ更新</button>
           <button id="copyLogsBtn">ログをコピー</button>
@@ -245,8 +298,23 @@
     const progressBar = document.getElementById('progressBar');
     const openEditorBtn = document.getElementById('openEditorBtn');
     const storageBtn = document.getElementById('storageBtn');
+    const notifSettingsBtn = document.getElementById('notifSettingsBtn');
+    const batterySettingsBtn = document.getElementById('batterySettingsBtn');
     const restartBtn = document.getElementById('restartBtn');
     const storageHint = document.getElementById('storageHint');
+
+    const refreshSessionsBtn = document.getElementById('refreshSessionsBtn');
+    const abnormalBanner = document.getElementById('abnormalBanner');
+    const abnormalText = document.getElementById('abnormalText');
+    const openAbnormalBtn = document.getElementById('openAbnormalBtn');
+    const sessionSelect = document.getElementById('sessionSelect');
+    const sessionFormatSelect = document.getElementById('sessionFormatSelect');
+    const loadSessionBtn = document.getElementById('loadSessionBtn');
+    const copySessionBtn = document.getElementById('copySessionBtn');
+    const exportSessionBtn = document.getElementById('exportSessionBtn');
+    const sessionExportStatus = document.getElementById('sessionExportStatus');
+    const sessionReportViewer = document.getElementById('sessionReportViewer');
+
     const runDiagBtn = document.getElementById('runDiagBtn');
     const copyDiagBtn = document.getElementById('copyDiagBtn');
     const diagReport = document.getElementById('diagReport');
@@ -259,6 +327,9 @@
     const copyLogsBtn = document.getElementById('copyLogsBtn');
 
     let latestReportText = '';
+    let latestSessionBundleText = '';
+    let previousAbnormalId = '';
+    let autoCopyNextSessionLoad = false;
     let autoDiagTriggeredOnError = false;
 
     function copyText(text, btn, defaultLabel) {
@@ -273,13 +344,82 @@
         navigator.clipboard.writeText(text).catch(() => {});
         ok = true;
       }
-      btn.textContent = ok ? 'コピーしました' : 'コピー失敗';
-      if (ok) btn.classList.add('ok');
-      setTimeout(() => {
-        btn.textContent = defaultLabel;
-        btn.classList.remove('ok');
-      }, 1800);
+      if (btn) {
+        btn.textContent = ok ? 'コピーしました' : 'コピー失敗';
+        if (ok) btn.classList.add('ok');
+        setTimeout(() => {
+          btn.textContent = defaultLabel;
+          btn.classList.remove('ok');
+        }, 1800);
+      }
     }
+
+    function refreshSessions() {
+      if (!window.KuCodeHost || typeof window.KuCodeHost.listSessions !== 'function') return;
+      try {
+        const data = JSON.parse(window.KuCodeHost.listSessions() || '{}');
+        const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+        const previousSelection = sessionSelect.value;
+        sessionSelect.innerHTML = '';
+        previousAbnormalId = data.previousAbnormalSessionId || '';
+
+        if (previousAbnormalId) {
+          const abn = sessions.find((s) => s.sessionId === previousAbnormalId);
+          abnormalBanner.style.display = 'flex';
+          abnormalText.textContent = abn
+            ? '前回セッション (' + abn.sessionId + ') が異常終了しました: ' + abn.exitCategory + ' — ' + (abn.exitSummary || '')
+            : '前回セッションが異常終了しました (' + previousAbnormalId + ')';
+        } else {
+          abnormalBanner.style.display = 'none';
+        }
+
+        for (const s of sessions) {
+          const opt = document.createElement('option');
+          opt.value = s.sessionId;
+          const badge = s.isCurrentSession
+            ? '🟢 稼働中'
+            : s.status === 'ENDED_ABNORMALLY'
+              ? '🔴 異常終了(' + s.exitCategory + ')'
+              : '⚪ 正常終了(' + s.exitCategory + ')';
+          opt.textContent =
+            badge + ' | ' + s.sessionId + ' | ' + (s.durationHuman || '') +
+            ' | err=' + (s.errorCount || 0) + ' warn=' + (s.warnCount || 0);
+          sessionSelect.appendChild(opt);
+        }
+
+        if (previousSelection && Array.from(sessionSelect.options).some((o) => o.value === previousSelection)) {
+          sessionSelect.value = previousSelection;
+        }
+      } catch (err) {
+        sessionExportStatus.textContent = '履歴取得エラー: ' + err;
+      }
+    }
+
+    function requestSessionBundle(selector, format, autoCopy) {
+      if (!window.KuCodeHost || typeof window.KuCodeHost.loadSessionReport !== 'function') return;
+      autoCopyNextSessionLoad = Boolean(autoCopy);
+      loadSessionBtn.disabled = true;
+      copySessionBtn.disabled = true;
+      sessionReportViewer.textContent = 'セッション診断バンドルを生成中 (' + selector + ')...';
+      window.KuCodeHost.loadSessionReport(selector, format);
+    }
+
+    window.__onSessionReportLoaded = function(selector, format, content) {
+      latestSessionBundleText = content || '(empty)';
+      sessionReportViewer.textContent = latestSessionBundleText;
+      sessionReportViewer.scrollTop = 0;
+      loadSessionBtn.disabled = false;
+      copySessionBtn.disabled = false;
+      if (autoCopyNextSessionLoad) {
+        autoCopyNextSessionLoad = false;
+        copyText(latestSessionBundleText, copySessionBtn, 'AI レポートをコピー');
+      }
+    };
+
+    window.__onSessionExported = function(msg) {
+      sessionExportStatus.textContent = msg || '';
+      exportSessionBtn.disabled = false;
+    };
 
     function runDiagnostics() {
       if (!window.KuCodeHost || typeof window.KuCodeHost.startDiagnostics !== 'function') return;
@@ -294,6 +434,7 @@
       diagReport.textContent = latestReportText;
       copyDiagBtn.disabled = false;
       runDiagBtn.disabled = false;
+      refreshSessions();
     };
 
     window.__onCommandResult = function(cmd, res) {
@@ -311,7 +452,7 @@
 
       if (status.hasAllFilesAccess) {
         storageBtn.textContent = 'Android 全ストレージ許可済み (/android/sdcard)';
-        storageHint.textContent = 'POSIX の /workspace/android/sdcard から Android ストレージを直接読み書きできます。Android の Files アプリからは「KuCode」として /workspace が見えます。';
+        storageHint.textContent = 'POSIX の /workspace/android/sdcard から Android ストレージを直接読み書きできます。Android の Files アプリからは「KuCode」(/workspace) と「KuCode Logs」(診断履歴) が見えます。';
       } else {
         storageBtn.textContent = 'Android ストレージをマウント許可';
         storageHint.textContent = '未許可でも /workspace と /android/shared は利用できます。Documents 等を直接開く場合は許可後に「サーバー再起動」してください。';
@@ -343,10 +484,31 @@
 
     openEditorBtn.addEventListener('click', () => window.KuCodeHost?.openEditor());
     storageBtn.addEventListener('click', () => window.KuCodeHost?.requestAllFilesAccess());
+    notifSettingsBtn.addEventListener('click', () => window.KuCodeHost?.openNotificationSettings?.());
+    batterySettingsBtn.addEventListener('click', () => window.KuCodeHost?.openBatterySettings?.());
     restartBtn.addEventListener('click', () => {
       autoDiagTriggeredOnError = false;
       window.KuCodeHost?.restartServer();
     });
+
+    refreshSessionsBtn.addEventListener('click', refreshSessions);
+    loadSessionBtn.addEventListener('click', () => {
+      requestSessionBundle(sessionSelect.value || 'latest', sessionFormatSelect.value || 'ai', false);
+    });
+    openAbnormalBtn.addEventListener('click', () => {
+      if (!previousAbnormalId) return;
+      sessionSelect.value = previousAbnormalId;
+      sessionFormatSelect.value = 'ai';
+      requestSessionBundle(previousAbnormalId, 'ai', true);
+    });
+    copySessionBtn.addEventListener('click', () => copyText(latestSessionBundleText, copySessionBtn, 'AI レポートをコピー'));
+    exportSessionBtn.addEventListener('click', () => {
+      if (!window.KuCodeHost || typeof window.KuCodeHost.exportSessionReport !== 'function') return;
+      exportSessionBtn.disabled = true;
+      sessionExportStatus.textContent = '共有フォルダへ保存中...';
+      window.KuCodeHost.exportSessionReport(sessionSelect.value || 'latest');
+    });
+
     runDiagBtn.addEventListener('click', runDiagnostics);
     copyDiagBtn.addEventListener('click', () => copyText(latestReportText, copyDiagBtn, '結果をコピー'));
     refreshLogsBtn.addEventListener('click', refreshLogs);
@@ -393,6 +555,7 @@
       } catch (e) {
         statusMessage.textContent = 'ステータス取得エラー: ' + e;
       }
+      refreshSessions();
       setInterval(() => {
         if (document.hidden) return;
         try {

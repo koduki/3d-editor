@@ -17,23 +17,34 @@ internal object WorkspaceDocumentStore {
 
     const val ROOT_ID = "kucode_workspace"
     const val ROOT_DOC_ID = "workspace"
+    const val DIAGNOSTICS_ROOT_ID = "kucode_diagnostics"
+    const val DIAGNOSTICS_ROOT_DOC_ID = "diagnostics"
     const val MAX_SEARCH_RESULTS = 50
 
-    fun docIdForFile(baseDir: File, file: File): String {
+    fun docIdForFile(
+        baseDir: File,
+        file: File,
+        rootDocId: String = ROOT_DOC_ID,
+    ): String {
         val baseReal = baseDir.toPath().toRealPath()
         val normalized = normalizeWithinBase(baseReal, file.toPath())
-            ?: throw FileNotFoundException("Path outside workspace: $file")
-        if (normalized == baseReal) return ROOT_DOC_ID
+            ?: throw FileNotFoundException("Path outside $rootDocId: $file")
+        if (normalized == baseReal) return rootDocId
         val rel = baseReal.relativize(normalized).toString().replace(File.separatorChar, '/')
-        return "$ROOT_DOC_ID/$rel"
+        return "$rootDocId/$rel"
     }
 
-    fun fileForDocId(baseDir: File, docId: String): File {
+    fun fileForDocId(
+        baseDir: File,
+        docId: String,
+        rootDocId: String = ROOT_DOC_ID,
+        rootId: String = ROOT_ID,
+    ): File {
         val baseReal = baseDir.toPath().toRealPath()
         val candidate = when {
-            docId == ROOT_DOC_ID || docId == ROOT_ID -> baseReal
-            docId.startsWith("$ROOT_DOC_ID/") -> {
-                val rel = docId.removePrefix("$ROOT_DOC_ID/")
+            docId == rootDocId || docId == rootId -> baseReal
+            docId.startsWith("$rootDocId/") -> {
+                val rel = docId.removePrefix("$rootDocId/")
                 if (rel.isEmpty()) throw FileNotFoundException("Empty relative documentId: $docId")
                 baseReal.resolve(rel).normalize()
             }

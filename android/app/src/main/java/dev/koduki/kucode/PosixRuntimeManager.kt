@@ -1,7 +1,9 @@
 package dev.koduki.kucode
 
 import android.content.Context
+import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Uri
 import android.os.Environment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +23,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * - [OpenVsCodeLauncher]: PRoot server launch, seccomp retry, log redaction, and health check
  * - [PosixShellExecutor]: non-PTY POSIX shell execution fallback with timeout & cancellation
  * - [LocalDiagnosticsServer]: hardened loopback admin HTTP server for the built-in extension
+ * - [SessionTelemetryManager]: per-launch flight recorder & AI diagnostic bundle collector
  */
 class PosixRuntimeManager private constructor(private val appContext: Context) {
 
@@ -69,14 +72,36 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val onRequestStoragePermission: () -> Unit,
         val onCopyToClipboard: (String) -> Boolean,
         val onReadFromClipboard: () -> String? = { null },
+        val onOpenExternalUrl: ((String) -> Boolean)? = null,
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
+    private val telemetry = SessionTelemetryManager.getInstance(appContext)
 
     private val statusStore = RuntimeStatusStore(
         initialWorkspacePath = File(appContext.filesDir, "workspace").absolutePath,
     )
+
+    private fun appendUnifiedLog(rawLine: String) {
+        statusStore.appendLog(rawLine)
+        val trimmed = rawLine.trim()
+        if (trimmed.isEmpty()) return
+        val source = if (trimmed.startsWith("[runtime]") || trimmed.startsWith("[error]")) {
+            "runtime"
+        } else {
+            "openvscode.stdout"
+        }
+        val lower = trimmed.lowercase()
+        when {
+            trimmed.startsWith("[error]") || lower.contains("error:") || lower.startsWith("uncaught") ->
+                telemetry.error(source, trimmed)
+            trimmed.startsWith("[warn]") || lower.contains("warning:") ->
+                telemetry.warn(source, trimmed)
+            else ->
+                telemetry.info(source, trimmed)
+        }
+    }
 
     private val installer = RuntimeInstaller(
         openAsset = { path -> appContext.assets.open(path) },
@@ -87,7 +112,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 it.copy(state = State.EXTRACTING, message = message, progress = pct)
             }
         },
-        onLog = statusStore::appendLog,
+        onLog = ::appendUnifiedLog,
     )
 
     private val shellExecutor = PosixShellExecutor(
@@ -96,7 +121,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
     private val launcher = OpenVsCodeLauncher(
         scope = scope,
-        onLog = statusStore::appendLog,
+        onLog = ::appendUnifiedLog,
     )
 
     @Volatile
@@ -109,14 +134,72 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     private var hostActions: HostActions? = null
 
     private val diagnosticsServer = LocalDiagnosticsServer(
-        onRunDiagnostics = { DiagnosticsRunner.collect(appContext, this) },
+        onRunDiagnostics = {
+            telemetry.captureMetricSnapshot("diagnostics_run", includePss = true)
+            DiagnosticsRunner.collect(appContext, this)
+        },
         onGetLogs = { getLogsText() },
         onCopyToClipboard = { text -> hostActions?.onCopyToClipboard?.invoke(text) ?: false },
         onReadFromClipboard = { hostActions?.onReadFromClipboard?.invoke() },
+        onOpenExternalUrl = { url -> openExternalUrlViaHost(url) },
+        currentEditorPortProvider = { statusStore.currentState().port },
+        onListSessions = { telemetry.listSessionsJson() },
+        onGetSessionBundle = { selector, format ->
+            telemetry.store.renderSessionBundle(selector, format, getPaths().vscodeDataDir)
+        },
+        onRecordClientEvent = { level, source, message ->
+            when (level.uppercase()) {
+                "ERROR", "FATAL" -> telemetry.error(source, message)
+                "WARN", "WARNING" -> telemetry.warn(source, message)
+                else -> telemetry.info(source, message)
+            }
+        },
+        onAuditRequest = { method, path, statusCode, durationMs, detail ->
+            val note = if (detail.isNotEmpty()) " ($detail)" else ""
+            val msg = "$method $path -> $statusCode (${durationMs}ms)$note"
+            when {
+                statusCode >= 500 -> telemetry.error("host.api", msg)
+                statusCode >= 400 -> telemetry.warn("host.api", msg)
+                else -> telemetry.info("host.api", msg)
+            }
+        },
         onOpenBootPage = { hostActions?.onOpenBootPage?.invoke() },
         onRequestStoragePermission = { hostActions?.onRequestStoragePermission?.invoke() },
         onRestartServer = { restart() },
     )
+
+    init {
+        LogRedactor.registerSecret(diagnosticsServer.authToken)
+        telemetry.bindRuntimeProviders(
+            isServerAlive = ::isServerProcessAlive,
+            currentRuntimeState = { statusStore.currentState().state.name },
+        )
+    }
+
+    private fun openExternalUrlViaHost(rawUrl: String): Boolean {
+        val customOpener = hostActions?.onOpenExternalUrl
+        if (customOpener != null) {
+            return customOpener.invoke(rawUrl)
+        }
+        return runCatching {
+            val uri = Uri.parse(rawUrl)
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            appContext.startActivity(intent)
+            telemetry.recordExternalBrowserLaunch(rawUrl, "host.api.appContext", launched = true, detail = "NEW_TASK")
+            true
+        }.getOrElse { e ->
+            telemetry.recordExternalBrowserLaunch(
+                rawUrl,
+                "host.api.appContext",
+                launched = false,
+                detail = "${e.javaClass.simpleName}: ${e.message}",
+            )
+            false
+        }
+    }
 
     fun setStatusListener(listener: ((StatusSnapshot) -> Unit)?) {
         statusStore.setListener(listener)
@@ -135,6 +218,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val workspaceDir = File(appContext.filesDir, "workspace")
         val homeDir = File(appContext.filesDir, "home")
         val nativeLibDir = File(appContext.applicationInfo.nativeLibraryDir)
+        val diagnosticsDir = File(appContext.filesDir, "diagnostics")
         val sharedDir = appContext.getExternalFilesDir("shared")
             ?: File(appContext.filesDir, "shared")
 
@@ -151,6 +235,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             nativeLibDir = nativeLibDir,
             androidSharedDir = sharedDir,
             androidSdcardDir = sdcardDir,
+            diagnosticsDir = diagnosticsDir,
         )
     }
 
@@ -177,6 +262,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     }
 
     fun startIfNeeded() {
+        telemetry.ensureSessionActive("start_if_needed")
         scope.launch {
             lifecycleMutex.withLock {
                 if (statusStore.currentState().state == State.READY && isServerProcessAlive()) {
@@ -190,6 +276,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     }
 
     fun restart() {
+        telemetry.info("runtime", "Manual server restart requested")
         scope.launch {
             lifecycleMutex.withLock {
                 stopInternal(emitIdleStatus = true)
@@ -210,12 +297,40 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         command: String,
         timeoutSeconds: Long = 120,
         forceNoSeccomp: Boolean? = null,
-    ): CommandResult = shellExecutor.execute(
-        paths = getPaths(),
-        command = command,
-        timeoutSeconds = timeoutSeconds,
-        disableSeccomp = forceNoSeccomp ?: disableSeccomp,
-    )
+        recordTelemetry: Boolean = false,
+    ): CommandResult {
+        val adminPort = runCatching { diagnosticsServer.start() }.getOrDefault(0)
+        val extraEnv = if (adminPort > 0) {
+            mapOf(
+                "KUCODE_ADMIN_PORT" to adminPort.toString(),
+                "KUCODE_ADMIN_TOKEN" to diagnosticsServer.authToken,
+                "BROWSER" to "/usr/local/bin/kucode-open",
+                "GH_BROWSER" to "/usr/local/bin/kucode-open",
+            )
+        } else {
+            emptyMap()
+        }
+        val t0 = System.currentTimeMillis()
+        val result = shellExecutor.execute(
+            paths = getPaths(),
+            command = command,
+            timeoutSeconds = timeoutSeconds,
+            disableSeccomp = forceNoSeccomp ?: disableSeccomp,
+            extraEnv = extraEnv,
+        )
+        if (recordTelemetry) {
+            val elapsed = System.currentTimeMillis() - t0
+            val preview = result.output.trim().take(500)
+            val msg = "CLI command (exit=${result.exitCode}, ${elapsed}ms): $command" +
+                if (preview.isNotEmpty()) "\n$preview" else ""
+            if (result.exitCode == 0) {
+                telemetry.info("posix.cli", msg)
+            } else {
+                telemetry.warn("posix.cli", msg)
+            }
+        }
+        return result
+    }
 
     internal fun editorAccessVerified(): Boolean {
         val current = statusStore.currentState()
@@ -233,7 +348,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             )
         }
         if (!prootReady) {
-            statusStore.update(hasAllFilesAccess()) {
+            val snap = statusStore.update(hasAllFilesAccess()) {
                 it.copy(
                     state = State.ERROR,
                     message = "PRoot バイナリが見つかりません (${paths.nativeLibDir.absolutePath})",
@@ -242,7 +357,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     editorToken = null,
                 )
             }
-            statusStore.appendLog("[error] Missing libproot.so or libproot-loader.so in ${paths.nativeLibDir}")
+            telemetry.updateRuntimeSnapshot(snap, adminPort = diagnosticsServer.port, disableSeccomp = disableSeccomp)
+            appendUnifiedLog("[error] Missing libproot.so or libproot-loader.so in ${paths.nativeLibDir}")
             return
         }
 
@@ -260,7 +376,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 initialDisableSeccomp = disableSeccomp,
                 allowSeccompRetry = true,
                 onStarting = { port ->
-                    statusStore.update(hasAllFilesAccess()) {
+                    val snap = statusStore.update(hasAllFilesAccess()) {
                         it.copy(
                             state = State.STARTING,
                             message = "内蔵 openvscode-server を起動中 (127.0.0.1:$port)...",
@@ -269,12 +385,13 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                             editorToken = null,
                         )
                     }
+                    telemetry.updateRuntimeSnapshot(snap, adminPort = adminPort, disableSeccomp = disableSeccomp)
                 },
                 onProcessCreated = { proc -> serverProcess = proc },
                 onUnexpectedExit = { proc, code ->
                     if (serverProcess === proc && statusStore.currentState().state == State.READY) {
                         serverProcess = null
-                        statusStore.update(hasAllFilesAccess()) {
+                        val snap = statusStore.update(hasAllFilesAccess()) {
                             it.copy(
                                 state = State.ERROR,
                                 message = "サーバーが終了しました (exit=$code)",
@@ -283,6 +400,10 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                                 editorToken = null,
                             )
                         }
+                        telemetry.error("runtime", "openvscode-server exited unexpectedly while READY (exit=$code)")
+                        telemetry.harvestOpenVsCodeLogsNow()
+                        telemetry.updateRuntimeSnapshot(snap, adminPort = diagnosticsServer.port, disableSeccomp = disableSeccomp)
+                        telemetry.captureMetricSnapshotAsync("server_unexpected_exit_$code", includePss = true)
                     }
                 },
             )
@@ -291,8 +412,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 is OpenVsCodeLauncher.LaunchResult.Ready -> {
                     disableSeccomp = result.disableSeccomp
                     serverProcess = result.process
+                    LogRedactor.registerSecret(result.token)
                     installer.commitInstallation(paths)
-                    statusStore.update(hasAllFilesAccess()) {
+                    val snap = statusStore.update(hasAllFilesAccess()) {
                         it.copy(
                             state = State.READY,
                             message = "起動完了 (127.0.0.1:${result.port})",
@@ -301,7 +423,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                             editorToken = result.token,
                         )
                     }
-                    statusStore.appendLog("[runtime] openvscode-server is READY at http://127.0.0.1:${result.port}")
+                    appendUnifiedLog("[runtime] openvscode-server is READY at http://127.0.0.1:${result.port}")
+                    telemetry.updateRuntimeSnapshot(snap, adminPort = adminPort, disableSeccomp = disableSeccomp)
+                    telemetry.captureMetricSnapshotAsync("server_ready", includePss = true)
                 }
 
                 is OpenVsCodeLauncher.LaunchResult.Failed -> {
@@ -309,8 +433,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     if (stagedNewInstall) {
                         runCatching { installer.rollbackInstallation(paths) }
                     }
+                    telemetry.harvestOpenVsCodeLogsNow()
                     stopInternal(emitIdleStatus = false)
-                    statusStore.update(hasAllFilesAccess()) {
+                    val snap = statusStore.update(hasAllFilesAccess()) {
                         it.copy(
                             state = State.ERROR,
                             message = "openvscode-server の起動に失敗しました (exit=${result.exitCode})",
@@ -319,6 +444,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                             editorToken = null,
                         )
                     }
+                    telemetry.error("runtime", "openvscode-server failed to start (exit=${result.exitCode}, disableSeccomp=$disableSeccomp)")
+                    telemetry.updateRuntimeSnapshot(snap, adminPort = diagnosticsServer.port, disableSeccomp = disableSeccomp)
+                    telemetry.captureMetricSnapshotAsync("server_launch_failed", includePss = true)
                 }
 
                 is OpenVsCodeLauncher.LaunchResult.TimedOut -> {
@@ -326,8 +454,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     if (stagedNewInstall) {
                         runCatching { installer.rollbackInstallation(paths) }
                     }
+                    telemetry.harvestOpenVsCodeLogsNow()
                     stopInternal(emitIdleStatus = false)
-                    statusStore.update(hasAllFilesAccess()) {
+                    val snap = statusStore.update(hasAllFilesAccess()) {
                         it.copy(
                             state = State.ERROR,
                             message = "openvscode-server 応答タイムアウト (${result.timeoutMs / 1000}s)",
@@ -336,6 +465,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                             editorToken = null,
                         )
                     }
+                    telemetry.error("runtime", "openvscode-server startup timed out after ${result.timeoutMs}ms")
+                    telemetry.updateRuntimeSnapshot(snap, adminPort = diagnosticsServer.port, disableSeccomp = disableSeccomp)
+                    telemetry.captureMetricSnapshotAsync("server_launch_timeout", includePss = true)
                 }
             }
         } catch (cancel: CancellationException) {
@@ -350,8 +482,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             }
             val lastProgress = statusStore.currentState().progress
             stopInternal(emitIdleStatus = false)
-            statusStore.appendLog("[error] Startup failed: ${e.stackTraceToString()}")
-            statusStore.update(hasAllFilesAccess()) {
+            appendUnifiedLog("[error] Startup failed: ${e.stackTraceToString()}")
+            val snap = statusStore.update(hasAllFilesAccess()) {
                 it.copy(
                     state = State.ERROR,
                     message = "起動失敗: ${e.message}",
@@ -360,18 +492,23 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     editorToken = null,
                 )
             }
+            telemetry.updateRuntimeSnapshot(snap, adminPort = diagnosticsServer.port, disableSeccomp = disableSeccomp)
+            telemetry.captureMetricSnapshotAsync("startup_exception", includePss = true)
         }
     }
 
     private fun stopInternal(emitIdleStatus: Boolean) {
         val proc = serverProcess
         serverProcess = null
+        if (proc != null) {
+            runCatching { telemetry.harvestOpenVsCodeLogsNow() }
+        }
         if (proc != null && proc.isAlive) {
-            statusStore.appendLog("[runtime] Stopping openvscode-server...")
+            appendUnifiedLog("[runtime] Stopping openvscode-server...")
             terminateServer(proc)
         }
         diagnosticsServer.stop()
-        statusStore.update(hasAllFilesAccess(), notify = emitIdleStatus) {
+        val snap = statusStore.update(hasAllFilesAccess(), notify = emitIdleStatus) {
             it.copy(
                 state = State.IDLE,
                 message = "停止しました",
@@ -380,6 +517,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 editorToken = null,
             )
         }
+        telemetry.updateRuntimeSnapshot(snap, adminPort = 0, disableSeccomp = disableSeccomp)
     }
 
     private fun isServerProcessAlive(): Boolean = serverProcess?.isAlive == true

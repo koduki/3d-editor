@@ -9,18 +9,23 @@ import kotlinx.coroutines.launch
 
 /**
  * Minimal, strictly non-blocking JS bridge exposed ONLY on `boot.html`
- * (removed before navigating to openvscode-server).
- * Long-running operations (diagnostics, fallback POSIX CLI) run on Dispatchers.IO
- * and report back via callbacks so WebView's JavaBridge thread never blocks or ANRs.
+ * (never attached to the editor WebView).
+ * Long-running operations (diagnostics, session report rendering/export, fallback POSIX CLI)
+ * run on [Dispatchers.IO] and report back via callbacks so WebView's JavaBridge thread never ANRs.
  */
 class BootHostBridge(
     private val context: Context,
     private val runtimeManager: PosixRuntimeManager,
+    private val telemetryManager: SessionTelemetryManager = SessionTelemetryManager.getInstance(context),
     private val onOpenEditor: () -> Unit,
     private val onRequestAllFilesAccess: () -> Unit,
+    private val onOpenNotificationSettings: () -> Unit = {},
+    private val onOpenBatterySettings: () -> Unit = {},
     private val onCopyToClipboard: (text: String) -> Boolean,
     private val onDiagnosticsCompleted: (reportText: String) -> Unit,
     private val onCommandCompleted: (command: String, resultJson: String) -> Unit,
+    private val onSessionReportLoaded: (selector: String, format: String, content: String) -> Unit = { _, _, _ -> },
+    private val onSessionExported: (message: String) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -51,7 +56,56 @@ class BootHostBridge(
     }
 
     @JavascriptInterface
+    fun openNotificationSettings() {
+        onOpenNotificationSettings()
+    }
+
+    @JavascriptInterface
+    fun openBatterySettings() {
+        onOpenBatterySettings()
+    }
+
+    @JavascriptInterface
     fun copyToClipboard(text: String): Boolean = onCopyToClipboard(text)
+
+    @JavascriptInterface
+    fun listSessions(): String = telemetryManager.listSessionsJson()
+
+    @JavascriptInterface
+    fun loadSessionReport(selector: String, format: String) {
+        val safeSelector = selector.trim().ifEmpty { "latest" }
+        val safeFormat = format.trim().ifEmpty { "ai" }
+        scope.launch {
+            val content = try {
+                telemetryManager.renderSessionBundle(safeSelector, safeFormat)
+            } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
+                throw cancel
+            } catch (e: Exception) {
+                "Session report error: ${e.message}"
+            }
+            onSessionReportLoaded(safeSelector, safeFormat, content)
+        }
+    }
+
+    @JavascriptInterface
+    fun exportSessionReport(selector: String) {
+        val safeSelector = selector.trim().ifEmpty { "latest" }
+        scope.launch {
+            val msg = try {
+                val file = telemetryManager.exportSessionToShared(safeSelector)
+                if (file != null) {
+                    "保存しました: ${file.absolutePath}"
+                } else {
+                    "保存失敗: セッションが見つかりません ($safeSelector)"
+                }
+            } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
+                throw cancel
+            } catch (e: Exception) {
+                "保存エラー: ${e.message}"
+            }
+            onSessionExported(msg)
+        }
+    }
 
     @JavascriptInterface
     fun startDiagnostics() {
@@ -89,7 +143,7 @@ class BootHostBridge(
         }
         scope.launch {
             val resultJson = try {
-                runtimeManager.runShellCommand(trimmed).toJsonString()
+                runtimeManager.runShellCommand(trimmed, recordTelemetry = true).toJsonString()
             } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
                 throw cancel
             } catch (e: Exception) {

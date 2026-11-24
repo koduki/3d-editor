@@ -69,7 +69,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
 
 ## 3. ディレクトリ構成
 
-設計判断の背景・代替案・トレードオフは [`docs/adr/`](docs/adr/README.md)（ADR-0001〜0009）を参照。
+設計判断の背景・代替案・トレードオフは [`docs/adr/`](docs/adr/README.md)（ADR-0001〜0010）を参照。
 
 ```text
 .
@@ -78,7 +78,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
 ├── LICENSE
 ├── THIRD_PARTY_NOTICES.md
 ├── LICENSES/                             # 同梱 OSS ライセンス全文（ビルド時に APK へ自動同期）
-├── docs/adr/                             # Architecture Decision Records (ADR-0001〜0009)
+├── docs/adr/                             # Architecture Decision Records (ADR-0001〜0010)
 ├── .github/workflows/ci.yml              # NDK proot + Debian rootfs + openvscode-server 同梱 APK ビルド
 ├── scripts/
 │   ├── build-proot-android.sh            # Android NDK で libproot.so / libproot-loader.so をビルド（SHA-256 検証付き）
@@ -101,6 +101,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
             │   │   └── runtime/          # CI/スクリプトで .tgz & debian-manifest.txt を配置
             │   ├── jniLibs/arm64-v8a/    # CI/スクリプトで libproot*.so を配置
             │   └── java/dev/koduki/kucode/
+            │       ├── KuCodeApplication.kt
             │       ├── MainActivity.kt
             │       ├── PosixRuntimeConfig.kt
             │       ├── PosixRuntimeManager.kt
@@ -116,6 +117,9 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
             │       ├── VsCodeExtensionAsset.kt
             │       ├── LocalDiagnosticsServer.kt
             │       ├── DiagnosticsRunner.kt
+            │       ├── SessionTelemetryManager.kt
+            │       ├── SessionLogStore.kt
+            │       ├── LogRedactor.kt
             │       ├── HardwareShortcutRouter.kt
             │       ├── BootHostBridge.kt
             │       └── ServerKeepAliveService.kt

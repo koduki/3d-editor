@@ -44,6 +44,7 @@ object DiagnosticsRunner {
         val deviceInfo: Map<String, String>,
         val checks: List<CheckItem>,
         val recentLogs: String,
+        val sessionSummaryText: String = "",
     )
 
     fun formatMarkdownReport(input: ReportInput): String {
@@ -72,14 +73,21 @@ object DiagnosticsRunner {
 
         sb.appendLine("### XR での手動確認（自動集計外）")
         sb.appendLine("- 日本語入力中に Enter で変換を確定し、余分な改行が入らないことを確認する。")
-        sb.appendLine("- 隣のプレビューから戻り、最初のキー入力が元のエディタに届くことを確認する。")
+        sb.appendLine("- 隣のプレビューや `gh auth` ブラウザから戻り、最初のキー入力が元のエディタに届くことを確認する。")
         sb.appendLine("- 管理画面を往復し、未保存の文字、カーソル位置、ターミナルセッションを確認する。")
         sb.appendLine()
         sb.appendLine("## 3. 直近のサーバー / エラーログ")
         sb.appendLine("```text")
-        val trimmedLogs = input.recentLogs.trim()
+        val trimmedLogs = LogRedactor.redact(input.recentLogs.trim())
         sb.appendLine(if (trimmedLogs.isEmpty()) "(no logs)" else trimmedLogs)
         sb.appendLine("```")
+        if (input.sessionSummaryText.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine("## 4. セッション診断履歴 (Flight Recorder / AI インプット)")
+            sb.appendLine("```text")
+            sb.appendLine(input.sessionSummaryText.trim())
+            sb.appendLine("```")
+        }
         return sb.toString()
     }
 
@@ -88,6 +96,10 @@ object DiagnosticsRunner {
             val paths = runtime.getPaths()
             val status = runtime.getStatus()
             val systemDns = runtime.querySystemDnsServers()
+            val telemetry = SessionTelemetryManager.getInstance(context)
+            val sessions = telemetry.listSessionSummaries()
+            val currentSession = sessions.firstOrNull { it.isCurrentSession }
+            val previousSession = sessions.firstOrNull { !it.isCurrentSession }
 
             val deviceInfo = linkedMapOf<String, String>()
             deviceInfo["Device"] = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})"
@@ -109,8 +121,15 @@ object DiagnosticsRunner {
             deviceInfo["Free Disk (filesDir)"] = "${context.filesDir.usableSpace / (1024 * 1024)} MB"
             deviceInfo["Memory"] = queryMemorySummary(context)
             deviceInfo["Runtime State"] = "${status.state} (port=${status.port}, msg=${status.message})"
+            deviceInfo["Current Session"] = currentSession?.let {
+                "${it.sessionId} (pid=${it.pid}, events=${it.totalEvents}, err=${it.errorCount}, warn=${it.warnCount})"
+            } ?: "(none)"
+            deviceInfo["Previous Session"] = previousSession?.let {
+                "${it.sessionId} [${it.status}/${it.exitCategory}: ${it.exitSummary}]"
+            } ?: "(none)"
             deviceInfo["Workspace Path"] = paths.workspaceDir.absolutePath
             deviceInfo["Home Path (/root)"] = paths.homeDir.absolutePath
+            deviceInfo["Diagnostics Path (/var/log/kucode)"] = paths.diagnosticsDir.absolutePath
             deviceInfo["NativeLibDir"] = paths.nativeLibDir.absolutePath
 
             val checks = mutableListOf<CheckItem>()
@@ -154,16 +173,22 @@ object DiagnosticsRunner {
                     }
                     val homeTask = async { checkBindMount(runtime, paths.homeDir, "/root") }
                     val sharedTask = async { checkBindMount(runtime, paths.androidSharedDir, "/workspace/android/shared") }
+                    val diagMountTask = async { checkBindMount(runtime, paths.diagnosticsDir, PosixRuntimeConfig.GUEST_DIAGNOSTICS_DIR) }
+                    val sdcardTask = paths.androidSdcardDir?.takeIf { it.isDirectory && it.canWrite() }?.let { sdDir ->
+                        async { checkBindMount(runtime, sdDir, "/workspace/android/sdcard") }
+                    }
                     val networkTasks = networkChecks().map { (name, command) ->
                         async { runTimedCommand(name, runtime, command, timeoutSeconds = 15) }
                     }
-                    listOf(
+                    listOfNotNull(
                         documentsTask.await(),
                         nodeTask.await(),
                         ptyTask.await(),
                         watcherTask.await(),
                         homeTask.await(),
                         sharedTask.await(),
+                        diagMountTask.await(),
+                        sdcardTask?.await(),
                     ) + networkTasks.awaitAll()
                 }
                 checks.addAll(parallelChecks)
@@ -179,6 +204,14 @@ object DiagnosticsRunner {
                 .takeLast(80)
                 .joinToString("\n")
 
+            val sessionListDigest = buildString {
+                appendLine("Stored Sessions: ${sessions.size} (CLI: `kucode-logs list` / `kucode-logs show prev`)")
+                for (s in sessions.take(5)) {
+                    val tag = if (s.isCurrentSession) "CURRENT" else s.status.name
+                    appendLine("- ${s.sessionId} [$tag / ${s.exitCategory}] dur=${SessionLogStore.formatDurationHuman(s.durationMs)} err=${s.errorCount} warn=${s.warnCount} (${s.exitSummary})")
+                }
+            }
+
             val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
                 timeZone = TimeZone.getTimeZone("UTC")
             }
@@ -189,6 +222,7 @@ object DiagnosticsRunner {
                     deviceInfo = deviceInfo,
                     checks = checks,
                     recentLogs = tailLogs,
+                    sessionSummaryText = sessionListDigest,
                 ),
             )
         }
