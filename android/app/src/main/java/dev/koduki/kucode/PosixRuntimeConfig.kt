@@ -11,7 +11,7 @@ import java.io.File
  */
 object PosixRuntimeConfig {
 
-    const val RUNTIME_VERSION = "0.7.0-debian12-openvscode-1.109.5"
+    const val RUNTIME_VERSION = "0.8.0-debian12-openvscode-1.109.5"
     const val ASSET_ROOTFS = "runtime/debian-arm64-rootfs.tgz"
     const val ASSET_OPENVSCODE = "runtime/openvscode-server-linux-arm64.tgz"
 

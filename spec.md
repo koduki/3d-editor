@@ -1,7 +1,7 @@
 # KuCode 仕様書 (spec.md)
 
 - **Product:** KuCode（くうこーど / *"koo-code"*）— *空間に、書く。*
-- **Version:** 0.7.0
+- **Version:** 0.8.0
 - **Date:** 2026-11-23
 - **Status:** Active
 
