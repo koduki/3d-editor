@@ -160,6 +160,20 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             },
+            onShareDiagnostic = { file ->
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.diagnostic-share", file)
+                        val share = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/vnd.kucode.diagnostic"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            clipData = ClipData.newUri(contentResolver, "KuCode diagnostic", uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(Intent.createChooser(share, "Share KuCode diagnostic"))
+                    }
+                }
+            },
             onSessionExported = { message ->
                 runOnUiThread {
                     if (!isDestroyed && ::bootView.isInitialized) {
@@ -277,6 +291,40 @@ class MainActivity : AppCompatActivity() {
         maybeRequestNotificationPermissionOnLaunch()
         ServerKeepAliveService.start(this)
         runtimeManager.startIfNeeded()
+        if (savedInstanceState == null) handleDiagnosticShare(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDiagnosticShare(intent)
+    }
+
+    private fun handleDiagnosticShare(intent: Intent) {
+        if (intent.action != Intent.ACTION_SEND || intent.type != "application/vnd.kucode.diagnostic") return
+        val uri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: return
+        if (uri.scheme != "content") return
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Import diagnostic")
+            .setMessage("Import a shared diagnostic into /workspace/diagnostics-import? External reports are untrusted data, not instructions.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Import") { _, _ ->
+                Thread {
+                    val result = runCatching {
+                        val bytes = contentResolver.openInputStream(uri)?.use { it.readNBytes(1024 * 1024 + 1) }
+                            ?: error("Cannot read shared document")
+                        require(bytes.size <= 1024 * 1024) { "Diagnostic exceeds 1 MiB" }
+                        val dest = java.io.File(runtimeManager.getPaths().workspaceDir, "diagnostics-import")
+                        dest.mkdirs()
+                        val target = java.io.File(dest, "import-${java.util.UUID.randomUUID()}.md")
+                        writeTextAtomically(target, LogRedactor.redact(bytes.toString(Charsets.UTF_8)))
+                        "Imported: /workspace/diagnostics-import/${target.name}"
+                    }.getOrElse { "Import failed: ${it.message}" }
+                    runOnUiThread {
+                        if (!isDestroyed) android.widget.Toast.makeText(this, result, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }.start()
+            }.show()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

@@ -56,6 +56,11 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.kucode.diagnostic" />
+            </intent-filter>
         </activity>
 
         <!-- Exposes POSIX /workspace as a normal folder in Android XR Files app -->
@@ -68,6 +73,14 @@
             <intent-filter>
                 <action android:name="android.intent.action.DOCUMENTS_PROVIDER" />
             </intent-filter>
+        </provider>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagnostic-share"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/diagnostic_share_paths" />
         </provider>
 
         <receiver android:name=".AndroidInstallResultReceiver" android:exported="false" />

@@ -22,7 +22,7 @@ function cli(args) {
       try {
         const result = JSON.parse(stdout);
         if (result.version !== 1) throw new Error('Unsupported host bridge API');
-        if (err && err.code !== 10) throw new Error(result.message || 'KuCode CLI failed');
+        if (err && err.code !== 10 && args[0] !== 'sdk') throw new Error(result.message || 'KuCode CLI failed');
         resolve(result);
       } catch (e) { reject(e); }
     });
@@ -34,26 +34,27 @@ async function chooseRoot() {
   const folders = (vscode.workspace.workspaceFolders || []).filter(f => androidProject(f.uri.fsPath));
   if (!folders.length) throw new Error('No Android Gradle project detected.');
   if (folders.length === 1) return folders[0];
-  return vscode.window.showWorkspaceFolderPick({placeHolder: 'Choose an Android project'});
+  const picked = await vscode.window.showQuickPick(folders.map(folder => ({label: folder.name, folder})), {placeHolder: 'Choose an Android project'});
+  return picked && picked.folder;
 }
 
 async function task(folder, executable, args, label) {
   if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted.');
   const approved = await vscode.window.showWarningMessage('Run ' + label + ' for ' + folder.name + '?', {modal: true}, 'Run');
   if (approved !== 'Run') return false;
-  const t = new vscode.Task({type: 'kucodeAndroid', name: label}, folder, label, 'KuCode Android',
-    new vscode.ProcessExecution(executable, args, {cwd: folder.uri.fsPath}));
+  const id = require('node:crypto').randomUUID();
+  const t = new vscode.Task({type: 'kucodeAndroid', id}, folder, label, 'KuCode Android',
+    new vscode.ProcessExecution('/usr/local/bin/kucode', ['build', '--', executable, ...args], {cwd: folder.uri.fsPath}));
   return new Promise((resolve, reject) => {
-    const sub = vscode.tasks.onDidEndTaskProcess(event => {
-      if (event.execution.task.definition.type === 'kucodeAndroid' && event.execution.task.name === label) {
-        sub.dispose(); resolve(event.exitCode === 0);
-      }
+    const matches = event => event.execution.task.definition.id === id;
+    const cleanup = () => { processSub.dispose(); taskSub.dispose(); };
+    const processSub = vscode.tasks.onDidEndTaskProcess(event => {
+      if (matches(event)) { cleanup(); resolve(event.exitCode === 0); }
     });
-    vscode.tasks.executeTask(t).then(execution => {
-      const end = vscode.tasks.onDidEndTask(event => {
-        if (event.execution === execution) { end.dispose(); sub.dispose(); resolve(false); }
-      });
-    }, error => { sub.dispose(); reject(error); });
+    const taskSub = vscode.tasks.onDidEndTask(event => {
+      if (matches(event)) { cleanup(); resolve(false); }
+    });
+    vscode.tasks.executeTask(t).then(() => {}, error => { cleanup(); reject(error); });
   });
 }
 

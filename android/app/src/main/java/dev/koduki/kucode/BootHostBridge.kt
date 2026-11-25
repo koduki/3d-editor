@@ -27,6 +27,7 @@ class BootHostBridge(
     private val onCommandCompleted: (command: String, resultJson: String) -> Unit,
     private val onSessionReportLoaded: (selector: String, format: String, content: String) -> Unit = { _, _, _ -> },
     private val onSessionExported: (message: String) -> Unit = {},
+    private val onShareDiagnostic: (java.io.File) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -55,6 +56,12 @@ class BootHostBridge(
     fun resetDebian() {
         ServerKeepAliveService.start(context)
         runtimeManager.archiveAndResetDebian()
+    }
+
+    @JavascriptInterface
+    fun restoreDebian() {
+        ServerKeepAliveService.start(context)
+        runtimeManager.archiveAndResetDebian(restoreLatest = true)
     }
 
     @JavascriptInterface
@@ -116,6 +123,26 @@ class BootHostBridge(
                 "保存エラー: ${e.message}"
             }
             onSessionExported(msg)
+        }
+    }
+
+    @JavascriptInterface
+    fun shareDiagnostic(selector: String) {
+        scope.launch {
+            try {
+                val report = telemetryManager.renderSessionBundle(selector.trim().ifEmpty { "latest" }, "ai")
+                val dir = java.io.File(context.cacheDir, "diagnostic-share").apply { mkdirs() }
+                // Limit retained export files; file names contain no user input.
+                dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(3)?.forEach { it.delete() }
+                val file = java.io.File.createTempFile("diagnostic-", ".md", dir)
+                val bytes = LogRedactor.redact(report).toByteArray(Charsets.UTF_8)
+                file.writeBytes(bytes.copyOfRange(0, bytes.size.coerceAtMost(1024 * 1024)))
+                onShareDiagnostic(file)
+            } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
+                throw cancel
+            } catch (e: Exception) {
+                onSessionExported("Diagnostic export failed: ${e.message}")
+            }
         }
     }
 

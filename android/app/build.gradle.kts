@@ -3,6 +3,14 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val buildSha = providers.environmentVariable("KUCODE_BUILD_SHA")
+    .orElse(providers.environmentVariable("GITHUB_SHA"))
+    .orElse(providers.exec {
+        workingDir(rootProject.projectDir.parentFile)
+        commandLine("git", "rev-parse", "HEAD")
+        isIgnoreExitValue = true
+    }.standardOutput.asText.map { it.trim().ifEmpty { "unknown" } })
+
 android {
     namespace = "dev.koduki.kucode"
     compileSdk = 36
@@ -13,6 +21,7 @@ android {
         targetSdk = 35
         versionCode = 10
         versionName = "0.9.1"
+        resValue("string", "kucode_build_sha", buildSha.get())
 
         ndk {
             abiFilters += listOf("arm64-v8a")

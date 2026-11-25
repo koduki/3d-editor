@@ -79,6 +79,8 @@ class RuntimeInstallerTest {
             assertEquals("v1", archived.resolve(".kucode-runtime-version").readText())
             assertFalse(paths.rootfsDir.exists())
             assertTrue(paths.openvscodeDir.exists())
+            assertEquals(archived, installer.restoreLatestDebianBackup(paths))
+            assertEquals("v1", paths.versionMarker.readText())
         } finally {
             deleteTreeNoFollow(base)
         }

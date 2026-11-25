@@ -27,3 +27,18 @@ All five files are verified by size and SHA-256 before staging; ELF AArch64 and 
 `--source-dir` can use a trusted local producer output with the exact same checks. `verify` checks an existing checkout. Never treat a lock generated from untrusted binaries as an independent integrity check.
 
 Current status: release asset publication and a reviewed concrete lock still need a successful producer release; current historical APK releases do not expose the five standalone assets. Actual AURA build is NOT RUN. No new SDK version is claimed compatible.
+
+## Bootstrap and committed lock
+
+The main CI can bootstrap an independent runtime-only prerelease when the reviewed
+lock does not yet exist. It publishes a version tied to the producer commit without
+overwriting any existing release assets (not a new application release). The small
+`kucode-runtime-lock` workflow artifact contains the candidate lock. Review the
+producer commit, pinned script hashes, NDK selection, Debian manifest and OpenVSCode
+hash before committing the lock to source. On later builds with a committed lock,
+CI uses the same remote fetch path as AURA and skips Docker/NDK generation.
+Gradle performs an additional mandatory verification before APK assets/native libs
+are merged. A generated but unreviewed lock is not itself a trust anchor.
+
+When using an explicitly reviewed alternate lock, point Gradle to the same lock with
+`KUCODE_RUNTIME_LOCK=/absolute/path/to/runtime-assets.lock.json`. Do not mix lock sets.

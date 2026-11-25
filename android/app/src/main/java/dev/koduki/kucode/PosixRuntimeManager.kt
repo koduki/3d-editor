@@ -303,14 +303,19 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
     }
 
-    fun archiveAndResetDebian() {
+    fun archiveAndResetDebian(restoreLatest: Boolean = false) {
         scope.launch {
             lifecycleMutex.withLock reset@{
                 shellMutex.withLock {
                     stopInternal(emitIdleStatus = true)
                     try {
-                        installer.archiveDebianForReset(getPaths())?.let {
-                            appendUnifiedLog("[runtime] Debian preserved as ${it.name} before explicit reset.")
+                        if (restoreLatest) {
+                            val restored = installer.restoreLatestDebianBackup(getPaths())
+                            appendUnifiedLog("[runtime] Restored Debian backup: ${restored?.name ?: "none available"}")
+                        } else {
+                            installer.archiveDebianForReset(getPaths())?.let {
+                                appendUnifiedLog("[runtime] Debian preserved as ${it.name} before explicit reset.")
+                            }
                         }
                     } catch (e: Exception) {
                         appendUnifiedLog("[error] Debian reset failed: ${e.message}")

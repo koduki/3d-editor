@@ -3,6 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const {spawn} = require('node:child_process');
 
 function request(method, route, body) {
   const port = Number(process.env.KUCODE_ADMIN_PORT);
@@ -38,27 +39,75 @@ function request(method, route, body) {
   });
 }
 
+function inspectTool(candidate) {
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    if (!fs.statSync(candidate).isFile()) return null;
+    const real = fs.realpathSync(candidate);
+    const fd = fs.openSync(real, 'r');
+    let abi = 'script-or-unknown';
+    try {
+      const header = Buffer.alloc(20);
+      if (fs.readSync(fd, header, 0, 20, 0) === 20 && header.subarray(0, 4).equals(Buffer.from([0x7f, 69, 76, 70]))) {
+        abi = header[4] === 2 && header[5] === 1 && header.readUInt16LE(18) === 183 ? 'aarch64' : 'non-aarch64-elf';
+      }
+    } finally { fs.closeSync(fd); }
+    return {path: candidate, real, abi};
+  } catch (_) { return null; }
+}
+
 function findTool(name) {
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
-    // Never search relative directories/project-local executables.
     if (!path.isAbsolute(dir)) continue;
-    const candidate = path.join(dir, name);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      if (!fs.statSync(candidate).isFile()) continue;
-      const real = fs.realpathSync(candidate);
-      const fd = fs.openSync(real, 'r');
-      let abi = 'script-or-unknown';
-      try {
-        const header = Buffer.alloc(20);
-        if (fs.readSync(fd, header, 0, 20, 0) === 20 && header.subarray(0, 4).equals(Buffer.from([0x7f, 69, 76, 70]))) {
-          abi = header[4] === 2 && header[5] === 1 && header.readUInt16LE(18) === 183 ? 'aarch64' : 'non-aarch64-elf';
-        }
-      } finally { fs.closeSync(fd); }
-      return {path: candidate, real, abi};
-    } catch (_) {}
+    const tool = inspectTool(path.join(dir, name));
+    if (tool) return tool;
   }
   return null;
+}
+
+function androidBuildTools() {
+  const sdk = process.env.ANDROID_HOME;
+  if (!sdk || !path.isAbsolute(sdk)) return {};
+  const dir = path.join(sdk, 'build-tools');
+  try {
+    return Object.fromEntries(fs.readdirSync(dir, {withFileTypes: true})
+      .filter(entry => entry.isDirectory() && /^[0-9][0-9A-Za-z_.-]*$/.test(entry.name)).slice(0, 32)
+      .map(entry => [entry.name, Object.fromEntries(['aapt2', 'zipalign', 'apksigner']
+        .map(name => [name, inspectTool(path.join(dir, entry.name, name))]))]));
+  } catch (_) { return {}; }
+}
+
+// Use the existing Flight Recorder event route; never include command arguments or secrets.
+async function event(level, message) {
+  const port = Number(process.env.KUCODE_ADMIN_PORT);
+  const token = process.env.KUCODE_ADMIN_TOKEN;
+  if (!port || !token) return;
+  const payload = Buffer.from(JSON.stringify({level, source: 'selfhost.build', msg: message}));
+  await new Promise(resolve => {
+    const req = http.request({host: '127.0.0.1', port, path: '/event', method: 'POST', timeout: 1500,
+      headers: {'X-KuCode-Token': token, 'Content-Length': payload.length}}, res => { res.resume(); res.on('end', resolve); });
+    req.on('error', resolve);
+    req.on('timeout', () => req.destroy(new Error('event timeout')));
+    req.end(payload);
+  });
+}
+
+async function build(args) {
+  if (args[0] !== '--' || !args[1]) throw new Error('Usage: kucode build -- <command> [args...]');
+  const label = path.basename(args[1]).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 64);
+  const start = process.hrtime.bigint();
+  await event('INFO', 'start tool=' + label);
+  const env = {...process.env};
+  delete env.KUCODE_ADMIN_TOKEN;
+  delete env.KUCODE_ADMIN_PORT;
+  const result = await new Promise(resolve => {
+    const child = spawn(args[1], args.slice(2), {stdio: 'inherit', env, shell: false});
+    child.on('error', () => resolve({code: 127, signal: null}));
+    child.on('exit', (code, signal) => resolve({code: code ?? 1, signal}));
+  });
+  const elapsedMs = Number((process.hrtime.bigint() - start) / 1000000n);
+  await event(result.code === 0 ? 'INFO' : 'WARN', 'end tool=' + label + ' exit=' + result.code + ' elapsedMs=' + elapsedMs + ' signal=' + (result.signal || 'none'));
+  return result.code;
 }
 
 async function main(args) {
@@ -66,8 +115,9 @@ async function main(args) {
   if (group === 'sdk' && command === 'doctor') {
     const names = ['java', 'javac', 'gradle', 'android', 'sdkmanager', 'mise', 'node', 'npm', 'python3', 'uv', 'go', 'ruby', 'cargo', 'gcc', 'clang', 'cmake'];
     const tools = Object.fromEntries(names.map(name => [name, findTool(name)]));
-    const result = {version: 1, architecture: process.arch, home: process.env.HOME, androidHome: process.env.ANDROID_HOME, javaHome: process.env.JAVA_HOME || 'unknown', tools};
-    return {result, exit: process.arch === 'arm64' && Object.values(tools).every(x => !x || x.abi !== 'non-aarch64-elf') ? 0 : 1};
+    const buildTools = androidBuildTools();
+    const result = {version: 1, architecture: process.arch, buildTools, home: process.env.HOME, androidHome: process.env.ANDROID_HOME, javaHome: process.env.JAVA_HOME || 'unknown', tools};
+    return {result, exit: process.arch === 'arm64' && [...Object.values(tools), ...Object.values(buildTools).flatMap(Object.values)].every(x => !x || x.abi !== 'non-aarch64-elf') ? 0 : 1};
   }
   if (group !== 'android') throw new Error('Usage: kucode sdk doctor | kucode android capabilities|install <apk> [package]|launch <package>|operation-status <id>|cancel <id>');
   const base = '/api/v1/android/';
@@ -94,7 +144,9 @@ async function main(args) {
   return {result, exit: failed ? 1 : command === 'operation-status' && pending ? 10 : 0};
 }
 if (require.main === module) {
-  main(process.argv.slice(2)).then(({result, exit}) => {
+  if (process.argv[2] === 'build') {
+    build(process.argv.slice(3)).then(code => { process.exitCode = code; }).catch(error => { console.error(error.message); process.exitCode = 1; });
+  } else main(process.argv.slice(2)).then(({result, exit}) => {
     console.log(JSON.stringify(result)); process.exitCode = exit;
   }).catch(error => {
     console.log(JSON.stringify({version: 1, state: 'failed', message: error.message})); process.exitCode = 1;

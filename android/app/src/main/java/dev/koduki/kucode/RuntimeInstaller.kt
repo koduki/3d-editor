@@ -158,12 +158,25 @@ internal class RuntimeInstaller(
         val archive = Files.createTempDirectory(paths.runtimeRoot.toPath(), "rootfs-backup-").toFile()
         Files.delete(archive.toPath())
         moveDirectoryAtomically(paths.rootfsDir, archive)
+        runCatching { Files.setLastModifiedTime(archive.toPath(), java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis())) }
         if (exists(paths.backupRootfsDir)) {
             val legacy = Files.createTempDirectory(paths.runtimeRoot.toPath(), "rootfs-recovered-").toFile()
             Files.delete(legacy.toPath())
             moveDirectoryAtomically(paths.backupRootfsDir, legacy)
         }
         return archive
+    }
+
+    fun restoreLatestDebianBackup(paths: PosixRuntimeConfig.Paths): File? {
+        val selected = paths.runtimeRoot.listFiles()?.filter {
+            it.name.startsWith("rootfs-backup-") &&
+                Files.isDirectory(it.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+                File(it, "bin/bash").isFile
+        }?.maxByOrNull { it.lastModified() } ?: return null
+        // Archive the current tree as well. Recovery never removes either OS.
+        archiveDebianForReset(paths)
+        moveDirectoryAtomically(selected, paths.rootfsDir)
+        return selected
     }
 
     fun ensureMountPointDirsExist(paths: PosixRuntimeConfig.Paths) {
