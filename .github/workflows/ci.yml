@@ -62,6 +62,36 @@ jobs:
       - name: Fetch Debian Minimal Rootfs & OpenVSCode Server
         run: ./scripts/fetch-runtime-assets.sh
 
+      - name: Lock and materialize runtime assets through the shared consumer
+        run: |
+          producer="$RUNNER_TEMP/runtime-producer"
+          mkdir -p "$producer"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v0-ci-${GITHUB_SHA:0:12}"
+          fi
+          python3 scripts/runtime-assets.py lock --release "$tag" --output "$producer/runtime-assets.lock.json"
+          for f in libproot.so libproot-loader.so; do
+            cp "android/app/src/main/jniLibs/arm64-v8a/$f" "$producer/$f"
+            rm "android/app/src/main/jniLibs/arm64-v8a/$f"
+          done
+          for f in debian-arm64-rootfs.tgz openvscode-server-linux-arm64.tgz debian-manifest.txt; do
+            cp "android/app/src/main/assets/runtime/$f" "$producer/$f"
+            rm "android/app/src/main/assets/runtime/$f"
+          done
+          python3 scripts/runtime-assets.py fetch --lock "$producer/runtime-assets.lock.json" --source-dir "$producer" --cache "$RUNNER_TEMP/runtime-consumer-cache"
+          python3 scripts/runtime-assets.py verify --lock "$producer/runtime-assets.lock.json"
+
+      - name: Upload standalone runtime assets for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: kucode-runtime-assets
+          path: ${{ runner.temp }}/runtime-producer/*
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Exercise extension, ACP & OpenVSCode server flags on the Linux runner
         run: |
           tag="openvscode-server-v${OPENVSCODE_VERSION}"
@@ -267,6 +297,12 @@ jobs:
           name: kucode-release-bundle
           path: release-files
 
+      - name: Download standalone runtime assets
+        uses: actions/download-artifact@v4
+        with:
+          name: kucode-runtime-assets
+          path: runtime-release-files
+
       - name: Publish GitHub Release on v* tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -278,8 +314,40 @@ jobs:
             FILES+=(release-files/kucode-release.apk release-files/kucode-release.aab)
           fi
           FILES+=(release-files/kucode-debug.apk)
-          gh release create "$TAG" "${FILES[@]}" \
-            --repo "$GH_REPO" \
-            --title "KuCode $TAG" \
-            --generate-notes || \
-          gh release upload "$TAG" "${FILES[@]}" --repo "$GH_REPO" --clobber
+          if ! gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GH_REPO" --title "KuCode $TAG" --generate-notes
+          fi
+          for f in "${FILES[@]}"; do
+            name="$(basename "$f")"
+            if gh release view "$TAG" --repo "$GH_REPO" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              tmp="$(mktemp -d)"
+              gh release download "$TAG" --repo "$GH_REPO" --pattern "$name" --dir "$tmp"
+              cmp "$f" "$tmp/$name"
+              rm -rf "$tmp"
+            else
+              gh release upload "$TAG" "$f" --repo "$GH_REPO"
+            fi
+          done
+
+      - name: Publish pinned runtime assets (never clobber)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          # On reruns, accept an identical existing file only. Never overwrite a
+          # published asset; consumers pin the reviewed lock from the source tree.
+          existing="$(gh release view "$tag" --repo "$GH_REPO" --json assets --jq '.assets[].name')"
+          for f in runtime-release-files/*; do
+            name="$(basename "$f")"
+            # debian-manifest.txt was already published with the APK notices.
+            if grep -Fxq "$name" <<< "$existing"; then
+              tmp="$(mktemp -d)"
+              gh release download "$tag" --repo "$GH_REPO" --pattern "$name" --dir "$tmp"
+              cmp "$f" "$tmp/$name"
+              rm -rf "$tmp"
+            else
+              gh release upload "$tag" "$f" --repo "$GH_REPO"
+            fi
+          done
