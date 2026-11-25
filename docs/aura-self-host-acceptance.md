@@ -4,12 +4,27 @@
 
 ## Preparation and automated gates
 
-1. Install the Stable APK from an existing signed distribution and start KuCode. Confirm existing XR editing, keyboard/IME, ACP and diagnostics functionality. Clone the reviewed source into `/workspace`.
+1. Install a signed Stable APK (application ID `dev.koduki.kucode`) and start KuCode. Confirm existing XR editing, keyboard/IME, ACP and diagnostics functionality. Clone the reviewed source into `/workspace`.
 2. Use Debian apt, mise and the official ARM64 SDK distribution as applicable. HOME and XDG directories are persistent; PATH includes user bin, mise shims, Cargo and Android command-line tools. Use a trusted project before executing project build files. No toolchain versions are established until the ARM64 feasibility probe passes.
 3. Run `kucode sdk doctor` (tool paths and ELF ABI; does not execute project-local tools), then follow [the ARM64 SDK probe](android-arm64-probe.md). Record SDK distributions, binaries and SHA-256. Run the minimal probe before changing KuCode's production toolchain.
 4. Use the source-controlled `runtime-assets.lock.json` (when reviewed and available). CI and the device verify it just before APK packaging; `KUCODE_RUNTIME_LOCK` or `-PkucodeRuntimeLock` can select an explicitly reviewed alternative. See [runtime assets](self-host-runtime-assets.md).
 5. Run `bash scripts/aura-self-host-e2e.sh`. This verifies runtime assets, runs Node/JVM tests, builds the APK, records its hash, requests Android's native installation confirmation and launches the Dev app. Allow unknown-app installation for Stable and enable its notifications in Android Settings. Approve the installation in Android's system UI; keep Stable focused to launch. Do not sideload unreviewed APKs.
 6. After installing the other language SDKs, run `bash scripts/aura-language-smoke.sh`. Collect results.tsv, individual version/fixture logs and failures. Missing tooling is NOT RUN, not success. These are baseline smoke tests, not complete language compatibility tests.
+
+
+### Signing prerequisite
+
+The historical v0.9.1 release provides only `kucode-debug.apk` (application ID
+`dev.koduki.kucode.debug`). The locally built Dev uses the same debug application
+ID, so that historical APK cannot also be the new Stable host. Main CI currently
+builds and verifies Debug and unsigned Release; its signed Release artifact is
+skipped unless the repository owner configures the existing Android signing
+secrets. Use an owner-controlled release signing key or build/sign a Stable APK
+with the existing Gradle `ANDROID_KEYSTORE_PATH` configuration. Keep the key
+outside the source repository, retain it for future updates, and do not uninstall
+the existing debug app merely to change its identity (that would remove its
+private development files). The new Stable/Dev installation and update acceptance
+remains NOT RUN until the signed host is available.
 
 ## Manual gates
 
