@@ -31,5 +31,14 @@ while true; do
   sleep 2
 done
 [[ "$status" == 0 ]] || { echo "FAIL: install operation"; exit 1; }
-kucode android launch dev.koduki.kucode.debug | tee "$out/launch.json"
+echo "Return focus to Stable KuCode to launch Dev."
+launched=false
+for _ in $(seq 1 15); do
+  if kucode android launch dev.koduki.kucode.debug > "$out/launch.json"; then
+    launched=true; break
+  fi
+  sleep 2
+done
+cat "$out/launch.json"
+[[ "$launched" == true ]] || { echo "FAIL: foreground launch"; exit 1; }
 echo "Automated build/install/launch passed. Manual physical checks are NOT RUN; see docs/aura-self-host-acceptance.md."

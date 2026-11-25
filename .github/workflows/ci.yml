@@ -329,16 +329,22 @@ jobs:
           if ! gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release create "$tag" --repo "$GH_REPO" --target "$GITHUB_SHA" --prerelease \
               --title "KuCode runtime assets $tag" \
-              --notes "Runtime-only ARM64 artifacts. Review and commit the lock before consuming. Not an APK release." \
-              runtime-release-files/*
-          else
-            for f in runtime-release-files/*; do
-              tmp="$(mktemp -d)"
-              gh release download "$tag" --repo "$GH_REPO" --pattern "$(basename "$f")" --dir "$tmp"
-              cmp "$f" "$tmp/$(basename "$f")"
-              rm -rf "$tmp"
-            done
+              --notes "Runtime-only ARM64 artifacts. Review and commit the lock before consuming. Not an APK release."
           fi
+          # Publish the lock last. Recover a partially uploaded release on retry,
+          # but never replace a published file (including the lock).
+          existing="$(gh release view "$tag" --repo "$GH_REPO" --json assets --jq '.assets[].name')"
+          for name in libproot.so libproot-loader.so debian-arm64-rootfs.tgz openvscode-server-linux-arm64.tgz debian-manifest.txt runtime-assets.lock.json; do
+            f="runtime-release-files/$name"
+            if grep -Fxq "$name" <<< "$existing"; then
+              tmp="$(mktemp -d)"
+              gh release download "$tag" --repo "$GH_REPO" --pattern "$name" --dir "$tmp"
+              cmp "$f" "$tmp/$name"
+              rm -rf "$tmp"
+            else
+              gh release upload "$tag" "$f" --repo "$GH_REPO"
+            fi
+          done
 
   release:
     name: Publish GitHub Release

@@ -39,8 +39,8 @@ test('SDK doctor inspects paths without running commands', async () => {
 test('Android detection ignores non-Android Gradle projects', () => {
   const oldLoad = Module._load;
   Module._load = function(name, ...args) { return name === 'vscode' ? {} : oldLoad.call(this, name, ...args); };
-  let project;
-  try { project = require(root + 'kucode-android/extension.js').androidProject; }
+  let project, findAndroidRoots;
+  try { ({androidProject: project, findAndroidRoots} = require(root + 'kucode-android/extension.js')); }
   finally { Module._load = oldLoad; }
   const base = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'kucode-android-'));
   try {
@@ -49,5 +49,10 @@ test('Android detection ignores non-Android Gradle projects', () => {
     assert.equal(project(base), false);
     fs.writeFileSync(path.join(base, 'build.gradle.kts'), 'plugins { id("com.android.application") }');
     assert.equal(project(base), true);
+    const nested = path.join(base, 'android');
+    fs.mkdirSync(nested);
+    fs.renameSync(path.join(base, 'gradlew'), path.join(nested, 'gradlew'));
+    fs.renameSync(path.join(base, 'build.gradle.kts'), path.join(nested, 'build.gradle.kts'));
+    assert.deepEqual(findAndroidRoots(base), [nested]);
   } finally { fs.rmSync(base, {recursive: true, force: true}); }
 });

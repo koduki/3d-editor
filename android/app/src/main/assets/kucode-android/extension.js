@@ -16,6 +16,27 @@ function androidProject(root) {
     });
 }
 
+function findAndroidRoots(root, depth = 2) {
+  const roots = [];
+  let budget = 128;
+  function walk(dir, remaining) {
+    if (--budget < 0) return;
+    if (androidProject(dir)) { roots.push(dir); return; }
+    if (remaining < 1) return;
+    try {
+      for (const entry of fs.readdirSync(dir, {withFileTypes: true})) {
+        if (budget < 0) break;
+        if (entry.isDirectory() && !entry.name.startsWith('.') &&
+            !['build', 'node_modules', 'vendor', 'target', 'dist'].includes(entry.name)) {
+          walk(path.join(dir, entry.name), remaining - 1);
+        }
+      }
+    } catch (_) {}
+  }
+  walk(root, depth);
+  return roots;
+}
+
 function cli(args) {
   return new Promise((resolve, reject) => {
     execFile('/usr/local/bin/kucode', args, {timeout: 15000, maxBuffer: 256 * 1024}, (err, stdout) => {
@@ -31,20 +52,21 @@ function cli(args) {
 
 async function chooseRoot() {
   if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before running development tasks.');
-  const folders = (vscode.workspace.workspaceFolders || []).filter(f => androidProject(f.uri.fsPath));
-  if (!folders.length) throw new Error('No Android Gradle project detected.');
-  if (folders.length === 1) return folders[0];
-  const picked = await vscode.window.showQuickPick(folders.map(folder => ({label: folder.name, folder})), {placeHolder: 'Choose an Android project'});
-  return picked && picked.folder;
+  const projects = (vscode.workspace.workspaceFolders || []).flatMap(folder =>
+    findAndroidRoots(folder.uri.fsPath).map(root => ({folder, root})));
+  if (!projects.length) throw new Error('No Android Gradle project detected.');
+  if (projects.length === 1) return projects[0];
+  const picked = await vscode.window.showQuickPick(projects.map(project => ({label: project.root, project})), {placeHolder: 'Choose an Android project'});
+  return picked && picked.project;
 }
 
-async function task(folder, executable, args, label) {
+async function task(project, executable, args, label) {
   if (!vscode.workspace.isTrusted) throw new Error('Workspace is not trusted.');
-  const approved = await vscode.window.showWarningMessage('Run ' + label + ' for ' + folder.name + '?', {modal: true}, 'Run');
+  const approved = await vscode.window.showWarningMessage('Run ' + label + ' for ' + project.root + '?', {modal: true}, 'Run');
   if (approved !== 'Run') return false;
   const id = require('node:crypto').randomUUID();
-  const t = new vscode.Task({type: 'kucodeAndroid', id}, folder, label, 'KuCode Android',
-    new vscode.ProcessExecution('/usr/local/bin/kucode', ['build', '--', executable, ...args], {cwd: folder.uri.fsPath}));
+  const t = new vscode.Task({type: 'kucodeAndroid', id}, project.folder, label, 'KuCode Android',
+    new vscode.ProcessExecution('/usr/local/bin/kucode', ['build', '--', executable, ...args], {cwd: project.root}));
   return new Promise((resolve, reject) => {
     const matches = event => event.execution.task.definition.id === id;
     const cleanup = () => { processSub.dispose(); taskSub.dispose(); };
@@ -58,9 +80,9 @@ async function task(folder, executable, args, label) {
   });
 }
 
-async function installApk(folder) {
+async function installApk(project) {
   const files = await vscode.window.showOpenDialog({
-    canSelectFiles: true, canSelectMany: false, filters: {APK: ['apk']}, defaultUri: folder.uri, openLabel: 'Install APK',
+    canSelectFiles: true, canSelectMany: false, filters: {APK: ['apk']}, defaultUri: vscode.Uri.file(project.root), openLabel: 'Install APK',
   });
   if (!files || !files.length) return null;
   const op = await cli(['android', 'install', files[0].fsPath]);
@@ -80,7 +102,7 @@ async function installApk(folder) {
 
 function activate(context) {
   const refresh = () => vscode.commands.executeCommand('setContext', 'kucodeAndroid.project',
-    vscode.workspace.isTrusted && (vscode.workspace.workspaceFolders || []).some(f => androidProject(f.uri.fsPath)));
+    vscode.workspace.isTrusted && (vscode.workspace.workspaceFolders || []).some(f => findAndroidRoots(f.uri.fsPath).length > 0));
   refresh();
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(refresh), vscode.workspace.onDidGrantWorkspaceTrust(refresh));
   const register = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand('kucodeAndroid.' + id, async () => {
@@ -119,9 +141,9 @@ function activate(context) {
     if (pkg) await cli(['android', 'launch', pkg]);
   });
   register('buildRun', async folder => {
-    if (!await task(folder, path.join(folder.uri.fsPath, 'gradlew'), [':app:assembleDebug'], 'Gradle assembleDebug')) return;
+    if (!await task(folder, path.join(folder.root, 'gradlew'), ['assembleDebug'], 'Gradle assembleDebug')) return;
     const pkg = await installApk(folder);
     if (pkg) await cli(['android', 'launch', pkg]);
   });
 }
-module.exports = {activate, deactivate() {}, androidProject};
+module.exports = {activate, deactivate() {}, androidProject, findAndroidRoots};

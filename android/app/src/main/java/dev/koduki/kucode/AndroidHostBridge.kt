@@ -89,9 +89,17 @@ internal class AndroidHostBridge private constructor(private val context: Contex
                 }
                 method == "POST" && path == "/api/v1/android/cancel" -> {
                     val id = data.getString("operationId")
-                    val op = synchronized(ops) { ops[id] } ?: return answer(404, "interrupted")
-                    finish(op, "cancelled", "Cancelled by caller", abandon = true)
-                    synchronized(ops) { 200 to op.json().toString() }
+                    synchronized(ops) {
+                        val op = ops[id] ?: return answer(404, "interrupted")
+                        if (op.state !in TERMINAL) {
+                            val session = op.sessionId
+                            if (session != null && runCatching { installer.abandonSession(session) }.isFailure) {
+                                return answer(409, "failed", "Android could not cancel this session; query its current status.")
+                            }
+                            finish(op, "cancelled", "Cancelled by caller")
+                        }
+                        200 to op.json().toString()
+                    }
                 }
                 method == "POST" && path == "/api/v1/android/launch" -> {
                     val pkg = data.getString("packageName")
@@ -200,12 +208,20 @@ internal class AndroidHostBridge private constructor(private val context: Contex
                     val sessionId = op.sessionId ?: return
                     val show = PendingIntent.getActivity(context, sessionId, confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-                    notifications.createNotificationChannel(NotificationChannel(CHANNEL, "Android development installs", NotificationManager.IMPORTANCE_HIGH))
-                    notifications.notify(sessionId, Notification.Builder(context, CHANNEL)
-                        .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                        .setContentTitle("KuCode: confirm APK installation")
-                        .setContentText(op.packageName)
-                        .setContentIntent(show).setAutoCancel(true).build())
+                    try {
+                        notifications.createNotificationChannel(NotificationChannel(CHANNEL, "Android development installs", NotificationManager.IMPORTANCE_HIGH))
+                        require(notifications.areNotificationsEnabled() &&
+                            notifications.getNotificationChannel(CHANNEL)?.importance != NotificationManager.IMPORTANCE_NONE) {
+                            "Enable Android development install notifications."
+                        }
+                        notifications.notify(sessionId, Notification.Builder(context, CHANNEL)
+                            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                            .setContentTitle("KuCode: confirm APK installation")
+                            .setContentText(op.packageName)
+                            .setContentIntent(show).setAutoCancel(true).build())
+                    } catch (e: Exception) {
+                        finish(op, "failed", LogRedactor.redact(e.message ?: "Cannot show Android confirmation"), abandon = true)
+                    }
                 }
             }
             PackageInstaller.STATUS_SUCCESS -> finish(op, "succeeded", "Installed")
