@@ -31,7 +31,7 @@ internal class OpenVsCodeLauncher(
     private val scope: CoroutineScope,
     private val onLog: (String) -> Unit = {},
     private val tokenGenerator: () -> String = ::generateConnectionToken,
-    private val portPicker: () -> Int = ::pickStableLocalPort,
+    private val portPicker: () -> Int = { pickStableLocalPort() },
     private val startupTimeoutMs: Long = DEFAULT_STARTUP_TIMEOUT_MS,
     private val commandBuilder: (
         paths: PosixRuntimeConfig.Paths,
@@ -342,10 +342,10 @@ private fun sendPosixSignal(pid: Long, signalName: String): Boolean {
  * Prefers fixed port 18765 so WebView keeps a stable origin (preserving VS Code tabs,
  * IndexedDB state, and layout across restarts), falling back to an ephemeral port if busy.
  */
-internal fun pickStableLocalPort(): Int {
+internal fun pickStableLocalPort(preferredPort: Int = PosixRuntimeConfig.PREFERRED_SERVER_PORT): Int {
     val loopback = InetAddress.getByName("127.0.0.1")
     try {
-        ServerSocket(PosixRuntimeConfig.PREFERRED_SERVER_PORT, 1, loopback).use {
+        ServerSocket(preferredPort, 1, loopback).use {
             return it.localPort
         }
     } catch (_: IOException) {
@@ -354,7 +354,7 @@ internal fun pickStableLocalPort(): Int {
     return try {
         ServerSocket(0, 1, loopback).use { it.localPort }
     } catch (_: IOException) {
-        PosixRuntimeConfig.PREFERRED_SERVER_PORT
+        preferredPort
     }
 }
 

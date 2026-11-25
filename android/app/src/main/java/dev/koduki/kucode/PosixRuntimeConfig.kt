@@ -16,6 +16,8 @@ object PosixRuntimeConfig {
     const val ASSET_OPENVSCODE = "runtime/openvscode-server-linux-arm64.tgz"
 
     const val PREFERRED_SERVER_PORT = 18765
+    const val DEV_SERVER_PORT = 18766
+    const val GUEST_SDK = "/root/Android/Sdk"
 
     const val GUEST_WORKSPACE = "/workspace"
     const val GUEST_HOME = "/root"
@@ -39,7 +41,11 @@ object PosixRuntimeConfig {
     ) {
         val rootfsDir: File get() = File(runtimeRoot, "rootfs")
         val stagingDir: File get() = File(runtimeRoot, "staging")
-        val openvscodeDir: File get() = File(rootfsDir, "opt/openvscode-server")
+        val openvscodeDir: File get() = File(runtimeRoot, "openvscode")
+        val legacyOpenvscodeDir: File get() = File(rootfsDir, "opt/openvscode-server")
+        val openvscodeStagingDir: File get() = File(runtimeRoot, "openvscode.staging")
+        val backupOpenvscodeDir: File get() = File(runtimeRoot, "openvscode.previous")
+        val openvscodeVersionMarker: File get() = File(openvscodeDir, ".kucode-managed-version")
         val sysdataDir: File get() = File(runtimeRoot, "sysdata")
         val shmDir: File get() = File(runtimeRoot, "shm")
         val tmpDir: File get() = File(runtimeRoot, "tmp")
@@ -158,6 +164,7 @@ object PosixRuntimeConfig {
             "-b", "${paths.tmpDir.absolutePath}:/tmp",
             "-b", "${paths.workspaceDir.absolutePath}:$GUEST_WORKSPACE",
             "-b", "${paths.homeDir.absolutePath}:$GUEST_HOME",
+            "-b", "${paths.openvscodeDir.absolutePath}:$GUEST_OPENVSCODE_DIR",
             "-b", "${paths.vscodeDataDir.absolutePath}:$GUEST_VSCODE_DATA",
             "-b", "${paths.diagnosticsDir.absolutePath}:$GUEST_DIAGNOSTICS_DIR",
             "-b", "${paths.androidSharedDir.absolutePath}:/android/shared",
@@ -190,7 +197,11 @@ object PosixRuntimeConfig {
             "COLORTERM" to "truecolor",
             "LANG" to "C.UTF-8",
             "LC_ALL" to "C.UTF-8",
-            "PATH" to "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH" to "$GUEST_HOME/.local/bin:$GUEST_HOME/.local/share/mise/shims:$GUEST_HOME/.cargo/bin:$GUEST_SDK/cmdline-tools/latest/bin:$GUEST_SDK/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "ANDROID_HOME" to GUEST_SDK,
+            "XDG_CACHE_HOME" to "$GUEST_HOME/.cache",
+            "XDG_CONFIG_HOME" to "$GUEST_HOME/.config",
+            "XDG_DATA_HOME" to "$GUEST_HOME/.local/share",
             "VSCODE_AGENT_FOLDER" to GUEST_VSCODE_DATA,
             "SSL_CERT_FILE" to GUEST_CA_BUNDLE,
             "SSL_CERT_DIR" to GUEST_CA_DIR,
@@ -221,7 +232,6 @@ object PosixRuntimeConfig {
         "--connection-token-file", "$GUEST_VSCODE_DATA/.editor-token",
         "--accept-server-license-terms",
         "--telemetry-level", "off",
-        "--disable-workspace-trust",
         "--without-browser-env-var",
         "--default-folder", GUEST_WORKSPACE,
         "--server-data-dir", GUEST_VSCODE_DATA,
@@ -301,7 +311,7 @@ object PosixRuntimeConfig {
             .put("editor.cursorBlinking", "solid")
             .put("breadcrumbs.enabled", false)
             .put("files.autoSave", "off")
-            .put("security.workspace.trust.enabled", false)
+            .put("security.workspace.trust.enabled", true)
             .put("telemetry.telemetryLevel", "off")
             .put("extensions.ignoreRecommendations", true)
             // Disable WebGL terminal renderer to avoid black/garbled text on Android WebView
@@ -829,13 +839,18 @@ object PosixRuntimeConfig {
     }
 
     fun buildProfileDEnvScript(): String = """
-        # Managed by KuCode: keep user-local CLI tools (Antigravity agy, Copilot CLI, Claude, uv, etc.) on PATH
-        if [ -d "${'$'}{HOME:-/root}/.local/bin" ]; then
+        # Common persistent SDK paths; no project-local scripts are executed.
+        export ANDROID_HOME="${'$'}{ANDROID_HOME:-${'$'}HOME/Android/Sdk}"
+        export XDG_CACHE_HOME="${'$'}{XDG_CACHE_HOME:-${'$'}HOME/.cache}"
+        export XDG_CONFIG_HOME="${'$'}{XDG_CONFIG_HOME:-${'$'}HOME/.config}"
+        export XDG_DATA_HOME="${'$'}{XDG_DATA_HOME:-${'$'}HOME/.local/share}"
+        for kucode_dir in "${'$'}ANDROID_HOME/platform-tools" "${'$'}ANDROID_HOME/cmdline-tools/latest/bin" "${'$'}HOME/.cargo/bin" "${'$'}XDG_DATA_HOME/mise/shims" "${'$'}HOME/.local/bin"; do
           case ":${'$'}PATH:" in
-            *":${'$'}{HOME:-/root}/.local/bin:"*) ;;
-            *) export PATH="${'$'}{HOME:-/root}/.local/bin:${'$'}PATH" ;;
+            *":${'$'}kucode_dir:"*) ;;
+            *) export PATH="${'$'}kucode_dir:${'$'}PATH" ;;
           esac
-        fi
+        done
+        unset kucode_dir
     """.trimIndent() + "\n"
 
     fun buildDefaultProfile(): String = """

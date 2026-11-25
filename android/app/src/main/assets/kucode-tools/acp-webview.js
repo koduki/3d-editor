@@ -183,6 +183,11 @@ class AcpChatViewProvider {
 
   async _handleWebviewMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
+    if (vscode.workspace.isTrusted === false &&
+        ['connect', 'newSession', 'sendPrompt', 'runInstall', 'runLogin', 'setConfigOption'].includes(msg.type)) {
+      this._post({type: 'error', message: 'Trust this workspace before starting an ACP agent.'});
+      return;
+    }
     switch (msg.type) {
       case 'ready':
       case 'refreshAgents':
@@ -292,6 +297,7 @@ class AcpChatViewProvider {
   }
 
   async _ensureConnected(forceReconnect = false) {
+    if (vscode.workspace.isTrusted === false) throw new Error('Trust this workspace before starting an ACP agent.');
     if (this.client && this.client.connected && !forceReconnect) {
       return this.client;
     }

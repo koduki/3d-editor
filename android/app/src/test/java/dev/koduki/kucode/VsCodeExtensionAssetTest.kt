@@ -9,6 +9,26 @@ import java.nio.file.Files
 class VsCodeExtensionAssetTest {
 
     @Test
+    fun failedExtensionUpdatePreservesCompletePreviousVersion() {
+        val dir = Files.createTempDirectory("kucode-ext-rollback").toFile()
+        try {
+            val target = VsCodeExtensionAsset.installInto(dir)
+            val old = target.resolve("extension.js").readBytes()
+            try {
+                VsCodeExtensionAsset.installInto(dir) { name ->
+                    if (name.endsWith("acp-client.js")) throw java.io.IOException("simulated failed asset read")
+                    java.io.ByteArrayInputStream("new".toByteArray())
+                }
+                throw AssertionError("expected asset failure")
+            } catch (_: java.io.IOException) {}
+            assertTrue(old.contentEquals(target.resolve("extension.js").readBytes()))
+            assertTrue(target.resolve("acp-client.js").isFile)
+        } finally {
+            deleteTreeNoFollow(dir)
+        }
+    }
+
+    @Test
     fun installInto_copiesBundledExtensionAssetsAtomically() {
         val dir = Files.createTempDirectory("kucode-ext-test").toFile()
         try {

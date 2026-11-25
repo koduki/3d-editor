@@ -77,6 +77,7 @@ internal class SessionLogStore(
         val totalMemMb: Long = -1L,
         val lowMemory: Boolean = false,
         val pssMb: Long = -1L,
+        val hostCpuTimeMs: Long = -1L,
         val jvmHeapUsedMb: Long = -1L,
         val jvmHeapMaxMb: Long = -1L,
         val nativeHeapMb: Long = -1L,
@@ -101,6 +102,7 @@ internal class SessionLogStore(
             .put("totalMemMb", totalMemMb)
             .put("lowMemory", lowMemory)
             .put("pssMb", pssMb)
+            .put("hostCpuTimeMs", hostCpuTimeMs)
             .put("jvmHeapUsedMb", jvmHeapUsedMb)
             .put("jvmHeapMaxMb", jvmHeapMaxMb)
             .put("nativeHeapMb", nativeHeapMb)
@@ -126,6 +128,7 @@ internal class SessionLogStore(
                 totalMemMb = obj.optLong("totalMemMb", -1L),
                 lowMemory = obj.optBoolean("lowMemory", false),
                 pssMb = obj.optLong("pssMb", -1L),
+                hostCpuTimeMs = obj.optLong("hostCpuTimeMs", -1L),
                 jvmHeapUsedMb = obj.optLong("jvmHeapUsedMb", -1L),
                 jvmHeapMaxMb = obj.optLong("jvmHeapMaxMb", -1L),
                 nativeHeapMb = obj.optLong("nativeHeapMb", -1L),
@@ -1090,12 +1093,13 @@ internal class SessionLogStore(
         if (metrics.isEmpty()) {
             sb.appendLine("`(no metrics recorded)`")
         } else {
-            sb.appendLine("| Offset | Trigger | Avail/Total RAM | PSS | JVM Heap | Native | FDs | Thr | DiskFree | Thermal | Bat | Net | State / View / Focus |")
-            sb.appendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+            sb.appendLine("| Offset | Trigger | Avail/Total RAM | PSS | Host CPU ms | JVM Heap | Native | FDs | Thr | DiskFree | Thermal | Bat | Net | State / View / Focus |")
+            sb.appendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
             val selectedMetrics = selectRepresentativeMetrics(metrics, maxRows = 25)
             for (m in selectedMetrics) {
                 val ram = if (m.availMemMb >= 0 && m.totalMemMb >= 0) "${m.availMemMb}/${m.totalMemMb}MB${if (m.lowMemory) "!" else ""}" else "-"
                 val pss = if (m.pssMb >= 0) "${m.pssMb}MB" else "-"
+                val cpu = if (m.hostCpuTimeMs >= 0) m.hostCpuTimeMs.toString() else "unknown"
                 val jvm = if (m.jvmHeapUsedMb >= 0) "${m.jvmHeapUsedMb}/${m.jvmHeapMaxMb}MB" else "-"
                 val nat = if (m.nativeHeapMb >= 0) "${m.nativeHeapMb}MB" else "-"
                 val fds = if (m.openFds >= 0) m.openFds.toString() else "-"
@@ -1104,7 +1108,7 @@ internal class SessionLogStore(
                 val bat = if (m.batteryPct >= 0) "${m.batteryPct}%${if (m.isCharging) "+" else ""}${if (m.powerSaveMode) "(PS)" else ""}" else "-"
                 val viewFocus = "${m.runtimeState}/${m.activeView}/focus=${m.windowFocus}/srv=${m.serverAlive}"
                 sb.appendLine(
-                    "| +${formatOffset(m.offsetMs)} | `${m.trigger}` | $ram | $pss | $jvm | $nat | $fds | $thr | $disk | ${m.thermalStatus} | $bat | ${m.networkSummary} | `$viewFocus` |",
+                    "| +${formatOffset(m.offsetMs)} | `${m.trigger}` | $ram | $pss | $cpu | $jvm | $nat | $fds | $thr | $disk | ${m.thermalStatus} | $bat | ${m.networkSummary} | `$viewFocus` |",
                 )
             }
         }

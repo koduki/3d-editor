@@ -73,10 +73,14 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val onCopyToClipboard: (String) -> Boolean,
         val onReadFromClipboard: () -> String? = { null },
         val onOpenExternalUrl: ((String) -> Boolean)? = null,
+        val onLaunchAndroidApp: (String) -> Boolean = { false },
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
+    private val shellActivityLock = Any()
+    private var activeShellCommands = 0
+    private var resettingDebian = false
     private val telemetry = SessionTelemetryManager.getInstance(appContext)
 
     private val statusStore = RuntimeStatusStore(
@@ -126,8 +130,13 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         ensureMountDirs = installer::ensureMountPointDirsExist,
     )
 
+    private val editorPort = if (appContext.packageName.endsWith(".debug"))
+        PosixRuntimeConfig.DEV_SERVER_PORT else PosixRuntimeConfig.PREFERRED_SERVER_PORT
+
     private val launcher = OpenVsCodeLauncher(
         scope = scope,
+        portPicker = { pickStableLocalPort(editorPort) },
+        orphanReclaimer = { paths, log -> reclaimOrphanServerIfNeeded(paths, log, preferredPort = editorPort) },
         onLog = ::appendUnifiedLog,
     )
 
@@ -170,6 +179,11 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         onOpenBootPage = { hostActions?.onOpenBootPage?.invoke() },
         onRequestStoragePermission = { hostActions?.onRequestStoragePermission?.invoke() },
         onRestartServer = { restart() },
+        onAndroidRequest = { method, path, body ->
+            AndroidHostBridge.get(appContext).handle(method, path, body) { pkg ->
+                hostActions?.onLaunchAndroidApp?.invoke(pkg) ?: false
+            }
+        },
     )
 
     fun getAdminPort(): Int = diagnosticsServer.port
@@ -291,6 +305,42 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
     }
 
+    fun archiveAndResetDebian(restoreLatest: Boolean = false) {
+        scope.launch {
+            lifecycleMutex.withLock {
+                val allowed = synchronized(shellActivityLock) {
+                    if (activeShellCommands != 0) false
+                    else {
+                        resettingDebian = true
+                        true
+                    }
+                }
+                if (!allowed) {
+                    appendUnifiedLog("[warn] Finish active diagnostic/CLI commands before resetting Debian.")
+                    return@withLock
+                }
+                try {
+                    stopInternal(emitIdleStatus = true)
+                    if (restoreLatest) {
+                        val restored = installer.restoreLatestDebianBackup(getPaths())
+                        appendUnifiedLog("[runtime] Restored Debian backup: ${restored?.name ?: "none available"}")
+                    } else {
+                        installer.archiveDebianForReset(getPaths())?.let {
+                            appendUnifiedLog("[runtime] Debian preserved as ${it.name} before explicit reset.")
+                        }
+                    }
+                    startInternal()
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (e: Exception) {
+                    appendUnifiedLog("[error] Debian reset failed: ${e.message}")
+                } finally {
+                    synchronized(shellActivityLock) { resettingDebian = false }
+                }
+            }
+        }
+    }
+
     fun stop() {
         scope.launch {
             lifecycleMutex.withLock {
@@ -305,37 +355,45 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         forceNoSeccomp: Boolean? = null,
         recordTelemetry: Boolean = false,
     ): CommandResult {
-        val adminPort = runCatching { diagnosticsServer.start() }.getOrDefault(0)
-        val extraEnv = if (adminPort > 0) {
-            mapOf(
-                "KUCODE_ADMIN_PORT" to adminPort.toString(),
-                "KUCODE_ADMIN_TOKEN" to diagnosticsServer.authToken,
-                "BROWSER" to "/usr/local/bin/kucode-open",
-                "GH_BROWSER" to "/usr/local/bin/kucode-open",
-            )
-        } else {
-            emptyMap()
+        synchronized(shellActivityLock) {
+            if (resettingDebian) return CommandResult(1, "Debian reset in progress")
+            activeShellCommands++
         }
-        val t0 = System.currentTimeMillis()
-        val result = shellExecutor.execute(
-            paths = getPaths(),
-            command = command,
-            timeoutSeconds = timeoutSeconds,
-            disableSeccomp = forceNoSeccomp ?: disableSeccomp,
-            extraEnv = extraEnv,
-        )
-        if (recordTelemetry) {
-            val elapsed = System.currentTimeMillis() - t0
-            val preview = result.output.trim().take(500)
-            val msg = "CLI command (exit=${result.exitCode}, ${elapsed}ms): $command" +
-                if (preview.isNotEmpty()) "\n$preview" else ""
-            if (result.exitCode == 0) {
-                telemetry.info("posix.cli", msg)
+        try {
+            val adminPort = runCatching { diagnosticsServer.start() }.getOrDefault(0)
+            val extraEnv = if (adminPort > 0) {
+                mapOf(
+                    "KUCODE_ADMIN_PORT" to adminPort.toString(),
+                    "KUCODE_ADMIN_TOKEN" to diagnosticsServer.authToken,
+                    "BROWSER" to "/usr/local/bin/kucode-open",
+                    "GH_BROWSER" to "/usr/local/bin/kucode-open",
+                )
             } else {
-                telemetry.warn("posix.cli", msg)
+                emptyMap()
             }
+            val t0 = System.currentTimeMillis()
+            val result = shellExecutor.execute(
+                paths = getPaths(),
+                command = command,
+                timeoutSeconds = timeoutSeconds,
+                disableSeccomp = forceNoSeccomp ?: disableSeccomp,
+                extraEnv = extraEnv,
+            )
+            if (recordTelemetry) {
+                val elapsed = System.currentTimeMillis() - t0
+                val preview = result.output.trim().take(500)
+                val msg = "CLI command (exit=${result.exitCode}, ${elapsed}ms): $command" +
+                    if (preview.isNotEmpty()) "\n$preview" else ""
+                if (result.exitCode == 0) {
+                    telemetry.info("posix.cli", msg)
+                } else {
+                    telemetry.warn("posix.cli", msg)
+                }
+            }
+            return result
+        } finally {
+            synchronized(shellActivityLock) { activeShellCommands-- }
         }
-        return result
     }
 
     internal fun editorAccessVerified(): Boolean {

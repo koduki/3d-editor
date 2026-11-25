@@ -44,6 +44,7 @@ class LocalDiagnosticsServer(
     private val onOpenBootPage: () -> Unit,
     private val onRequestStoragePermission: () -> Unit,
     private val onRestartServer: () -> Unit,
+    private val onAndroidRequest: ((String, String, String) -> Pair<Int, String>)? = null,
     private val maxWorkers: Int = DEFAULT_MAX_WORKERS,
     private val maxQueuedConnections: Int = DEFAULT_MAX_QUEUED_CONNECTIONS,
     private val preAuthTimeoutMs: Int = DEFAULT_PRE_AUTH_TIMEOUT_MS,
@@ -298,6 +299,12 @@ class LocalDiagnosticsServer(
 
             try {
                 when {
+                    path.startsWith("/api/v1/android/") && onAndroidRequest != null -> {
+                        val (code, json) = onAndroidRequest.invoke(method, path, body)
+                        respond(code, json, contentType = "application/json; charset=utf-8")
+                        audit(code)
+                    }
+
                     method == "GET" && path == "/diagnostics" -> {
                         val report = runBlocking { onRunDiagnostics() }
                         val byteLen = respond(200, report)
@@ -552,6 +559,8 @@ class LocalDiagnosticsServer(
     ) {
         val statusText = when (statusCode) {
             200 -> "OK"
+            202 -> "Accepted"
+            409 -> "Conflict"
             400 -> "Bad Request"
             403 -> "Forbidden"
             404 -> "Not Found"

@@ -3,6 +3,14 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val buildSha = providers.environmentVariable("KUCODE_BUILD_SHA")
+    .orElse(providers.environmentVariable("GITHUB_SHA"))
+    .orElse(providers.exec {
+        workingDir(rootProject.projectDir.parentFile)
+        commandLine("git", "rev-parse", "HEAD")
+        isIgnoreExitValue = true
+    }.standardOutput.asText.map { it.trim().ifEmpty { "unknown" } })
+
 android {
     namespace = "dev.koduki.kucode"
     compileSdk = 36
@@ -13,6 +21,7 @@ android {
         targetSdk = 35
         versionCode = 10
         versionName = "0.9.1"
+        resValue("string", "kucode_build_sha", buildSha.get())
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -39,6 +48,7 @@ android {
 
     buildTypes {
         release {
+            resValue("string", "app_name_variant", "KuCode")
             isMinifyEnabled = true
             isShrinkResources = false
             signingConfigs.findByName("release")?.let { signingConfig = it }
@@ -49,6 +59,7 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
+            resValue("string", "app_name_variant", "KuCode Dev")
             versionNameSuffix = "-debug"
         }
     }
@@ -90,6 +101,15 @@ android {
 }
 
 val repoRootDir = rootProject.projectDir.parentFile
+val runtimeLock = providers.environmentVariable("KUCODE_RUNTIME_LOCK")
+    .orElse(providers.gradleProperty("kucodeRuntimeLock"))
+    .orElse(File(repoRootDir, "runtime-assets.lock.json").absolutePath)
+val verifyRuntimeAssets by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Verify reviewed runtime asset lock before packaging."
+    workingDir(repoRootDir)
+    commandLine("python3", "scripts/runtime-assets.py", "verify", "--lock", runtimeLock.get())
+}
 val generatedLicenseAssetsDir = layout.buildDirectory.dir("generated/licenseAssets")
 
 val syncLicenseAssets by tasks.registering(Sync::class) {
@@ -112,6 +132,10 @@ tasks.named("preBuild") {
 tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("Assets")) {
         dependsOn(syncLicenseAssets)
+        dependsOn(verifyRuntimeAssets)
+    }
+    if (name.startsWith("merge") && name.endsWith("NativeLibs")) {
+        dependsOn(verifyRuntimeAssets)
     }
 }
 

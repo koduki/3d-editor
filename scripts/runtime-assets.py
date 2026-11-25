@@ -168,6 +168,18 @@ def main():
     try:
         if a.cmd == "lock":
             lock = create_lock(a.root, a.release)
+            # Source provenance is additional review evidence, not a replacement for
+            # the independently committed content hashes.
+            sources = {}
+            for name in ("scripts/build-proot-android.sh", "scripts/fetch-runtime-assets.sh"):
+                source = a.root / name
+                if source.is_file():
+                    sources[name] = digest(source)
+            lock["producer"] = {
+                "commit": os.environ.get("GITHUB_SHA", "unknown"),
+                "sourceScripts": sources,
+                "ndk": Path(os.environ.get("ANDROID_NDK_HOME", "unknown")).name,
+            }
             a.output.parent.mkdir(parents=True, exist_ok=True)
             a.output.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         else:

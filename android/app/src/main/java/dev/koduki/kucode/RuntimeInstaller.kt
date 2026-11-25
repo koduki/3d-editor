@@ -9,27 +9,24 @@ import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
 
 /**
- * Pure-JVM installer for the bundled Debian rootfs + openvscode-server archives.
- *
- * Atomic install & rollback invariants:
- * - The version marker lives INSIDE `rootfs/.kucode-runtime-version` so moving `rootfs`
- *   to `rootfs.previous` preserves the previous installation's version metadata intact.
- * - New extractions are staged without a version marker and only committed via
- *   [commitInstallation] once openvscode-server reaches READY, which writes the marker
- *   and immediately removes `rootfs.previous`.
- * - If startup fails before READY (or crashes mid-swap), [rollbackInstallation] /
- *   [recoverInterruptedInstall] restores `rootfs.previous` back to `rootfs` with its
- *   original version marker intact.
- * - Default settings are written ONLY to `user/Machine/settings.json` (migrating once from
- *   legacy `data/Machine/settings.json`, never touching `user/User/settings.json`), atomically,
- *   and never overwrite unparseable JSONC files.
+ * Persistent Debian seed plus separately managed OpenVSCode installation.
+ * Never replace an existing rootfs during an APK update. Only managed server
+ * directories participate in the READY/rollback transaction.
  */
 internal class RuntimeInstaller(
     private val openAsset: (String) -> InputStream,
     private val querySystemDnsServers: () -> List<String> = { emptyList() },
     private val loadHostCaCertificates: () -> List<CaCertificateEntry> = { emptyList() },
     private val expectedVersion: String = PosixRuntimeConfig.RUNTIME_VERSION,
-    private val installExtension: (File) -> File = { dir -> VsCodeExtensionAsset.installInto(dir, openAsset) },
+    private val installExtension: (File) -> File = { dir ->
+        VsCodeExtensionAsset.installAndroidInto(dir, openAsset)
+        VsCodeExtensionAsset.installInto(dir, openAsset)
+    },
+    private val installHostCli: (File) -> Unit = { dir ->
+        val cli = File(dir, "kucode")
+        writeBytesAtomically(cli, openAsset("kucode-cli.cjs").use { it.readBytes() }, worldReadable = true)
+        TarGzExtractor.DefaultPosixFsOps.chmod(cli, 0b111_101_101)
+    },
     private val onProgress: (message: String, progress: Int) -> Unit = { _, _ -> },
     private val onLog: (String) -> Unit = {},
 ) {
@@ -44,102 +41,142 @@ internal class RuntimeInstaller(
         return runCatching { marker.readText(Charsets.UTF_8).trim() }.getOrNull()
     }
 
-    fun recoverInterruptedInstall(paths: PosixRuntimeConfig.Paths) {
-        val backup = paths.backupRootfsDir
-        if (!Files.exists(backup.toPath(), LinkOption.NOFOLLOW_LINKS)) return
+    private fun exists(file: File): Boolean =
+        Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)
 
-        if (paths.rootfsDir.exists() && readInstalledVersion(paths) == expectedVersion) {
-            deleteTreeNoFollow(backup)
-            onLog("[runtime] Cleaned up old rootfs backup after completed upgrade.")
-        } else {
-            deleteTreeNoFollow(paths.rootfsDir)
-            moveDirectoryAtomically(backup, paths.rootfsDir)
-            onLog("[runtime] Recovered previous rootfs installation (${readInstalledVersion(paths) ?: "unknown"}).")
+    private fun readManagedVersion(paths: PosixRuntimeConfig.Paths): String? =
+        paths.openvscodeVersionMarker.takeIf { Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS) }
+            ?.let { runCatching { it.readText(Charsets.UTF_8).trim() }.getOrNull() }
+
+    fun recoverInterruptedInstall(paths: PosixRuntimeConfig.Paths) {
+        // Old versions swapped the entire rootfs. Preserve both trees if the
+        // legacy transaction was interrupted; never delete an ambiguous user OS.
+        if (exists(paths.backupRootfsDir)) {
+            if (!exists(paths.rootfsDir) || readInstalledVersion(paths) == null) {
+                if (exists(paths.rootfsDir)) {
+                    val recovered = Files.createTempDirectory(paths.runtimeRoot.toPath(), "rootfs-recovered-").toFile()
+                    Files.delete(recovered.toPath())
+                    moveDirectoryAtomically(paths.rootfsDir, recovered)
+                    onLog("[runtime] Preserved interrupted legacy rootfs at ${recovered.name}")
+                }
+                moveDirectoryAtomically(paths.backupRootfsDir, paths.rootfsDir)
+                onLog("[runtime] Restored previous legacy Debian installation.")
+            } else {
+                onLog("[runtime] Retaining legacy rootfs.previous for manual recovery.")
+            }
+        }
+        if (exists(paths.backupOpenvscodeDir)) {
+            if (readManagedVersion(paths) != null && hasServerBinary(paths)) {
+                deleteTreeNoFollow(paths.backupOpenvscodeDir)
+            } else {
+                deleteTreeNoFollow(paths.openvscodeDir)
+                moveDirectoryAtomically(paths.backupOpenvscodeDir, paths.openvscodeDir)
+                onLog("[runtime] Recovered previous managed OpenVSCode installation.")
+            }
         }
     }
 
     fun ensureExtracted(paths: PosixRuntimeConfig.Paths): ExtractOutcome {
+        paths.runtimeRoot.mkdirs()
         recoverInterruptedInstall(paths)
+        if (!exists(paths.rootfsDir)) {
+            onProgress("初回セットアップ: Debian minimal rootfs を展開中...", 10)
+            deleteTreeNoFollow(paths.stagingDir)
+            Files.createDirectory(paths.stagingDir.toPath())
+            openAsset(PosixRuntimeConfig.ASSET_ROOTFS).use { stream ->
+                val stats = TarGzExtractor.extract(stream, paths.stagingDir, stripComponents = 0) { entries, current ->
+                    onProgress("Debian rootfs 展開中 ($entries)... $current", 10 + (entries / 250).coerceAtMost(35))
+                }
+                onLog("[runtime] Debian rootfs extracted: $stats")
+            }
+            require(File(paths.stagingDir, "bin/bash").isFile) { "Debian seed has no bash" }
+            writeTextAtomically(File(paths.stagingDir, paths.versionMarker.name), expectedVersion, Charsets.US_ASCII, worldReadable = true)
+            moveDirectoryAtomically(paths.stagingDir, paths.rootfsDir)
+        } else {
+            require(Files.isDirectory(paths.rootfsDir.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+                File(paths.rootfsDir, "bin/bash").isFile) {
+                "Existing Debian is incomplete; preserved for recovery. Refusing automatic replacement."
+            }
+            onLog("[runtime] Keeping persistent Debian (seed=${readInstalledVersion(paths) ?: "unknown"}).")
+        }
 
-        val installed = readInstalledVersion(paths)
-        if (installed == expectedVersion && hasServerBinary(paths)) {
-            onLog("[runtime] Existing Debian + openvscode-server installation verified ($installed)")
+        // One-time migration uses a same-filesystem rename; no duplicate server
+        // archive, and no changes to other files in the Debian installation.
+        if (!exists(paths.openvscodeDir) &&
+            Files.isDirectory(paths.legacyOpenvscodeDir.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+            File(paths.legacyOpenvscodeDir, "bin/openvscode-server").isFile) {
+            moveDirectoryAtomically(paths.legacyOpenvscodeDir, paths.openvscodeDir)
+            readInstalledVersion(paths)?.let {
+                writeTextAtomically(paths.openvscodeVersionMarker, it, Charsets.US_ASCII, worldReadable = true)
+            }
+            onLog("[runtime] Migrated legacy OpenVSCode to managed storage.")
+        }
+        if (readManagedVersion(paths) == expectedVersion && hasServerBinary(paths)) {
             return ExtractOutcome.ALREADY_INSTALLED
         }
 
-        onProgress("初回セットアップ: Debian minimal rootfs を展開中...", 10)
-        onLog("[runtime] Extracting embedded Debian minimal rootfs...")
-
-        paths.runtimeRoot.mkdirs()
-        deleteTreeNoFollow(paths.stagingDir)
-        Files.createDirectory(paths.stagingDir.toPath())
-
-        openAsset(PosixRuntimeConfig.ASSET_ROOTFS).use { stream ->
-            val stats = TarGzExtractor.extract(
-                input = stream,
-                destDir = paths.stagingDir,
-                stripComponents = 0,
-            ) { entries, current ->
-                val pct = 10 + (entries / 250).coerceAtMost(35)
-                onProgress("Debian rootfs 展開中 ($entries)... $current", pct)
-            }
-            onLog("[runtime] Debian rootfs extracted: $stats")
-        }
-
-        onProgress("初回セットアップ: openvscode-server を展開中...", 50)
-        onLog("[runtime] Extracting embedded openvscode-server...")
-        val stagingVscode = TarGzExtractor.resolveSafeChild(paths.stagingDir.canonicalFile, "opt/openvscode-server")
+        onProgress("openvscode-server を展開中...", 50)
+        deleteTreeNoFollow(paths.openvscodeStagingDir)
+        Files.createDirectory(paths.openvscodeStagingDir.toPath())
         openAsset(PosixRuntimeConfig.ASSET_OPENVSCODE).use { stream ->
-            val stats = TarGzExtractor.extract(
-                input = stream,
-                destDir = stagingVscode,
-                stripComponents = 1,
-            ) { entries, current ->
-                val pct = 50 + (entries / 200).coerceAtMost(35)
-                onProgress("openvscode-server 展開中 ($entries)... $current", pct)
+            val stats = TarGzExtractor.extract(stream, paths.openvscodeStagingDir, stripComponents = 1) { entries, current ->
+                onProgress("openvscode-server 展開中 ($entries)... $current", 50 + (entries / 200).coerceAtMost(35))
             }
-            onLog("[runtime] openvscode-server extracted: $stats")
+            onLog("[runtime] OpenVSCode extracted: $stats")
         }
-
-        // Preserve any previous rootfs (including its internal .kucode-runtime-version marker)
-        // in rootfs.previous until openvscode-server reaches READY.
-        if (Files.exists(paths.rootfsDir.toPath(), LinkOption.NOFOLLOW_LINKS)) {
-            deleteTreeNoFollow(paths.backupRootfsDir)
-            moveDirectoryAtomically(paths.rootfsDir, paths.backupRootfsDir)
+        require(File(paths.openvscodeStagingDir, "bin/openvscode-server").isFile) { "Invalid managed OpenVSCode archive" }
+        if (exists(paths.openvscodeDir)) {
+            moveDirectoryAtomically(paths.openvscodeDir, paths.backupOpenvscodeDir)
         }
-        moveDirectoryAtomically(paths.stagingDir, paths.rootfsDir)
-
+        moveDirectoryAtomically(paths.openvscodeStagingDir, paths.openvscodeDir)
         onProgress("展開完了。サーバーを起動します...", 88)
-        onLog("[runtime] Extraction staged cleanly; awaiting server READY to commit.")
         return ExtractOutcome.STAGED_NEW_INSTALL
     }
 
-    /**
-     * Commits the active rootfs once openvscode-server is READY by writing the version marker
-     * inside `rootfs/` and immediately removing any previous rootfs backup.
-     */
     fun commitInstallation(paths: PosixRuntimeConfig.Paths) {
-        if (readInstalledVersion(paths) != expectedVersion) {
-            writeTextAtomically(paths.versionMarker, expectedVersion, Charsets.US_ASCII, worldReadable = true)
+        if (readManagedVersion(paths) != expectedVersion) {
+            writeTextAtomically(paths.openvscodeVersionMarker, expectedVersion, Charsets.US_ASCII, worldReadable = true)
         }
-        if (Files.exists(paths.backupRootfsDir.toPath(), LinkOption.NOFOLLOW_LINKS)) {
-            deleteTreeNoFollow(paths.backupRootfsDir)
-            onLog("[runtime] Removed previous rootfs backup after READY.")
-        }
+        deleteTreeNoFollow(paths.backupOpenvscodeDir)
+    }
+
+    fun rollbackInstallation(paths: PosixRuntimeConfig.Paths): Boolean {
+        if (!exists(paths.backupOpenvscodeDir) || readManagedVersion(paths) == expectedVersion) return false
+        deleteTreeNoFollow(paths.openvscodeDir)
+        moveDirectoryAtomically(paths.backupOpenvscodeDir, paths.openvscodeDir)
+        onLog("[runtime] Rolled back managed OpenVSCode; persistent Debian untouched.")
+        return true
     }
 
     /**
-     * Restores `rootfs.previous` over an uncommitted `rootfs` when startup fails before READY.
+     * Explicit reset never deletes the OS. Caller must stop the runtime and
+     * obtain user confirmation; home and workspace remain separate.
      */
-    fun rollbackInstallation(paths: PosixRuntimeConfig.Paths): Boolean {
-        val backup = paths.backupRootfsDir
-        if (!Files.exists(backup.toPath(), LinkOption.NOFOLLOW_LINKS)) return false
-        if (readInstalledVersion(paths) == expectedVersion) return false
+    fun archiveDebianForReset(paths: PosixRuntimeConfig.Paths): File? {
+        recoverInterruptedInstall(paths)
+        if (!exists(paths.rootfsDir)) return null
+        val archive = Files.createTempDirectory(paths.runtimeRoot.toPath(), "rootfs-backup-").toFile()
+        Files.delete(archive.toPath())
+        moveDirectoryAtomically(paths.rootfsDir, archive)
+        runCatching { Files.setLastModifiedTime(archive.toPath(), java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis())) }
+        if (exists(paths.backupRootfsDir)) {
+            val legacy = Files.createTempDirectory(paths.runtimeRoot.toPath(), "rootfs-recovered-").toFile()
+            Files.delete(legacy.toPath())
+            moveDirectoryAtomically(paths.backupRootfsDir, legacy)
+        }
+        return archive
+    }
 
-        deleteTreeNoFollow(paths.rootfsDir)
-        moveDirectoryAtomically(backup, paths.rootfsDir)
-        onLog("[runtime] Rolled back failed upgrade to previous rootfs (${readInstalledVersion(paths) ?: "unknown"}).")
-        return true
+    fun restoreLatestDebianBackup(paths: PosixRuntimeConfig.Paths): File? {
+        val selected = paths.runtimeRoot.listFiles()?.filter {
+            it.name.startsWith("rootfs-backup-") &&
+                Files.isDirectory(it.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+                File(it, "bin/bash").isFile
+        }?.maxByOrNull { it.lastModified() } ?: return null
+        // Archive the current tree as well. Recovery never removes either OS.
+        archiveDebianForReset(paths)
+        moveDirectoryAtomically(selected, paths.rootfsDir)
+        return selected
     }
 
     fun ensureMountPointDirsExist(paths: PosixRuntimeConfig.Paths) {
@@ -155,6 +192,7 @@ internal class RuntimeInstaller(
         // Ensure mount target directories exist inside rootfs with POSIX-appropriate modes
         // (Android's default process umask 0077 would otherwise create 0700 directories).
         File(paths.rootfsDir, "workspace").mkdirs()
+        File(paths.rootfsDir, PosixRuntimeConfig.GUEST_OPENVSCODE_DIR.trimStart('/')).mkdirs()
         File(paths.rootfsDir, "android/shared").mkdirs()
         File(paths.rootfsDir, "android/sdcard").mkdirs()
         File(paths.rootfsDir, PosixRuntimeConfig.GUEST_VSCODE_DATA.trimStart('/')).mkdirs()
@@ -269,6 +307,8 @@ internal class RuntimeInstaller(
             TarGzExtractor.DefaultPosixFsOps.chmod(target, 0b111_101_101)
         }
 
+        installHostCli(localBinDir)
+
         // Expose bundled Node.js v22 at /usr/local/bin/node unless the user replaced it with a regular binary
         if (paths.openvscodeDir.exists()) {
             val nodeLink = File(localBinDir, "node")
@@ -317,7 +357,17 @@ internal class RuntimeInstaller(
             null
         }
 
-        val merged = PosixRuntimeConfig.mergeDefaultVsCodeSettings(existing)
+        // v0.9.x disabled Workspace Trust in the generated Machine defaults.
+        // Change only this app-managed setting; user/User/settings.json is untouched.
+        val migrated = existing?.let { text ->
+            if (text.isNotBlank() && PosixRuntimeConfig.mergeDefaultVsCodeSettings(text) != null) {
+                val obj = org.json.JSONObject(text)
+                if (!obj.optBoolean("security.workspace.trust.enabled", true))
+                    obj.put("security.workspace.trust.enabled", true).toString()
+                else text
+            } else text
+        }
+        val merged = PosixRuntimeConfig.mergeDefaultVsCodeSettings(migrated)
         if (merged == null) {
             if (!targetExists && existing != null) {
                 // Preserve legacy JSONC settings verbatim when migrating to user/Machine/settings.json

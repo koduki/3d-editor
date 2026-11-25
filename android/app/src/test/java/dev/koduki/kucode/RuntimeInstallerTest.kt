@@ -16,95 +16,93 @@ import java.nio.file.Files
 class RuntimeInstallerTest {
 
     @Test
-    fun extractCommitAndRollbackPreserveVersionInsideRootfsAndCleanBackupImmediatelyOnReady() {
+    fun apkUpgradeAndRollbackPreserveDebianHomeAndWorkspace() {
         val base = Files.createTempDirectory("xr-installer-test").toFile()
         try {
             val paths = testPaths(base)
-            val v1Assets = fakeAssets("v1")
-            val installerV1 = RuntimeInstaller(
-                openAsset = { name -> ByteArrayInputStream(v1Assets.getValue(name)) },
-                expectedVersion = "v1",
-                installExtension = { dir -> File(dir, "extensions/kucode-tools").apply { mkdirs() } },
+            fun installer(tag: String) = RuntimeInstaller(
+                openAsset = { name -> ByteArrayInputStream(fakeAssets(tag).getValue(name)) },
+                expectedVersion = tag,
             )
-
-            // 1. Fresh install stages without writing version marker yet
-            assertEquals(RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL, installerV1.ensureExtracted(paths))
-            assertFalse(paths.versionMarker.exists())
-            assertEquals("v1", File(paths.rootfsDir, "etc/release-tag").readText())
-
-            // 2. Commit after READY writes marker inside rootfs and leaves no backup
-            installerV1.commitInstallation(paths)
+            val v1 = installer("v1")
+            assertEquals(RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL, v1.ensureExtracted(paths))
             assertEquals("v1", paths.versionMarker.readText())
-            assertTrue(paths.versionMarker.toPath().startsWith(paths.rootfsDir.toPath()))
-            assertFalse(paths.backupRootfsDir.exists())
-
-            // 3. Re-running v1 verifies marker and skips re-extraction
-            assertEquals(RuntimeInstaller.ExtractOutcome.ALREADY_INSTALLED, installerV1.ensureExtracted(paths))
-
-            // 4. Upgrade to v2 stages v2 and moves intact v1 (with its marker!) to rootfs.previous
-            val v2Assets = fakeAssets("v2")
-            val installerV2 = RuntimeInstaller(
-                openAsset = { name -> ByteArrayInputStream(v2Assets.getValue(name)) },
-                expectedVersion = "v2",
-                installExtension = { dir -> File(dir, "extensions/kucode-tools").apply { mkdirs() } },
-            )
-            assertEquals(RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL, installerV2.ensureExtracted(paths))
-            assertEquals("v2", File(paths.rootfsDir, "etc/release-tag").readText())
-            assertFalse(paths.versionMarker.exists())
-            assertEquals("v1", File(paths.backupRootfsDir, ".kucode-runtime-version").readText())
-
-            // 5. Simulated startup failure before READY rolls back to v1 WITH v1's version marker intact
-            assertTrue(installerV2.rollbackInstallation(paths))
-            assertFalse(paths.backupRootfsDir.exists())
-            assertEquals("v1", File(paths.rootfsDir, "etc/release-tag").readText())
+            assertFalse(paths.openvscodeVersionMarker.exists())
+            v1.commitInstallation(paths)
+            assertEquals("v1", paths.openvscodeVersionMarker.readText())
+            val packageFile = File(paths.rootfsDir, "usr/local/lib/custom-package").apply {
+                parentFile.mkdirs()
+                writeText("installed by apt")
+            }
+            val sdk = File(paths.homeDir, ".sdk/cache").apply { parentFile.mkdirs(); writeText("sdk") }
+            val project = File(paths.workspaceDir, "source").apply { parentFile.mkdirs(); writeText("project") }
+            val v2 = installer("v2")
+            assertEquals(RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL, v2.ensureExtracted(paths))
             assertEquals("v1", paths.versionMarker.readText())
-
-            // Subsequent boot on v1 sees the preserved marker and does NOT re-extract!
-            assertEquals(RuntimeInstaller.ExtractOutcome.ALREADY_INSTALLED, installerV1.ensureExtracted(paths))
-
-            // 6. Successful upgrade to v2 commits marker inside rootfs and immediately removes rootfs.previous
-            assertEquals(RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL, installerV2.ensureExtracted(paths))
-            assertTrue(paths.backupRootfsDir.exists())
-            installerV2.commitInstallation(paths)
-            assertEquals("v2", paths.versionMarker.readText())
-            assertFalse("Old rootfs backup must be removed immediately upon READY commit", paths.backupRootfsDir.exists())
+            assertTrue(paths.backupOpenvscodeDir.exists())
+            assertTrue(v2.rollbackInstallation(paths))
+            assertEquals("v1", paths.openvscodeVersionMarker.readText())
+            assertEquals(RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL, v2.ensureExtracted(paths))
+            v2.commitInstallation(paths)
+            assertEquals("v2", paths.openvscodeVersionMarker.readText())
+            assertEquals("v1", paths.versionMarker.readText())
+            assertEquals("installed by apt", packageFile.readText())
+            assertEquals("sdk", sdk.readText())
+            assertEquals("project", project.readText())
+            assertFalse(paths.backupOpenvscodeDir.exists())
+            assertEquals(RuntimeInstaller.ExtractOutcome.ALREADY_INSTALLED, v2.ensureExtracted(paths))
         } finally {
             deleteTreeNoFollow(base)
         }
     }
 
     @Test
-    fun recoverInterruptedInstallRestoresUncommittedBackupAndCleansCommittedBackup() {
+    fun interruptedLegacyUpgradePreservesBothTreesAndMigratesServer() {
         val base = Files.createTempDirectory("xr-recover-test").toFile()
         try {
             val paths = testPaths(base)
-            val v1Assets = fakeAssets("v1")
-            val installerV1 = RuntimeInstaller(
-                openAsset = { name -> ByteArrayInputStream(v1Assets.getValue(name)) },
-                expectedVersion = "v1",
-                installExtension = { dir -> File(dir, "extensions/kucode-tools").apply { mkdirs() } },
-            )
-
-            // Simulate crash before READY: rootfs.previous has valid v1, rootfs has uncommitted partial v2
             paths.backupRootfsDir.mkdirs()
             File(paths.backupRootfsDir, ".kucode-runtime-version").writeText("v1")
-            File(paths.backupRootfsDir, "opt/openvscode-server/bin").mkdirs()
-            File(paths.backupRootfsDir, "opt/openvscode-server/bin/openvscode-server").writeText("#!/bin/sh\n")
+            File(paths.backupRootfsDir, "bin/bash").apply { parentFile.mkdirs(); writeText("#!/bin/sh") }
+            File(paths.backupRootfsDir, "opt/openvscode-server/bin/openvscode-server").apply {
+                parentFile.mkdirs()
+                writeText("#!/bin/sh")
+            }
             paths.rootfsDir.mkdirs()
-            File(paths.rootfsDir, "broken").writeText("partial")
-
-            // Recovery rolls back to v1 and sees v1 already installed (no re-extract!)
-            assertEquals(RuntimeInstaller.ExtractOutcome.ALREADY_INSTALLED, installerV1.ensureExtracted(paths))
-            assertFalse(paths.backupRootfsDir.exists())
-            assertFalse(File(paths.rootfsDir, "broken").exists())
+            File(paths.rootfsDir, "partial").writeText("preserve me")
+            val installer = RuntimeInstaller(openAsset = { throw AssertionError("unexpected asset") }, expectedVersion = "v1")
+            assertEquals(RuntimeInstaller.ExtractOutcome.ALREADY_INSTALLED, installer.ensureExtracted(paths))
+            assertTrue(paths.openvscodeDir.resolve("bin/openvscode-server").isFile)
             assertEquals("v1", paths.versionMarker.readText())
-
-            // Simulate crash right after writing v1 marker before deleting backup
-            paths.backupRootfsDir.mkdirs()
-            File(paths.backupRootfsDir, "stale").writeText("old")
-            assertEquals(RuntimeInstaller.ExtractOutcome.ALREADY_INSTALLED, installerV1.ensureExtracted(paths))
-            assertFalse(paths.backupRootfsDir.exists())
+            assertEquals("preserve me", paths.runtimeRoot.listFiles()!!.single { it.name.startsWith("rootfs-recovered-") }.resolve("partial").readText())
+            val archived = installer.archiveDebianForReset(paths)!!
+            assertEquals("v1", archived.resolve(".kucode-runtime-version").readText())
+            assertFalse(paths.rootfsDir.exists())
+            assertTrue(paths.openvscodeDir.exists())
+            assertEquals(archived, installer.restoreLatestDebianBackup(paths))
             assertEquals("v1", paths.versionMarker.readText())
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    fun failedServerExtractionDoesNotModifyExistingDebian() {
+        val base = Files.createTempDirectory("xr-failure-test").toFile()
+        try {
+            val paths = testPaths(base)
+            val assets = fakeAssets("v1")
+            val initial = RuntimeInstaller(openAsset = { ByteArrayInputStream(assets.getValue(it)) }, expectedVersion = "v1")
+            initial.ensureExtracted(paths)
+            initial.commitInstallation(paths)
+            val sentinel = File(paths.rootfsDir, "apt-state").apply { writeText("keep") }
+            val failing = RuntimeInstaller(openAsset = { throw java.io.IOException("simulated unavailable storage") }, expectedVersion = "v2")
+            try {
+                failing.ensureExtracted(paths)
+                throw AssertionError("expected extraction failure")
+            } catch (_: java.io.IOException) { }
+            assertEquals("keep", sentinel.readText())
+            assertEquals("v1", paths.openvscodeVersionMarker.readText())
         } finally {
             deleteTreeNoFollow(base)
         }
@@ -188,8 +186,8 @@ class RuntimeInstallerTest {
         try {
             val paths = testPaths(base)
             // Seed bundled openvscode node binary so prepareRuntimeDirectories links /usr/local/bin/node
-            File(paths.rootfsDir, "opt/openvscode-server").mkdirs()
-            File(paths.rootfsDir, "opt/openvscode-server/node").writeText("#!/bin/sh\n")
+            paths.openvscodeDir.mkdirs()
+            File(paths.openvscodeDir, "node").writeText("#!/bin/sh\n")
 
             val caEntries = listOf(
                 CaCertificateEntry("system:root.0", byteArrayOf(0x30, 0x01, 0x02), isUserAdded = false),
@@ -200,6 +198,7 @@ class RuntimeInstallerTest {
                 querySystemDnsServers = { listOf("103.5.140.7", "103.5.140.8") },
                 loadHostCaCertificates = { caEntries },
                 installExtension = { dir -> File(dir, "extensions/kucode-tools").apply { mkdirs() } },
+                installHostCli = {},
             )
 
             installer.prepareRuntimeDirectories(paths, availableProcessors = 4)

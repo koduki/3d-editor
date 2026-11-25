@@ -195,6 +195,8 @@
         <button id="notifSettingsBtn">通知設定</button>
         <button id="batterySettingsBtn">バッテリー最適化除外</button>
         <button id="restartBtn">サーバー再起動</button>
+        <button id="resetDebianBtn">Debian 初期化（バックアップ保持）</button>
+        <button id="restoreDebianBtn">最新 Debian バックアップを復元</button>
       </div>
       <div id="storageHint" class="hint"></div>
     </section>
@@ -223,6 +225,7 @@
         <button id="loadSessionBtn" class="primary">表示する</button>
         <button id="copySessionBtn" disabled>AI レポートをコピー</button>
         <button id="exportSessionBtn">共有フォルダへ保存</button>
+        <button id="shareDiagnosticBtn">別のKuCodeへ診断を共有</button>
       </div>
       <div id="sessionExportStatus" class="hint"></div>
       <pre id="sessionReportViewer">（セッションを選択して「表示する」を押すと、AI にそのまま渡せる診断バンドルを表示します）</pre>
@@ -491,6 +494,17 @@
       window.KuCodeHost?.restartServer();
     });
 
+    document.getElementById('resetDebianBtn').addEventListener('click', () => {
+      if (window.confirm('作業中のターミナル・ビルドを終了しましたか？ Debian のOSとaptを初期化します。旧rootfsをバックアップとして保持し、HOME・workspaceは変更しません。続行しますか？')) {
+        window.KuCodeHost?.resetDebian();
+      }
+    });
+
+    document.getElementById('restoreDebianBtn').addEventListener('click', () => {
+      if (window.confirm('作業中のビルドを停止してください。最新のDebianバックアップを復元し、現在のrootfsも別のバックアップとして保持します。続行しますか？')) {
+        window.KuCodeHost?.restoreDebian();
+      }
+    });
     refreshSessionsBtn.addEventListener('click', refreshSessions);
     loadSessionBtn.addEventListener('click', () => {
       requestSessionBundle(sessionSelect.value || 'latest', sessionFormatSelect.value || 'ai', false);
@@ -502,6 +516,9 @@
       requestSessionBundle(previousAbnormalId, 'ai', true);
     });
     copySessionBtn.addEventListener('click', () => copyText(latestSessionBundleText, copySessionBtn, 'AI レポートをコピー'));
+    document.getElementById('shareDiagnosticBtn').addEventListener('click', () => {
+      window.KuCodeHost?.shareDiagnostic(sessionSelect.value || 'latest');
+    });
     exportSessionBtn.addEventListener('click', () => {
       if (!window.KuCodeHost || typeof window.KuCodeHost.exportSessionReport !== 'function') return;
       exportSessionBtn.disabled = true;

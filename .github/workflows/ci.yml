@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 25
     outputs:
       has_release: ${{ steps.release_build.outputs.has_release }}
+      bootstrap_runtime: ${{ steps.runtime_source.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,45 +34,65 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Select runtime asset source
+        id: runtime_source
+        run: |
+          if [[ -f runtime-assets.lock.json ]]; then
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Ensure Android SDK API 36 Platform & NDK
         run: |
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort -V | tail -n 1)"
           echo "Using sdkmanager: $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-36" "build-tools;35.0.0"
-          if [[ ! -d "$ANDROID_HOME/ndk" ]] || [[ -z "$(ls -A "$ANDROID_HOME/ndk" 2>/dev/null)" ]]; then
+          if [[ ! -f runtime-assets.lock.json ]]; then
             "$SDKMANAGER" "ndk;27.2.12479018"
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           fi
-          ls -la "$ANDROID_HOME/ndk"
 
       - name: Cache Built PRoot Binaries (arm64-v8a)
+        if: steps.runtime_source.outputs.bootstrap == 'true'
         uses: actions/cache@v4
         with:
           path: android/app/src/main/jniLibs/arm64-v8a
-          key: proot-arm64-${{ hashFiles('scripts/build-proot-android.sh') }}
+          key: proot-arm64-ndk27.2-${{ hashFiles('scripts/build-proot-android.sh') }}
 
       - name: Build PRoot + Loader for Android arm64-v8a
+        if: steps.runtime_source.outputs.bootstrap == 'true'
         run: ./scripts/build-proot-android.sh
 
       - name: Cache Embedded Runtime Archives (Debian + OpenVSCode)
+        if: steps.runtime_source.outputs.bootstrap == 'true'
         uses: actions/cache@v4
         with:
           path: android/app/src/main/assets/runtime
           key: runtime-assets-${{ env.OPENVSCODE_VERSION }}-${{ hashFiles('scripts/fetch-runtime-assets.sh') }}
 
       - name: Fetch Debian Minimal Rootfs & OpenVSCode Server
+        if: steps.runtime_source.outputs.bootstrap == 'true'
         run: ./scripts/fetch-runtime-assets.sh
 
       - name: Lock and materialize runtime assets through the shared consumer
         run: |
           producer="$RUNNER_TEMP/runtime-producer"
           mkdir -p "$producer"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            tag="$GITHUB_REF_NAME"
+          if [[ -f runtime-assets.lock.json ]]; then
+            python3 scripts/runtime-assets.py fetch --lock runtime-assets.lock.json
+            cp runtime-assets.lock.json "$producer/runtime-assets.lock.json"
           else
-            tag="v0-ci-${GITHUB_SHA:0:12}"
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              tag="$GITHUB_REF_NAME"
+            elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+              tag="v0-runtime-${GITHUB_SHA:0:12}"
+            else
+              tag="v0-ci-${GITHUB_SHA:0:12}"
+            fi
+            python3 scripts/runtime-assets.py lock --release "$tag" --output "$producer/runtime-assets.lock.json"
           fi
-          python3 scripts/runtime-assets.py lock --release "$tag" --output "$producer/runtime-assets.lock.json"
           for f in libproot.so libproot-loader.so; do
             cp "android/app/src/main/jniLibs/arm64-v8a/$f" "$producer/$f"
             rm "android/app/src/main/jniLibs/arm64-v8a/$f"
@@ -82,9 +103,17 @@ jobs:
           done
           python3 scripts/runtime-assets.py fetch --lock "$producer/runtime-assets.lock.json" --source-dir "$producer" --cache "$RUNNER_TEMP/runtime-consumer-cache"
           python3 scripts/runtime-assets.py verify --lock "$producer/runtime-assets.lock.json"
+          echo "KUCODE_RUNTIME_LOCK=$producer/runtime-assets.lock.json" >> "$GITHUB_ENV"
+
+      - name: Upload candidate runtime lock for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: kucode-runtime-lock
+          path: ${{ runner.temp }}/runtime-producer/runtime-assets.lock.json
+          if-no-files-found: error
 
       - name: Upload standalone runtime assets for release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && steps.runtime_source.outputs.bootstrap == 'true')
         uses: actions/upload-artifact@v4
         with:
           name: kucode-runtime-assets
@@ -103,6 +132,10 @@ jobs:
           tar -xzf "$archive" -C "$server" --strip-components=1
           rm -f "$archive"
           "$server/node" --check android/app/src/main/assets/runtime-probes.cjs
+          bash -n scripts/probe-android-arm64.sh scripts/aura-language-smoke.sh scripts/aura-self-host-e2e.sh
+          "$server/node" --check android/app/src/main/assets/kucode-cli.cjs
+          "$server/node" --check android/app/src/main/assets/kucode-android/extension.js
+          "$server/node" --test tests/kucode-android.test.cjs
           "$server/node" --check android/app/src/main/assets/kucode-tools/extension.js
           "$server/node" --check android/app/src/main/assets/kucode-tools/acp-client.js
           "$server/node" --check android/app/src/main/assets/kucode-tools/acp-webview.js
@@ -161,6 +194,9 @@ jobs:
           RELEASE_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
           ls -lh "$APK" "$RELEASE_APK"
           unzip -p "$APK" assets/runtime-probes.cjs | cmp - android/app/src/main/assets/runtime-probes.cjs
+          unzip -p "$APK" assets/kucode-cli.cjs | cmp - android/app/src/main/assets/kucode-cli.cjs
+          unzip -p "$APK" assets/kucode-android/extension.js | cmp - android/app/src/main/assets/kucode-android/extension.js
+          unzip -p "$APK" assets/kucode-android/package.json | cmp - android/app/src/main/assets/kucode-android/package.json
           unzip -p "$APK" assets/kucode-tools/extension.js | cmp - android/app/src/main/assets/kucode-tools/extension.js
           unzip -p "$APK" assets/kucode-tools/acp-client.js | cmp - android/app/src/main/assets/kucode-tools/acp-client.js
           unzip -p "$APK" assets/kucode-tools/acp-webview.js | cmp - android/app/src/main/assets/kucode-tools/acp-webview.js
@@ -269,6 +305,46 @@ jobs:
             dist-apk/kucode-release.apk
             dist-apk/kucode-release.aab
           retention-days: 90
+
+  runtime-bootstrap:
+    name: Publish initial independent runtime assets
+    needs: android-apk
+    if: github.ref == 'refs/heads/main' && needs.android-apk.outputs.bootstrap_runtime == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: kucode-runtime-assets
+          path: runtime-release-files
+      - name: Publish immutable runtime-only prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v0-runtime-${GITHUB_SHA:0:12}"
+          test "$(jq -r .release runtime-release-files/runtime-assets.lock.json)" = "$tag"
+          if ! gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GH_REPO" --target "$GITHUB_SHA" --prerelease \
+              --title "KuCode runtime assets $tag" \
+              --notes "Runtime-only ARM64 artifacts. Review and commit the lock before consuming. Not an APK release."
+          fi
+          # Publish the lock last. Recover a partially uploaded release on retry,
+          # but never replace a published file (including the lock).
+          existing="$(gh release view "$tag" --repo "$GH_REPO" --json assets --jq '.assets[].name')"
+          for name in libproot.so libproot-loader.so debian-arm64-rootfs.tgz openvscode-server-linux-arm64.tgz debian-manifest.txt runtime-assets.lock.json; do
+            f="runtime-release-files/$name"
+            if grep -Fxq "$name" <<< "$existing"; then
+              tmp="$(mktemp -d)"
+              gh release download "$tag" --repo "$GH_REPO" --pattern "$name" --dir "$tmp"
+              cmp "$f" "$tmp/$name"
+              rm -rf "$tmp"
+            else
+              gh release upload "$tag" "$f" --repo "$GH_REPO"
+            fi
+          done
 
   release:
     name: Publish GitHub Release

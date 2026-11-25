@@ -114,7 +114,7 @@ class PosixRuntimeConfigTest {
         val json = JSONObject(PosixRuntimeConfig.buildMinimalVsCodeSettingsJson())
         assertEquals(false, json.getBoolean("editor.minimap.enabled"))
         assertEquals(false, json.getBoolean("breadcrumbs.enabled"))
-        assertEquals(false, json.getBoolean("security.workspace.trust.enabled"))
+        assertEquals(true, json.getBoolean("security.workspace.trust.enabled"))
         assertEquals(true, json.getBoolean("chat.disableAIFeatures"))
         assertEquals("off", json.getString("telemetry.telemetryLevel"))
         assertEquals("off", json.getString("files.autoSave"))

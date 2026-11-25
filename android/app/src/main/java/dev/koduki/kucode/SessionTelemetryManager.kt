@@ -625,6 +625,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
             totalMemMb = if (memInfo.totalMem > 0) memInfo.totalMem / BYTES_PER_MB else -1L,
             lowMemory = memInfo.lowMemory,
             pssMb = pssMb,
+            hostCpuTimeMs = runCatching { android.os.Process.getElapsedCpuTime() }.getOrDefault(-1L),
             jvmHeapUsedMb = jvmUsedMb,
             jvmHeapMaxMb = jvmMaxMb,
             nativeHeapMb = nativeMb,
@@ -718,7 +719,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
             }.getOrDefault(false)
 
             return SessionLogStore.SessionEnvMetadata(
-                appVersion = "$versionName (code=$versionCode, targetSdk=${context.applicationInfo.targetSdkVersion})",
+                appVersion = "$versionName (code=$versionCode, targetSdk=${context.applicationInfo.targetSdkVersion}, git=${context.getString(R.string.kucode_build_sha)})",
                 packageName = context.packageName,
                 deviceSummary = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})",
                 androidSummary = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
