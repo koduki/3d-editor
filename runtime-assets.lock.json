@@ -1,0 +1,35 @@
+{
+  "abi": "arm64-v8a",
+  "assets": {
+    "debian-arm64-rootfs.tgz": {
+      "sha256": "2de4c5150be608c50e1927e4736d59036426214fe1b2d84907ade841ebc42bbe",
+      "size": 28294967
+    },
+    "debian-manifest.txt": {
+      "sha256": "9f7b48a03cef68e093a16f26312679ea536b71ab64494c6279a6a7357138367d",
+      "size": 4916
+    },
+    "libproot-loader.so": {
+      "sha256": "ee2f686c978ef9edff446ba4b47c6fa0f6c05d363b2612453c8bfe4c07050073",
+      "size": 17624
+    },
+    "libproot.so": {
+      "sha256": "949d1b100b8ddfeb0ce64a42c0271f465b5a1c3ba04f005beeeb9e13788b9c54",
+      "size": 278208
+    },
+    "openvscode-server-linux-arm64.tgz": {
+      "sha256": "36d9c14036489b63de84ebace837fcacf7e60e669a0dc715802c5443684ea4dc",
+      "size": 74488835
+    }
+  },
+  "producer": {
+    "commit": "b47075326449b2ae64e02456f4b1ad4c9f8d3a5c",
+    "ndk": "27.2.12479018",
+    "sourceScripts": {
+      "scripts/build-proot-android.sh": "318a7e8a1a7b20960402934ca930613dcb4dee48c5dee00fd2c1a4cc78ca50e8",
+      "scripts/fetch-runtime-assets.sh": "6a48de26f4b8b71a0742228aeddbe2f6af6b17c6f30200682aba607f11f6cfae"
+    }
+  },
+  "release": "v0-runtime-b47075326449",
+  "schema": 1
+}

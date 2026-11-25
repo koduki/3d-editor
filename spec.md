@@ -144,7 +144,7 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
 
 ---
 
-## 5. 次期仕様：AURAセルフホスト（Accepted / 未実装）
+## 5. 次期仕様：AURAセルフホスト（Accepted / 実機受け入れ未完了）
 
 本節は2026-11-25確定の次期規範仕様。第1〜4節はv0.9.1時点の実装ベースラインであり、矛盾する場合は次期開発に本節を優先する。詳細な理由・非ゴールは [ADR-0012](docs/adr/0012-aura-self-host-standard-linux.md)、進捗は [Epic #17](https://github.com/koduki/kucode/issues/17) を参照。
 

@@ -26,7 +26,7 @@ All five files are verified by size and SHA-256 before staging; ELF AArch64 and 
 
 `--source-dir` can use a trusted local producer output with the exact same checks. `verify` checks an existing checkout. Never treat a lock generated from untrusted binaries as an independent integrity check.
 
-Current status: release asset publication and a reviewed concrete lock still need a successful producer release; current historical APK releases do not expose the five standalone assets. Actual AURA build is NOT RUN. No new SDK version is claimed compatible.
+Historical app releases do not expose the five standalone assets. The initial independently produced runtime-only release is referenced by the reviewed source-controlled lock; see the bootstrap section below. Actual AURA build is NOT RUN. No new SDK version is claimed compatible.
 
 ## Bootstrap and committed lock
 
