@@ -236,8 +236,8 @@ class RuntimeInstallerTest {
                     Files.getPosixFilePermissions(paths.shmDir.toPath()),
             )
 
-            // Confirm CLI host helpers (including kucode-install-copilot) are installed in /usr/local/bin with 0755 permissions
-            for (helper in listOf("kucode-copy", "kucode-paste", "kucode-open", "xdg-open", "kucode-logs", "kucode-install-copilot")) {
+            // Confirm CLI host helpers (including kucode-install-agy and kucode-install-copilot) are installed in /usr/local/bin with 0755 permissions
+            for (helper in listOf("kucode-copy", "kucode-paste", "kucode-open", "xdg-open", "kucode-logs", "kucode-install-agy", "kucode-install-copilot")) {
                 val scriptFile = File(paths.rootfsDir, "usr/local/bin/$helper")
                 assertTrue("$helper should be installed", scriptFile.isFile)
                 val perms = Files.getPosixFilePermissions(scriptFile.toPath())

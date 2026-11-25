@@ -11,7 +11,7 @@ import java.io.File
  */
 object PosixRuntimeConfig {
 
-    const val RUNTIME_VERSION = "0.9.0-debian12-openvscode-1.109.5"
+    const val RUNTIME_VERSION = "0.9.1-debian12-openvscode-1.109.5"
     const val ASSET_ROOTFS = "runtime/debian-arm64-rootfs.tgz"
     const val ASSET_OPENVSCODE = "runtime/openvscode-server-linux-arm64.tgz"
 
@@ -738,6 +738,61 @@ object PosixRuntimeConfig {
             });
         """.trimIndent() + "\n"
 
+        result["kucode-install-agy"] = """
+            #!/usr/bin/env bash
+            set -euo pipefail
+            export PATH="${'$'}HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            echo "[kucode] Setting up official Google Antigravity CLI (agy) for ACP chat & terminal..."
+            if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+              echo "[kucode] Installing curl & git via apt..."
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git
+            fi
+            mkdir -p "${'$'}HOME/.local/bin"
+            curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --skip-path
+            BIN="${'$'}HOME/.local/bin/agy"
+            if [ ! -x "${'$'}BIN" ]; then
+              FOUND="$(command -v agy 2>/dev/null || true)"
+              if [ -n "${'$'}FOUND" ] && [ -x "${'$'}FOUND" ]; then
+                ln -sf "${'$'}FOUND" "${'$'}BIN"
+              else
+                echo "[kucode] ERROR: agy binary not found at ${'$'}BIN" >&2
+                exit 1
+              fi
+            fi
+            set +e
+            PROBE_OUT="$( "${'$'}BIN" --version 2>&1 )"
+            PROBE_RC=${'$'}?
+            set -e
+            if [ "${'$'}PROBE_RC" -ne 0 ]; then
+              if [ -x /lib/ld-linux-aarch64.so.1 ] && /lib/ld-linux-aarch64.so.1 "${'$'}BIN" --version >/dev/null 2>&1; then
+                echo "[kucode] Applying ld-linux-aarch64.so.1 exec wrapper for kernel compatibility..."
+                mv "${'$'}BIN" "${'$'}HOME/.local/bin/agy.real"
+                cat > "${'$'}BIN" <<'WRAP'
+            #!/bin/sh
+            exec /lib/ld-linux-aarch64.so.1 "${'$'}HOME/.local/bin/agy.real" "${'$'}@"
+            WRAP
+                chmod 755 "${'$'}BIN"
+                PROBE_OUT="$( "${'$'}BIN" --version 2>&1 )"
+              elif [ "${'$'}PROBE_RC" -eq 159 ]; then
+                echo "[kucode] ERROR: agy exited with SIGSYS (159) — Android seccomp blocked a syscall (e.g. faccessat2)." >&2
+                echo "[kucode] Output: ${'$'}PROBE_OUT" >&2
+                echo "[kucode] Check logs in ~/.gemini/antigravity-cli/log/acp-*.log or restart with PROOT_NO_SECCOMP." >&2
+                exit 159
+              else
+                echo "[kucode] ERROR: agy --version failed (rc=${'$'}PROBE_RC): ${'$'}PROBE_OUT" >&2
+                exit "${'$'}PROBE_RC"
+              fi
+            fi
+            echo "[kucode] Installed: ${'$'}PROBE_OUT"
+            if "${'$'}BIN" acp --help >/dev/null 2>&1; then
+              echo "[kucode] Verified: 'agy acp' ACP v1 server subcommand is ready."
+            else
+              echo "[kucode] WARNING: 'agy acp --help' did not succeed; ensure agy is up to date." >&2
+            fi
+            echo "[kucode] Next step: run 'agy acp --login' (recommended on Android XR) or 'agy' to sign in."
+        """.trimIndent() + "\n"
+
         result["kucode-install-copilot"] = """
             #!/usr/bin/env bash
             set -euo pipefail
@@ -774,7 +829,7 @@ object PosixRuntimeConfig {
     }
 
     fun buildProfileDEnvScript(): String = """
-        # Managed by KuCode: keep user-local CLI tools (Copilot CLI, Claude, uv, etc.) on PATH
+        # Managed by KuCode: keep user-local CLI tools (Antigravity agy, Copilot CLI, Claude, uv, etc.) on PATH
         if [ -d "${'$'}{HOME:-/root}/.local/bin" ]; then
           case ":${'$'}PATH:" in
             *":${'$'}{HOME:-/root}/.local/bin:"*) ;;
@@ -818,10 +873,10 @@ object PosixRuntimeConfig {
 
 **空間に、書く。** — APK 1 本で完結する、空間コンピューティングのためのコードエディタ（Debian minimal + 内蔵 `openvscode-server` + 内蔵 ACP AI チャット）です。
 
-## AI エージェント（Zed ACP プロトコル内蔵）
-- 左端 **KuCode** アイコン上部の **「AI エージェント (ACP)」** パネルから、GitHub Copilot CLI (`copilot --acp --stdio`)・Gemini CLI・Claude Code・Codex CLI・OpenCode を OST 純黒 UI で直接操作できます。
+## AI エージェント（Zed ACP v1 プロトコル内蔵 / Google Antigravity 標準対応）
+- 左端 **KuCode** アイコン上部の **「AI エージェント (ACP)」** パネルから、**Google Antigravity CLI (`agy acp`)** を既定エージェントとして、GitHub Copilot CLI・Gemini CLI・Claude Code・Codex CLI・OpenCode を OST 純黒 UI で直接操作できます（モデル・思考レベル切替、ツール権限承認対応）。
 - 選択コードの添付は **`Ctrl+Shift+I`**（またはパネル内の「+ 選択範囲」）。
-- 初回の Copilot CLI 導入＆ログインはパネル内のボタン、またはターミナルで `kucode-install-copilot && copilot login` を実行してください（Node.js v22 は `/usr/local/bin/node` として初期導入済み）。
+- 初回の **Antigravity CLI (`agy`)** 導入＆ログインはパネル内のボタン、またはターミナルで `kucode-install-agy && agy acp --login` を実行してください（Copilot CLI は `kucode-install-copilot && copilot login`、Node.js v22 は `/usr/local/bin/node` として初期導入済み）。
 
 ## 基本操作（物理キーボード）
 - **ファイルを開く**: 左サイドバーをクリック、または `Ctrl+P` / `Ctrl+O`
@@ -837,10 +892,14 @@ object PosixRuntimeConfig {
 ## Android ↔ POSIX ファイル共有 & 永続領域
 - **POSIX → Android**: `/workspace/android`（`/android/shared` および全ファイルアクセス許可時は `/android/sdcard`）
 - **Android → POSIX**: Android XR の「Files」アプリから **KuCode**（`/workspace`）および **KuCode Logs**（起動〜終了ごとの診断レポート）を直接参照できます。
-- **永続ホーム (`/root`)**: `~/.ssh`, `~/.gitconfig`, `~/.config/gh`, `~/.local/bin` は rootfs 外に分離保存されるため、アプリ更新後も引き継がれます。
+- **永続ホーム (`/root`)**: `~/.local/bin`, `~/.gemini`, `~/.ssh`, `~/.gitconfig`, `~/.config/gh` は rootfs 外に分離保存されるため、アプリ更新後も引き継がれます。
 
-## `gh` / `git` / Copilot CLI 導入（POSIX ターミナル内）
+## Antigravity (`agy`) / `gh` / Copilot CLI 導入（POSIX ターミナル内）
 ```bash
+# Google Antigravity CLI (既定 ACP エージェント)
+kucode-install-agy && agy acp --login
+
+# GitHub CLI / Copilot CLI など
 apt update && apt install -y ca-certificates git gh curl openssh-client
 gh auth login
 kucode-install-copilot && copilot login

@@ -484,6 +484,18 @@ async function sendSelectionToAcpCommand() {
   }
 }
 
+async function setupAntigravityCliCommand() {
+  if (acpProviderInstance) {
+    await acpProviderInstance.openInTerminal('kucode-install-agy && agy acp --login', 'KuCode: Antigravity CLI (agy) Setup');
+    return;
+  }
+  if (typeof vscode.window.createTerminal === 'function') {
+    const term = vscode.window.createTerminal({ name: 'KuCode: Antigravity CLI (agy) Setup' });
+    term.show(false);
+    term.sendText('kucode-install-agy && agy acp --login', true);
+  }
+}
+
 async function setupCopilotCliCommand() {
   if (acpProviderInstance) {
     await acpProviderInstance.openInTerminal('kucode-install-copilot && copilot login', 'KuCode: Copilot CLI Setup');
@@ -500,8 +512,13 @@ async function openMenuCommand() {
   const items = [
     {
       label: '$(comment-discussion) AI エージェント (ACP) チャットを開く',
-      description: 'Copilot CLI / Gemini / Claude / Codex / OpenCode を OST 純黒チャットで利用',
+      description: 'Google Antigravity (agy acp) / Copilot / Gemini / Claude / Codex / OpenCode を OST 純黒チャットで利用',
       action: openAcpChatCommand,
+    },
+    {
+      label: '$(rocket) Google Antigravity CLI (agy) をインストール / ログイン',
+      description: '統合ターミナルで kucode-install-agy && agy acp --login を実行',
+      action: setupAntigravityCliCommand,
     },
     {
       label: '$(sparkle) GitHub Copilot CLI (ACP) をインストール / ログイン',
@@ -587,9 +604,15 @@ function createSidebarMenuProvider() {
   const entries = [
     {
       label: 'AI エージェント (ACP)',
-      description: 'Copilot / Gemini / Claude',
+      description: 'Antigravity (agy) / Copilot / Gemini',
       icon: 'comment-discussion',
       command: 'kucode.openAcpChat',
+    },
+    {
+      label: 'Antigravity (agy) セットアップ',
+      description: 'インストール & ログイン',
+      icon: 'rocket',
+      command: 'kucode.setupAntigravityCli',
     },
     {
       label: 'Copilot CLI セットアップ',
@@ -695,12 +718,13 @@ function activate(context) {
   acpProviderInstance = new AcpChatViewProvider({
     reportHostEvent,
     writeHostClipboard,
-    extensionVersion: '0.9.0',
+    extensionVersion: '0.9.1',
   });
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kucode.openAcpChat', openAcpChatCommand),
     vscode.commands.registerCommand('kucode.sendSelectionToAcp', sendSelectionToAcpCommand),
+    vscode.commands.registerCommand('kucode.setupAntigravityCli', setupAntigravityCliCommand),
     vscode.commands.registerCommand('kucode.setupCopilotCli', setupCopilotCliCommand),
     vscode.commands.registerCommand('kucode.openMenu', openMenuCommand),
     vscode.commands.registerCommand('kucode.editorCopy', editorCopyCommand),

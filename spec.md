@@ -1,8 +1,8 @@
 # KuCode 仕様書 (spec.md)
 
 - **Product:** KuCode（くうこーど / *"koo-code"*）— *空間に、書く。*
-- **Version:** 0.9.0
-- **Date:** 2026-11-24
+- **Version:** 0.9.1
+- **Date:** 2026-11-25
 - **Status:** Active
 
 ---
@@ -22,8 +22,8 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
    - **POSIX → Android 領域（マウント）**：アプリ共有領域を `/android/shared` に常時マウントし、ユーザーが全ファイルアクセス（`MANAGE_EXTERNAL_STORAGE`）を許可した場合は `/storage/emulated/0` を `/android/sdcard` としてマウント（`/workspace/android` から直接参照可能）。
    - **Android → POSIX 領域（通常フォルダ公開）**：Android 標準 `DocumentsProvider`（`KuCodeDocumentsProvider`）を実装し、Android XR の標準「Files」アプリや他アプリから POSIX の `/workspace` を通常フォルダとして読み書きできる（`NOFOLLOW_LINKS` 境界制御付き）。
 4. **内蔵ターミナル・パッケージ管理 & 内蔵 ACP AI エージェントチャット**
-   - 人間と AI エージェントが同じ `/workspace` 上で開発できるよう、Debian POSIX 世界（`apt` / `git` / `gh` / `/usr/local/bin/node`）と `kucode-install-copilot` 補助コマンドを内蔵する。
-   - 内蔵拡張 `kucode-tools` に **ACP v1（Agent Client Protocol）対応 OST 純黒チャットパネル**（`kucode.acpChatView`）を統合し、GitHub Copilot CLI（`copilot --acp --stdio`）・Gemini CLI・Claude Code・Codex CLI・OpenCode 等の ACP 対応エージェントを Open VSX 制約なく利用できる。
+   - 人間と AI エージェントが同じ `/workspace` 上で開発できるよう、Debian POSIX 世界（`apt` / `git` / `gh` / `/usr/local/bin/node`）と `kucode-install-agy` / `kucode-install-copilot` 補助コマンドを内蔵する。
+   - 内蔵拡張 `kucode-tools` に **ACP v1（Agent Client Protocol）対応 OST 純黒チャットパネル**（`kucode.acpChatView`）を統合し、**Google Antigravity CLI（`agy acp`）** を既定エージェントとして、GitHub Copilot CLI（`copilot --acp --stdio`）・Gemini CLI・Claude Code・Codex CLI・OpenCode 等の ACP 対応エージェントを Open VSX 制約なく利用できる（`configOptions` によるモデル・思考レベル切替、Diff 表示、`-32000` 認証誘導に対応）。
    - `openvscode-server` 下部の統合ターミナルを標準としつつ、実機で `node-pty` が動作しない場合でも `boot.html` のフォールバック CLI コンソールから PRoot 経由で `bash -lc "<cmd>"` を直接実行できる。
 
 ---

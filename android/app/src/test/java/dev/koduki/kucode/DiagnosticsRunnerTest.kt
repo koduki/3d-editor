@@ -117,6 +117,9 @@ class DiagnosticsRunnerTest {
         assertTrue(checks.getValue("Debian apt HTTPS (システム CA)").contains("ca: [ca]"))
         assertTrue(checks.getValue("GitHub HTTPS (システム CA)").contains("https://api.github.com/zen"))
         assertTrue(checks.getValue("GitHub HTTPS (システム CA)").contains("User-Agent"))
+        val cliCheck = checks.entries.first { it.key.startsWith("CLI (") }.value
+        assertTrue(cliCheck.contains("agy"))
+        assertTrue(cliCheck.contains("copilot"))
     }
 
     @Test

@@ -13,6 +13,16 @@ const MAX_TERMINALS = 8;
 const DEFAULT_TERMINAL_OUTPUT_LIMIT = 256 * 1024;
 
 const DEFAULT_AGENT_PRESETS = {
+  antigravity: {
+    id: 'antigravity',
+    label: 'Google Antigravity (agy acp)',
+    command: 'agy',
+    args: ['acp', '--disable-telemetry'],
+    env: {},
+    installCommand: 'kucode-install-agy && agy acp --login',
+    loginCommand: 'agy acp --login',
+    description: 'Google 公式 Antigravity CLI の ACP v1 サーバー（モデル・思考レベル切替・ツール承認対応）',
+  },
   copilot: {
     id: 'copilot',
     label: 'GitHub Copilot CLI (ACP)',
@@ -175,6 +185,13 @@ function createJsonRpcError(code, message, data) {
   return err;
 }
 
+function isAuthRequiredError(err) {
+  if (!err) return false;
+  if (Number(err.code) === -32000) return true;
+  const msg = typeof err === 'string' ? err : (err.message || String(err));
+  return /auth|login|token|401|not logged in|unauthorized|sign in|credentials/i.test(msg);
+}
+
 class AcpSessionClient extends EventEmitter {
   /**
    * @param {object} options
@@ -200,7 +217,7 @@ class AcpSessionClient extends EventEmitter {
     this.writeOpenEditorText = options.writeOpenEditorText || null;
     this.initTimeoutMs = options.initTimeoutMs || DEFAULT_INIT_TIMEOUT_MS;
     this.requestTimeoutMs = options.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS;
-    this.clientVersion = options.clientVersion || '0.9.0';
+    this.clientVersion = options.clientVersion || '0.9.1';
 
     this.proc = null;
     this.connected = false;
@@ -209,6 +226,8 @@ class AcpSessionClient extends EventEmitter {
     this.agentCapabilities = {};
     this.authMethods = [];
     this.modes = null;
+    this.configOptions = [];
+    this.sessionTitle = null;
     this.nextRpcId = 1;
     this.pendingRequests = new Map();
     this.stdoutBuffer = '';
@@ -288,16 +307,27 @@ class AcpSessionClient extends EventEmitter {
     this.authMethods = Array.isArray(initResp && initResp.authMethods) ? initResp.authMethods : [];
     this.connected = true;
 
-    const sessionResp = await this.sendRequest(
-      'session/new',
-      {
-        cwd: this.workspaceRoot,
-        mcpServers: [],
-      },
-      this.initTimeoutMs
-    );
+    let sessionResp;
+    try {
+      sessionResp = await this.sendRequest(
+        'session/new',
+        {
+          cwd: this.workspaceRoot,
+          mcpServers: [],
+        },
+        this.initTimeoutMs
+      );
+    } catch (err) {
+      if (err && typeof err === 'object' && this.authMethods.length > 0 && !err.authMethods) {
+        err.authMethods = this.authMethods;
+      }
+      throw err;
+    }
     this.sessionId = sessionResp && sessionResp.sessionId ? String(sessionResp.sessionId) : null;
     this.modes = sessionResp && sessionResp.modes ? sessionResp.modes : null;
+    this.configOptions = Array.isArray(sessionResp && sessionResp.configOptions)
+      ? sessionResp.configOptions
+      : [];
     if (!this.sessionId) {
       throw new Error('ACP session/new returned empty sessionId');
     }
@@ -307,12 +337,15 @@ class AcpSessionClient extends EventEmitter {
       agentInfo: this.agentInfo,
       agentCapabilities: this.agentCapabilities,
       modes: this.modes,
+      configOptions: this.configOptions,
       authMethods: this.authMethods,
     });
     return {
       sessionId: this.sessionId,
       agentInfo: this.agentInfo,
       modes: this.modes,
+      configOptions: this.configOptions,
+      authMethods: this.authMethods,
     };
   }
 
@@ -341,6 +374,36 @@ class AcpSessionClient extends EventEmitter {
       sessionId: this.sessionId,
       modeId: String(modeId),
     });
+  }
+
+  async setConfigOption(configId, value, optionType) {
+    if (!this.connected || !this.sessionId) {
+      throw new Error('ACP session is not connected');
+    }
+    const params = {
+      sessionId: this.sessionId,
+      configId: String(configId),
+      value: optionType === 'boolean' ? Boolean(value) : String(value),
+    };
+    if (optionType === 'boolean') {
+      params.type = 'boolean';
+    }
+    const resp = await this.sendRequest('session/set_config_option', params);
+    if (resp && Array.isArray(resp.configOptions)) {
+      this.configOptions = resp.configOptions;
+    }
+    return this.configOptions;
+  }
+
+  async authenticate(methodId) {
+    if (!this.connected) {
+      throw new Error('ACP client is not connected');
+    }
+    return await this.sendRequest(
+      'authenticate',
+      { methodId: String(methodId) },
+      this.initTimeoutMs
+    );
   }
 
   cancel() {
@@ -387,6 +450,8 @@ class AcpSessionClient extends EventEmitter {
   async disconnect() {
     this.connected = false;
     this.sessionId = null;
+    this.configOptions = [];
+    this.sessionTitle = null;
     this._cleanupAllTerminals();
     const proc = this.proc;
     this.proc = null;
@@ -472,6 +537,12 @@ class AcpSessionClient extends EventEmitter {
     // Incoming notification from agent
     if (msg.id === undefined && typeof msg.method === 'string') {
       if (msg.method === 'session/update' && msg.params) {
+        const update = msg.params.update;
+        if (update && update.sessionUpdate === 'config_option_update' && Array.isArray(update.configOptions)) {
+          this.configOptions = update.configOptions;
+        } else if (update && update.sessionUpdate === 'session_info_update' && update.title) {
+          this.sessionTitle = String(update.title);
+        }
         this.emit('sessionUpdate', msg.params);
       } else {
         this.emit('notification', msg);
@@ -742,5 +813,6 @@ module.exports = {
   resolveExecutableOnPath,
   resolveSafeWorkspacePath,
   sliceLines,
+  isAuthRequiredError,
   AcpSessionClient,
 };

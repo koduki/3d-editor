@@ -7,6 +7,7 @@ const {
   DEFAULT_AGENT_PRESETS,
   resolveExecutableOnPath,
   resolveSafeWorkspacePath,
+  isAuthRequiredError,
   AcpSessionClient,
 } = require('./acp-client');
 
@@ -51,22 +52,24 @@ class AcpChatViewProvider {
   constructor(options) {
     this.reportHostEvent = (options && options.reportHostEvent) || (() => {});
     this.writeHostClipboard = (options && options.writeHostClipboard) || null;
-    this.extensionVersion = (options && options.extensionVersion) || '0.9.0';
+    this.extensionVersion = (options && options.extensionVersion) || '0.9.1';
     this.webviewView = null;
     this.client = null;
-    this.activeAgentId = 'copilot';
+    this.activeAgentId = 'antigravity';
     this.permissionMode = 'ask';
     this.pendingPermissions = new Map();
     this.nextPermSeq = 1;
     this.isPrompting = false;
     this.availableCommands = [];
+    this.configOptions = [];
+    this.sessionTitle = '';
     this.pendingAttachments = [];
   }
 
   resolveWebviewView(webviewView) {
     this.webviewView = webviewView;
     const cfg = vscode.workspace.getConfiguration('kucode');
-    this.activeAgentId = cfg.get('acp.defaultAgent') || 'copilot';
+    this.activeAgentId = cfg.get('acp.defaultAgent') || 'antigravity';
     this.permissionMode = cfg.get('acp.permissionMode') || 'ask';
 
     webviewView.webview.options = {
@@ -162,9 +165,20 @@ class AcpChatViewProvider {
       connected: Boolean(this.client && this.client.connected),
       sessionId: this.client ? this.client.sessionId : null,
       agentInfo: this.client ? this.client.agentInfo : null,
+      sessionTitle: this.sessionTitle,
+      configOptions: this.configOptions,
       commands: this.availableCommands,
       attachments: this.pendingAttachments.map(({ id, label }) => ({ id, label })),
     });
+  }
+
+  _buildLoginDetail(spec, rawDetail) {
+    const base = rawDetail || '';
+    if (spec && spec.id === 'antigravity') {
+      const hint = 'ターミナルで "agy acp --login" を実行して Google 認証（または環境変数 GEMINI_API_KEY）を完了後、「再検出して接続」を押してください。';
+      return base ? `${base}\n${hint}` : hint;
+    }
+    return base || 'ターミナルで認証を完了した後、「再検出して接続」を押してください。';
   }
 
   async _handleWebviewMessage(msg) {
@@ -189,6 +203,16 @@ class AcpChatViewProvider {
         this.permissionMode = msg.mode === 'allowAll' ? 'allowAll' : 'ask';
         this._post({ type: 'permissionMode', mode: this.permissionMode });
         return;
+
+      case 'setConfigOption': {
+        if (!this.client || !this.client.connected) return;
+        const configId = String(msg.configId || '').trim();
+        if (!configId) return;
+        const updated = await this.client.setConfigOption(configId, msg.value, msg.optionType);
+        this.configOptions = Array.isArray(updated) ? updated : [];
+        this._post({ type: 'configOptions', items: this.configOptions });
+        return;
+      }
 
       case 'connect':
         await this._ensureConnected(true);
@@ -226,14 +250,14 @@ class AcpChatViewProvider {
 
       case 'runInstall': {
         const agent = getConfiguredAgents()[this.activeAgentId];
-        const cmd = (agent && agent.installCommand) || 'kucode-install-copilot && copilot login';
+        const cmd = (agent && agent.installCommand) || DEFAULT_AGENT_PRESETS.antigravity.installCommand;
         await this.openInTerminal(cmd, 'KuCode: ' + (agent ? agent.label : 'Agent Setup'));
         return;
       }
 
       case 'runLogin': {
         const agent = getConfiguredAgents()[this.activeAgentId];
-        const cmd = (agent && agent.loginCommand) || 'copilot login';
+        const cmd = (agent && agent.loginCommand) || DEFAULT_AGENT_PRESETS.antigravity.loginCommand;
         await this.openInTerminal(cmd, 'KuCode: ' + (agent ? agent.label : 'Agent Login'));
         return;
       }
@@ -256,11 +280,14 @@ class AcpChatViewProvider {
     this._cancelAllPendingPermissions();
     this.isPrompting = false;
     this.availableCommands = [];
+    this.configOptions = [];
+    this.sessionTitle = '';
     if (this.client) {
       const old = this.client;
       this.client = null;
       await old.dispose();
     }
+    this._post({ type: 'configOptions', items: [] });
     this._post({ type: 'status', state: 'disconnected', message: '未接続' });
   }
 
@@ -333,19 +360,23 @@ class AcpChatViewProvider {
           name: String(c.name || ''),
           description: String(c.description || ''),
         }));
+      } else if (update.sessionUpdate === 'config_option_update' && Array.isArray(update.configOptions)) {
+        this.configOptions = update.configOptions;
+      } else if (update.sessionUpdate === 'session_info_update' && update.title) {
+        this.sessionTitle = String(update.title);
       }
       this._post({ type: 'sessionUpdate', update });
     });
 
     client.on('stderr', (line) => {
       this._post({ type: 'stderr', text: line });
-      if (/not logged in|authenticate|copilot login|unauthorized|401/i.test(line)) {
+      if (isAuthRequiredError(line)) {
         this._post({
           type: 'needsLogin',
           agentId: spec.id,
           label: spec.label,
           loginCommand: spec.loginCommand || '',
-          detail: line,
+          detail: this._buildLoginDetail(spec, line),
         });
       }
     });
@@ -354,7 +385,10 @@ class AcpChatViewProvider {
       if (this.client === client) {
         this.client = null;
         this.isPrompting = false;
+        this.configOptions = [];
+        this.sessionTitle = '';
         this._cancelAllPendingPermissions();
+        this._post({ type: 'configOptions', items: [] });
         this._post({
           type: 'status',
           state: 'disconnected',
@@ -370,6 +404,7 @@ class AcpChatViewProvider {
     this.client = client;
     try {
       const info = await client.connect();
+      this.configOptions = Array.isArray(info.configOptions) ? info.configOptions : [];
       const title = (info.agentInfo && (info.agentInfo.title || info.agentInfo.name)) || spec.label;
       const version = info.agentInfo && info.agentInfo.version ? ' v' + info.agentInfo.version : '';
       this._post({
@@ -378,18 +413,23 @@ class AcpChatViewProvider {
         message: `${title}${version}`,
         sessionId: info.sessionId,
       });
+      this._post({
+        type: 'configOptions',
+        items: this.configOptions,
+      });
       return client;
     } catch (err) {
       await this._disconnectClient();
       const message = err && err.message ? err.message : String(err);
       this._post({ type: 'error', message: `接続失敗: ${message}` });
-      if (/auth|login|token|401|not logged in/i.test(message)) {
+      if (isAuthRequiredError(err)) {
         this._post({
           type: 'needsLogin',
           agentId: spec.id,
           label: spec.label,
           loginCommand: spec.loginCommand || '',
-          detail: message,
+          authMethods: Array.isArray(err && err.authMethods) ? err.authMethods : [],
+          detail: this._buildLoginDetail(spec, message),
         });
       }
       return null;
@@ -434,14 +474,14 @@ class AcpChatViewProvider {
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
       this._post({ type: 'turnError', message });
-      if (/auth|login|token|401|not logged in/i.test(message)) {
+      if (isAuthRequiredError(err)) {
         const spec = getConfiguredAgents()[this.activeAgentId];
         this._post({
           type: 'needsLogin',
           agentId: this.activeAgentId,
           label: (spec && spec.label) || this.activeAgentId,
-          loginCommand: (spec && spec.loginCommand) || 'copilot login',
-          detail: message,
+          loginCommand: (spec && spec.loginCommand) || DEFAULT_AGENT_PRESETS.antigravity.loginCommand,
+          detail: this._buildLoginDetail(spec, message),
         });
       }
     } finally {
@@ -547,11 +587,20 @@ class AcpChatViewProvider {
     display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
     padding: 8px; border-bottom: 1px solid var(--border); background: #05070a;
   }
-  .toolbar select, .toolbar button, .composer button, .banner button, .perm-bar button {
+  .toolbar select, .toolbar button, .config-bar select, .composer button, .banner button, .perm-bar button {
     background: var(--card); color: var(--fg); border: 1px solid var(--border);
     border-radius: 5px; padding: 4px 8px; font-size: 12px; font-weight: 500; cursor: pointer;
   }
   .toolbar select { flex: 1 1 130px; min-width: 110px; }
+  .config-bar {
+    display: none; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding: 5px 8px; border-bottom: 1px solid var(--border); background: #030508;
+  }
+  .config-bar.visible { display: flex; }
+  .cfg-item {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted);
+  }
+  .cfg-item select { padding: 2px 6px; font-size: 11px; max-width: 210px; }
   button:hover { border-color: var(--accent); }
   button.primary { border-color: var(--accent); color: #ffffff; background: #0c2638; }
   button.danger { border-color: var(--err); color: #fecaca; }
@@ -642,13 +691,14 @@ class AcpChatViewProvider {
     <button id="connectBtn" title="エージェント接続 / 再接続">接続</button>
     <button id="newBtn" title="新規セッション">新規</button>
   </div>
+  <div id="configBar" class="config-bar"></div>
   <div class="status-line">
     <span id="statusDot" class="dot"></span>
     <span id="statusText">待機中</span>
   </div>
   <div id="setupBanner" class="banner">
     <div id="setupTitle"></div>
-    <div id="setupDesc" style="font-size:12px;color:#9ca3af;"></div>
+    <div id="setupDesc" style="font-size:12px;color:#9ca3af;white-space:pre-wrap;"></div>
     <div class="banner-actions">
       <button id="installBtn" class="primary">ターミナルで自動導入 &amp; ログイン</button>
       <button id="loginBtn">ターミナルでログイン</button>
@@ -683,6 +733,7 @@ class AcpChatViewProvider {
   const permSelect = document.getElementById('permSelect');
   const connectBtn = document.getElementById('connectBtn');
   const newBtn = document.getElementById('newBtn');
+  const configBar = document.getElementById('configBar');
   const statusDot = document.getElementById('statusDot');
   const statusText = document.getElementById('statusText');
   const setupBanner = document.getElementById('setupBanner');
@@ -711,14 +762,89 @@ class AcpChatViewProvider {
   let isComposingIme = false;
   let isPrompting = false;
   let agentsCache = [];
+  let baseStatusText = '';
 
   function scrollBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
   function setStatus(state, text) {
+    baseStatusText = text || '';
     statusDot.className = 'dot ' + (state || '');
-    statusText.textContent = text || '';
+    statusText.textContent = baseStatusText;
+  }
+
+  function renderConfigOptions(items) {
+    configBar.textContent = '';
+    const list = Array.isArray(items) ? items : [];
+    if (list.length === 0) {
+      configBar.classList.remove('visible');
+      return;
+    }
+    for (const opt of list) {
+      if (!opt || !opt.id) continue;
+      const wrap = document.createElement('label');
+      wrap.className = 'cfg-item';
+      if (opt.description) wrap.title = opt.description;
+      const lbl = document.createElement('span');
+      lbl.textContent = (opt.name || opt.id) + ':';
+      wrap.appendChild(lbl);
+
+      if (opt.type === 'boolean') {
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.checked = Boolean(opt.currentValue);
+        chk.addEventListener('change', () => {
+          vscode.postMessage({
+            type: 'setConfigOption',
+            configId: opt.id,
+            value: chk.checked,
+            optionType: 'boolean',
+          });
+        });
+        wrap.appendChild(chk);
+      } else {
+        const sel = document.createElement('select');
+        const entries = Array.isArray(opt.options) ? opt.options : [];
+        for (const item of entries) {
+          if (!item) continue;
+          if (Array.isArray(item.options)) {
+            const grp = document.createElement('optgroup');
+            grp.label = item.name || item.group || '';
+            for (const sub of item.options) {
+              if (!sub) continue;
+              const o = document.createElement('option');
+              o.value = String(sub.value || '');
+              o.textContent = sub.name || sub.value || '';
+              if (String(sub.value) === String(opt.currentValue)) o.selected = true;
+              grp.appendChild(o);
+            }
+            sel.appendChild(grp);
+          } else {
+            const o = document.createElement('option');
+            o.value = String(item.value || '');
+            o.textContent = item.name || item.value || '';
+            if (String(item.value) === String(opt.currentValue)) o.selected = true;
+            sel.appendChild(o);
+          }
+        }
+        sel.addEventListener('change', () => {
+          vscode.postMessage({
+            type: 'setConfigOption',
+            configId: opt.id,
+            value: sel.value,
+            optionType: 'select',
+          });
+        });
+        wrap.appendChild(sel);
+      }
+      configBar.appendChild(wrap);
+    }
+    if (configBar.childElementCount > 0) {
+      configBar.classList.add('visible');
+    } else {
+      configBar.classList.remove('visible');
+    }
   }
 
   function renderRichContent(container, text) {
@@ -809,6 +935,18 @@ class AcpChatViewProvider {
     return currentAssistantCard;
   }
 
+  function appendLocButton(locsEl, seenPaths, locPath, line) {
+    if (!locPath) return;
+    const key = locPath + ':' + (line || 1);
+    if (seenPaths.has(key)) return;
+    seenPaths.add(key);
+    const btn = document.createElement('button');
+    btn.className = 'tool-loc';
+    btn.textContent = locPath + (line ? ':' + line : '');
+    btn.addEventListener('click', () => vscode.postMessage({ type: 'openLocation', path: locPath, line: line || 1 }));
+    locsEl.appendChild(btn);
+  }
+
   function upsertToolCall(update) {
     const target = ensureAssistantCard();
     const id = String(update.toolCallId || ('tool-' + Date.now()));
@@ -831,7 +969,7 @@ class AcpChatViewProvider {
       details.appendChild(locs);
       details.appendChild(out);
       target.toolsWrap.appendChild(details);
-      entry = { titleSpan, statusSpan, locs, out };
+      entry = { titleSpan, statusSpan, locs, out, seenPaths: new Set() };
       toolCards.set(id, entry);
     }
     if (update.title || update.name) {
@@ -842,13 +980,10 @@ class AcpChatViewProvider {
     }
     if (Array.isArray(update.locations) && update.locations.length > 0) {
       entry.locs.textContent = '';
+      entry.seenPaths = new Set();
       for (const loc of update.locations) {
         if (!loc || !loc.path) continue;
-        const btn = document.createElement('button');
-        btn.className = 'tool-loc';
-        btn.textContent = loc.path + (loc.line ? ':' + loc.line : '');
-        btn.addEventListener('click', () => vscode.postMessage({ type: 'openLocation', path: loc.path, line: loc.line || 1 }));
-        entry.locs.appendChild(btn);
+        appendLocButton(entry.locs, entry.seenPaths, loc.path, loc.line);
       }
     }
     const textPieces = [];
@@ -860,9 +995,20 @@ class AcpChatViewProvider {
     }
     if (Array.isArray(update.content)) {
       for (const c of update.content) {
-        if (c && c.type === 'content' && c.content && c.content.text) {
+        if (!c) continue;
+        if (c.type === 'diff') {
+          if (c.path) appendLocButton(entry.locs, entry.seenPaths, c.path, 1);
+          const diffLines = ['diff: ' + (c.path || '')];
+          if (typeof c.oldText === 'string' && c.oldText.length > 0) {
+            diffLines.push('- ' + c.oldText.slice(0, 400));
+          }
+          if (typeof c.newText === 'string' && c.newText.length > 0) {
+            diffLines.push('+ ' + c.newText.slice(0, 400));
+          }
+          textPieces.push(diffLines.join('\\n'));
+        } else if (c.type === 'content' && c.content && c.content.text) {
           textPieces.push(c.content.text);
-        } else if (c && c.text) {
+        } else if (c.text) {
           textPieces.push(c.text);
         }
       }
@@ -997,11 +1143,13 @@ class AcpChatViewProvider {
         }
         permSelect.value = msg.permissionMode || 'ask';
         availableCommands = msg.commands || [];
+        renderConfigOptions(msg.configOptions || []);
         renderAttachments(msg.attachments || []);
         const current = agentsCache.find((a) => a.id === msg.activeAgentId);
         if (msg.connected) {
           hideSetupBanner();
-          setStatus('connected', (current ? current.label : msg.activeAgentId) + ' (接続中)');
+          const titleSuffix = msg.sessionTitle ? ' — ' + msg.sessionTitle : '';
+          setStatus('connected', (current ? current.label : msg.activeAgentId) + ' (接続中)' + titleSuffix);
         } else if (current && !current.installed) {
           setStatus('', current.command + ' 未導入');
           showSetupBanner(
@@ -1016,6 +1164,9 @@ class AcpChatViewProvider {
         }
         break;
       }
+      case 'configOptions':
+        renderConfigOptions(msg.items || []);
+        break;
       case 'status':
         setStatus(msg.state, msg.message);
         if (msg.state === 'connected') hideSetupBanner();
@@ -1057,11 +1208,14 @@ class AcpChatViewProvider {
       case 'sessionUpdate': {
         const u = msg.update;
         if (!u) break;
-        if (u.sessionUpdate === 'agent_message_chunk' && u.content && u.content.text) {
-          const card = ensureAssistantCard();
-          currentTextBuf += u.content.text;
-          renderRichContent(card.body, currentTextBuf);
-          scrollBottom();
+        if (u.sessionUpdate === 'agent_message_chunk' && u.content) {
+          const textChunk = u.content.text || (u.content.resource && u.content.resource.text) || '';
+          if (textChunk) {
+            const card = ensureAssistantCard();
+            currentTextBuf += textChunk;
+            renderRichContent(card.body, currentTextBuf);
+            scrollBottom();
+          }
         } else if (u.sessionUpdate === 'agent_thought_chunk' && u.content && u.content.text) {
           const card = ensureAssistantCard();
           currentThoughtBuf += u.content.text;
@@ -1076,6 +1230,10 @@ class AcpChatViewProvider {
         } else if (u.sessionUpdate === 'available_commands_update' && Array.isArray(u.availableCommands)) {
           availableCommands = u.availableCommands;
           renderSlashHints();
+        } else if (u.sessionUpdate === 'config_option_update' && Array.isArray(u.configOptions)) {
+          renderConfigOptions(u.configOptions);
+        } else if (u.sessionUpdate === 'session_info_update' && u.title) {
+          statusText.textContent = (baseStatusText ? baseStatusText + ' — ' : '') + u.title;
         }
         break;
       }
