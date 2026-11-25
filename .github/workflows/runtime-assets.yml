@@ -1,0 +1,25 @@
+name: Runtime asset contract tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/runtime-assets.py'
+      - 'tests/test_runtime_assets.py'
+      - '.github/workflows/runtime-assets.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/runtime-assets.py'
+      - 'tests/test_runtime_assets.py'
+      - '.github/workflows/runtime-assets.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -p test_runtime_assets.py -v
