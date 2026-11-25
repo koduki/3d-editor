@@ -434,7 +434,8 @@ object DiagnosticsRunner {
         val nodeBin = File(paths.openvscodeDir, "node")
         val ok = bash.exists() && serverBin.exists() && nodeBin.exists()
         val detail = buildString {
-            appendLine("marker=$marker (expected=${PosixRuntimeConfig.RUNTIME_VERSION})")
+            appendLine("Debian seed=$marker (persistent)")
+            appendLine("Managed OpenVSCode version=${paths.openvscodeVersionMarker.takeIf { it.isFile }?.readText()?.trim() ?: "unknown"} (expected=${PosixRuntimeConfig.RUNTIME_VERSION})")
             appendLine("/bin/bash: exists=${bash.exists()}, exec=${bash.canExecute()}")
             appendLine("/opt/openvscode-server/bin/openvscode-server: exists=${serverBin.exists()}, exec=${serverBin.canExecute()}")
             appendLine("/opt/openvscode-server/node: exists=${nodeBin.exists()}, exec=${nodeBin.canExecute()}")

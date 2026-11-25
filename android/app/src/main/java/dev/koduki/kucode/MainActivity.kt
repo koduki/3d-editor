@@ -233,6 +233,13 @@ class MainActivity : AppCompatActivity() {
                 onRequestStoragePermission = { runOnUiThread { openAllFilesPermissionSettings() } },
                 onCopyToClipboard = { text -> copyTextToClipboard(text) },
                 onReadFromClipboard = { readTextFromClipboard() },
+                onLaunchAndroidApp = { pkg ->
+                    runOnMainThreadBlocking(false) {
+                        if (!hasWindowFocus() || isFinishing || isDestroyed) return@runOnMainThreadBlocking false
+                        val launch = packageManager.getLaunchIntentForPackage(pkg) ?: return@runOnMainThreadBlocking false
+                        runCatching { startActivity(launch); true }.getOrDefault(false)
+                    }
+                },
                 onOpenExternalUrl = { rawUrl ->
                     runOnMainThreadBlocking(false) {
                         val parsed = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return@runOnMainThreadBlocking false

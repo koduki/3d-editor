@@ -1,0 +1,27 @@
+{
+  "name": "kucode-android",
+  "displayName": "KuCode Android",
+  "description": "Android project integration for KuCode's standard Linux toolchain and native host bridge.",
+  "version": "0.1.0",
+  "publisher": "koduki",
+  "engines": {"vscode": "^1.90.0"},
+  "main": "./extension.js",
+  "activationEvents": ["workspaceContains:settings.gradle", "workspaceContains:settings.gradle.kts"],
+  "capabilities": {"untrustedWorkspaces": {"supported": false}},
+  "contributes": {
+    "commands": [
+      {"command": "kucodeAndroid.doctor", "title": "KuCode Android: SDK Doctor"},
+      {"command": "kucodeAndroid.installSdk", "title": "KuCode Android: Install SDK Packages"},
+      {"command": "kucodeAndroid.buildRun", "title": "KuCode Android: Build & Run"},
+      {"command": "kucodeAndroid.install", "title": "KuCode Android: Install APK"},
+      {"command": "kucodeAndroid.launch", "title": "KuCode Android: Launch App"}
+    ],
+    "menus": {"commandPalette": [
+      {"command": "kucodeAndroid.doctor", "when": "kucodeAndroid.project"},
+      {"command": "kucodeAndroid.installSdk", "when": "kucodeAndroid.project"},
+      {"command": "kucodeAndroid.buildRun", "when": "kucodeAndroid.project"},
+      {"command": "kucodeAndroid.install", "when": "kucodeAndroid.project"},
+      {"command": "kucodeAndroid.launch", "when": "kucodeAndroid.project"}
+    ]}
+  }
+}

@@ -195,6 +195,7 @@
         <button id="notifSettingsBtn">通知設定</button>
         <button id="batterySettingsBtn">バッテリー最適化除外</button>
         <button id="restartBtn">サーバー再起動</button>
+        <button id="resetDebianBtn">Debian 初期化（バックアップ保持）</button>
       </div>
       <div id="storageHint" class="hint"></div>
     </section>
@@ -489,6 +490,12 @@
     restartBtn.addEventListener('click', () => {
       autoDiagTriggeredOnError = false;
       window.KuCodeHost?.restartServer();
+    });
+
+    document.getElementById('resetDebianBtn').addEventListener('click', () => {
+      if (window.confirm('作業中のターミナル・ビルドを終了しましたか？ Debian のOSとaptを初期化します。旧rootfsをバックアップとして保持し、HOME・workspaceは変更しません。続行しますか？')) {
+        window.KuCodeHost?.resetDebian();
+      }
     });
 
     refreshSessionsBtn.addEventListener('click', refreshSessions);

@@ -73,10 +73,12 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val onCopyToClipboard: (String) -> Boolean,
         val onReadFromClipboard: () -> String? = { null },
         val onOpenExternalUrl: ((String) -> Boolean)? = null,
+        val onLaunchAndroidApp: (String) -> Boolean = { false },
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
+    private val shellMutex = Mutex()
     private val telemetry = SessionTelemetryManager.getInstance(appContext)
 
     private val statusStore = RuntimeStatusStore(
@@ -126,8 +128,13 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         ensureMountDirs = installer::ensureMountPointDirsExist,
     )
 
+    private val editorPort = if (appContext.packageName.endsWith(".debug"))
+        PosixRuntimeConfig.DEV_SERVER_PORT else PosixRuntimeConfig.PREFERRED_SERVER_PORT
+
     private val launcher = OpenVsCodeLauncher(
         scope = scope,
+        portPicker = { pickStableLocalPort(editorPort) },
+        orphanReclaimer = { paths, log -> reclaimOrphanServerIfNeeded(paths, log, preferredPort = editorPort) },
         onLog = ::appendUnifiedLog,
     )
 
@@ -170,6 +177,11 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         onOpenBootPage = { hostActions?.onOpenBootPage?.invoke() },
         onRequestStoragePermission = { hostActions?.onRequestStoragePermission?.invoke() },
         onRestartServer = { restart() },
+        onAndroidRequest = { method, path, body ->
+            AndroidHostBridge.get(appContext).handle(method, path, body) { pkg ->
+                hostActions?.onLaunchAndroidApp?.invoke(pkg) ?: false
+            }
+        },
     )
 
     fun getAdminPort(): Int = diagnosticsServer.port
@@ -291,6 +303,25 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
     }
 
+    fun archiveAndResetDebian() {
+        scope.launch {
+            lifecycleMutex.withLock reset@{
+                shellMutex.withLock {
+                    stopInternal(emitIdleStatus = true)
+                    try {
+                        installer.archiveDebianForReset(getPaths())?.let {
+                            appendUnifiedLog("[runtime] Debian preserved as ${it.name} before explicit reset.")
+                        }
+                    } catch (e: Exception) {
+                        appendUnifiedLog("[error] Debian reset failed: ${e.message}")
+                        return@reset
+                    }
+                }
+                startInternal()
+            }
+        }
+    }
+
     fun stop() {
         scope.launch {
             lifecycleMutex.withLock {
@@ -304,7 +335,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         timeoutSeconds: Long = 120,
         forceNoSeccomp: Boolean? = null,
         recordTelemetry: Boolean = false,
-    ): CommandResult {
+    ): CommandResult = shellMutex.withLock {
         val adminPort = runCatching { diagnosticsServer.start() }.getOrDefault(0)
         val extraEnv = if (adminPort > 0) {
             mapOf(
@@ -335,7 +366,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                 telemetry.warn("posix.cli", msg)
             }
         }
-        return result
+        result
     }
 
     internal fun editorAccessVerified(): Boolean {

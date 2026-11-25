@@ -39,6 +39,7 @@ android {
 
     buildTypes {
         release {
+            resValue("string", "app_name_variant", "KuCode")
             isMinifyEnabled = true
             isShrinkResources = false
             signingConfigs.findByName("release")?.let { signingConfig = it }
@@ -49,6 +50,7 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
+            resValue("string", "app_name_variant", "KuCode Dev")
             versionNameSuffix = "-debug"
         }
     }
@@ -90,6 +92,15 @@ android {
 }
 
 val repoRootDir = rootProject.projectDir.parentFile
+val runtimeLock = providers.environmentVariable("KUCODE_RUNTIME_LOCK")
+    .orElse(providers.gradleProperty("kucodeRuntimeLock"))
+    .orElse(File(repoRootDir, "runtime-assets.lock.json").absolutePath)
+val verifyRuntimeAssets by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Verify reviewed runtime asset lock before packaging."
+    workingDir(repoRootDir)
+    commandLine("python3", "scripts/runtime-assets.py", "verify", "--lock", runtimeLock.get())
+}
 val generatedLicenseAssetsDir = layout.buildDirectory.dir("generated/licenseAssets")
 
 val syncLicenseAssets by tasks.registering(Sync::class) {
@@ -112,6 +123,10 @@ tasks.named("preBuild") {
 tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("Assets")) {
         dependsOn(syncLicenseAssets)
+        dependsOn(verifyRuntimeAssets)
+    }
+    if (name.startsWith("merge") && name.endsWith("NativeLibs")) {
+        dependsOn(verifyRuntimeAssets)
     }
 }
 

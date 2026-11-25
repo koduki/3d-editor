@@ -52,6 +52,12 @@ class BootHostBridge(
     }
 
     @JavascriptInterface
+    fun resetDebian() {
+        ServerKeepAliveService.start(context)
+        runtimeManager.archiveAndResetDebian()
+    }
+
+    @JavascriptInterface
     fun openEditor() {
         onOpenEditor()
     }

@@ -82,6 +82,7 @@ jobs:
           done
           python3 scripts/runtime-assets.py fetch --lock "$producer/runtime-assets.lock.json" --source-dir "$producer" --cache "$RUNNER_TEMP/runtime-consumer-cache"
           python3 scripts/runtime-assets.py verify --lock "$producer/runtime-assets.lock.json"
+          echo "KUCODE_RUNTIME_LOCK=$producer/runtime-assets.lock.json" >> "$GITHUB_ENV"
 
       - name: Upload standalone runtime assets for release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -103,6 +104,9 @@ jobs:
           tar -xzf "$archive" -C "$server" --strip-components=1
           rm -f "$archive"
           "$server/node" --check android/app/src/main/assets/runtime-probes.cjs
+          "$server/node" --check android/app/src/main/assets/kucode-cli.cjs
+          "$server/node" --check android/app/src/main/assets/kucode-android/extension.js
+          "$server/node" --test tests/kucode-android.test.cjs
           "$server/node" --check android/app/src/main/assets/kucode-tools/extension.js
           "$server/node" --check android/app/src/main/assets/kucode-tools/acp-client.js
           "$server/node" --check android/app/src/main/assets/kucode-tools/acp-webview.js
@@ -161,6 +165,9 @@ jobs:
           RELEASE_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
           ls -lh "$APK" "$RELEASE_APK"
           unzip -p "$APK" assets/runtime-probes.cjs | cmp - android/app/src/main/assets/runtime-probes.cjs
+          unzip -p "$APK" assets/kucode-cli.cjs | cmp - android/app/src/main/assets/kucode-cli.cjs
+          unzip -p "$APK" assets/kucode-android/extension.js | cmp - android/app/src/main/assets/kucode-android/extension.js
+          unzip -p "$APK" assets/kucode-android/package.json | cmp - android/app/src/main/assets/kucode-android/package.json
           unzip -p "$APK" assets/kucode-tools/extension.js | cmp - android/app/src/main/assets/kucode-tools/extension.js
           unzip -p "$APK" assets/kucode-tools/acp-client.js | cmp - android/app/src/main/assets/kucode-tools/acp-client.js
           unzip -p "$APK" assets/kucode-tools/acp-webview.js | cmp - android/app/src/main/assets/kucode-tools/acp-webview.js

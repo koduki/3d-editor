@@ -33,6 +33,15 @@ object VsCodeExtensionAsset {
         return extDir
     }
 
+    fun installAndroidInto(openVsCodeDir: File, openAsset: (String) -> InputStream): File {
+        val dir = File(openVsCodeDir, "extensions/kucode-android")
+        dir.mkdirs()
+        for (name in listOf("package.json", "extension.js")) {
+            writeBytesAtomically(File(dir, name), openAsset("kucode-android/$name").use { it.readBytes() })
+        }
+        return dir
+    }
+
     /**
      * Convenience overload for JVM tests that load extension assets directly from disk.
      */
