@@ -34,6 +34,10 @@ AndroidXRで物理キーボードとマウスを想定して、`openvscode-serve
 3. **Android 標準準拠でクリーン**
    `targetSdk = 35` を維持し、分離ローダー型 PRoot（16KB ページ対応）と Android 標準 SDK によるクリーンな Kotlin 実装です。
 
+## 次期開発：AURAセルフホスト（仕様確定・未実装）
+
+汎用Linux IDEとして、KuCode自身の端末内ビルド・ADB不要の実機検証・永続Debian環境を目指します。Android開発支援は独立した同梱VS Code拡張に分離します。詳細は [spec.md 第5節](spec.md)、[ADR-0012](docs/adr/0012-aura-self-host-standard-linux.md)、[Epic #17](https://github.com/koduki/kucode/issues/17) を参照してください。以下の現行機能と区別しています。
+
 ## 開発方針
 
 - **AI エージェントに強く** — 内蔵 Debian POSIX 環境上で CLI 系 AI エージェントがそのまま動き、人と AI が同じ `/workspace` で協働して書く体験を目指します。

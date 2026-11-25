@@ -3,9 +3,11 @@
 - **Product:** KuCode（くうこーど / *"koo-code"*）— *空間に、書く。*
 - **Version:** 0.9.0
 - **Date:** 2026-11-24
-- **Status:** Active
+- **Status:** Active（v0.9.0実装ベースライン＋第5節の次期仕様）
 
 ---
+
+次期セルフホスト開発の規範仕様は[第5節](#5-次期仕様auraセルフホストaccepted--未実装)を参照。第1〜4節は現行実装の記録。
 
 ## 1. プロジェクト概要
 
@@ -139,3 +141,64 @@ Android XR（XREAL AURA 等）の空間マルチウィンドウ環境（物理�
    - `/workspace/android` から Android 側ファイルを開いて保存できること。
    - 内蔵ターミナル（またはフォールバック CLI）で `apt update && apt install -y ca-certificates gh` → `gh --version` が通ること。
 4. **空間作業の往復**：日本語 IME の変換確定後に保存し、統合ターミナルで開発サーバーを起動する。隣のプレビューから戻り、カーソル位置と最初のキー入力を確認する。未保存の変更がある状態で管理画面を往復し、編集内容・選択位置・ターミナルセッションが保持されることを確認する。
+
+---
+
+## 5. 次期仕様：AURAセルフホスト（Accepted / 未実装）
+
+本節は2026-11-25確定の次期規範仕様。第1〜4節はv0.9.0時点の実装ベースラインであり、矛盾する場合は次期開発に本節を優先する。詳細な理由・非ゴールは [ADR-0012](docs/adr/0012-aura-self-host-standard-linux.md)、進捗は [Epic #17](https://github.com/koduki/kucode/issues/17) を参照。
+
+### 5.1 スコープと責務
+
+- 汎用の空間Linux IDE。Android開発は一つの用途、KuCode自身を最初のE2E対象とする。対象はXREAL AURA/ARM64、2026年11月の最新安定版互換セットを検証・固定。旧版・x86は対象外。
+- 単一APKで基礎環境を起動。SDKはオンデマンド、既存CLIを使用。Linux内で編集/ビルド/テスト/署名、Android標準APIで配置/起動/診断。PC/外部ビルド/ADB不要。依存資産の事前ビルド・ネット取得は許容。
+- KuCode Core: XR UI・WebView・永続Linux起動・ホスト連携・診断。kucode-tools: 汎用操作・ACP・診断UI。kucode-android: Androidプロジェクトのみで活性化する独立拡張。別package/テスト境界、同一repo/CI/APK。SDK・Gradle処理を再実装しない。
+- CLI First。GUI/AIは既存CLIと最小Host Bridge CLIを共用。APIはバージョン付き、結果/エラー/非同期承認状態を機械可読にする。独自MCPは必須にしない。
+
+### 5.2 ストレージ・ランタイム
+
+| 領域 | 所有者 | 更新時の要件 |
+| --- | --- | --- |
+| Debian rootfs / apt | ユーザー | 通常APK更新で保持 |
+| home / workspace / SDK / cache | ユーザー | Linux正本、保持 |
+| OpenVSCode / 内蔵拡張 / PRoot | KuCode | 独立して検証・更新・復旧 |
+| DNS / CA / ホスト同期設定 | KuCode | 管理範囲のみ同期 |
+| Android共有領域 | Android / ユーザー | 明示共有、ビルド正本にしない |
+
+標準LinuxのHOME/一般ユーザー概念に寄せる。PRoot擬似権限はセキュリティ境界ではない。既存データの一度限りの移行、明示初期化、失敗時の復旧を検証する。将来標準Linux VMを利用可能になった場合は実装を直接変更し、先回りのバックエンド抽象化は行わない。
+
+### 5.3 ホスト連携・安全性
+
+PackageInstaller.SessionとIntentを利用し、APK対象/署名/パス検証、ステージング、Android標準承認、結果通知を実装する。バックグラウンド起動やpackage visibilityの制約に従う。標準権限を迂回しない。Stable/Devは独立UID・データ・SDK・認証情報・ポート・Authority・署名。Stable誤更新を防止。Dev診断は明示的なOS標準共有で取得し機密除去する。任意アプリのログ/JDWP等は保証しない。既存のトークン認証は同一UID内の隔離ではない。
+
+### 5.4 ビルド・配布・観測
+
+GitHub Releasesの固定資産（PRoot/loader、Debian seed、OpenVSCode、ライセンス）を検証・キャッシュしてCIと端末で同じGradleパッケージング経路を使う。資産生成は別責務。ストア対応は非ゴール。SDKの具体バージョンは実機互換性確認後に固定。Flight RecorderにビルドID/時間/終了コード、CPU/PSS/thermal/ストレージ/終了理由を取得可能な範囲で追加する。未取得はunknown、独自スケジューラなし。
+
+### 5.5 受け入れ条件（全必須項目をAURA実機で検証）
+
+- [ ] 安定版単一APKの初回起動、ARM64 SDKオンデマンド導入。
+- [ ] Git clone、編集、ACPによる変更、JVM/Nodeテスト、端末内APK生成・署名。
+- [ ] ADBなしでDev APKをインストール・起動し、Stable/Dev独立環境を確認。
+- [ ] Devの障害を意図的に再現し、機密除去済み診断をStableのAIで解析。
+- [ ] 通常APK更新後もapt追加パッケージ、home、workspace、SDK/cacheを保持。
+- [ ] 管理資産更新失敗・容量不足・強制終了時のデータ保持と復旧。
+- [ ] Java/Kotlin、JS/TS、Python、Go、Ruby、Rust、C/C++の基本スモーク結果を記録（個別の完全IDE対応は保証しない）。
+- [ ] ビルド・実行時のリソース観測、機種/OS/コミット/SDK/資産ハッシュ/手順/結果の証跡を保存。
+
+CIは実機試験の代替としない。未実施はNOT RUN。x86、旧SDK、独自SDK管理・ビルド・デバッガー、全依存資産の自己コンパイル、ストア対応、他端末互換性レイヤーは対象外。
+
+### 5.6 実装Issue
+
+| ID | Issue | 依存 |
+| --- | --- | --- |
+| SH-01 | [#18 ARM64成立性](https://github.com/koduki/kucode/issues/18) | なし（KuCode実ビルド検証はSH-03資産利用） |
+| SH-02 | [#19 永続Debian](https://github.com/koduki/kucode/issues/19) | なし |
+| SH-03 | [#20 固定資産・共通ビルド](https://github.com/koduki/kucode/issues/20) | なし |
+| SH-04 | [#21 SDK/PATH](https://github.com/koduki/kucode/issues/21) | SH-01, SH-02 |
+| SH-05 | [#22 Host Bridge](https://github.com/koduki/kucode/issues/22) | なし |
+| SH-06 | [#23 Android拡張](https://github.com/koduki/kucode/issues/23) | SH-04, SH-05 |
+| SH-07 | [#24 Stable/Dev](https://github.com/koduki/kucode/issues/24) | SH-05 |
+| SH-08 | [#25 観測性](https://github.com/koduki/kucode/issues/25) | SH-02, SH-07 |
+| SH-09 | [#26 汎用言語スモーク](https://github.com/koduki/kucode/issues/26) | SH-04 |
+| SH-10 | [#27 E2E](https://github.com/koduki/kucode/issues/27) | SH-01〜09 |
