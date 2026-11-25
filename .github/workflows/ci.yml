@@ -157,7 +157,12 @@ jobs:
           unzip -l "$APK" | grep -q "assets/licenses/debian-manifest.txt"
 
           # Verify 16KB ELF LOAD segment alignment for all bundled native libraries
-          READELF="$(find "$ANDROID_HOME/ndk" -name llvm-readelf -type f | sort -V | tail -n 1)"
+          READELF="$(find "$ANDROID_HOME/ndk" -name llvm-readelf \( -type f -o -type l \) 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$READELF" ] || [ ! -x "$READELF" ]; then
+            READELF="$(command -v readelf)"
+          fi
+          test -x "$READELF"
+          echo "Using readelf: $READELF"
           ELF_TMP="$RUNNER_TEMP/apk-elf-check"
           rm -rf "$ELF_TMP" && mkdir -p "$ELF_TMP"
           unzip -j -o "$APK" "lib/arm64-v8a/*.so" -d "$ELF_TMP"

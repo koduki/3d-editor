@@ -232,13 +232,29 @@ class PosixRuntimeConfigTest {
     }
 
     @Test
-    fun buildHostCliHelperScriptsAndProfiles_includeCopilotInstallerAndLocalBinPath() {
+    fun buildHostCliHelperScriptsAndProfiles_includeAgyAndCopilotInstallersAndLocalBinPath() {
         val scripts = PosixRuntimeConfig.buildHostCliHelperScripts()
+        assertTrue(scripts.containsKey("kucode-install-agy"))
+        val agyInstaller = scripts.getValue("kucode-install-agy")
+        assertTrue(agyInstaller.startsWith("#!/usr/bin/env bash\n"))
+        assertTrue(agyInstaller.contains("https://antigravity.google/cli/install.sh"))
+        assertTrue(agyInstaller.contains("--skip-path"))
+        assertTrue(agyInstaller.contains("agy acp --help"))
+        assertTrue(agyInstaller.contains("ld-linux-aarch64.so.1"))
+        assertTrue(agyInstaller.contains("SIGSYS"))
+
         assertTrue(scripts.containsKey("kucode-install-copilot"))
-        val installer = scripts.getValue("kucode-install-copilot")
-        assertTrue(installer.startsWith("#!/usr/bin/env bash\n"))
-        assertTrue(installer.contains(".local/bin"))
-        assertTrue(installer.contains("ld-linux-aarch64.so.1"))
+        val copilotInstaller = scripts.getValue("kucode-install-copilot")
+        assertTrue(copilotInstaller.startsWith("#!/usr/bin/env bash\n"))
+        assertTrue(copilotInstaller.contains(".local/bin"))
+        assertTrue(copilotInstaller.contains("ld-linux-aarch64.so.1"))
+
+        for ((name, content) in listOf("kucode-install-agy" to agyInstaller, "kucode-install-copilot" to copilotInstaller)) {
+            val proc = ProcessBuilder("bash", "-n").redirectErrorStream(true).start()
+            proc.outputStream.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+            val out = proc.inputStream.bufferedReader().readText()
+            assertEquals("$name failed bash -n: $out", 0, proc.waitFor())
+        }
 
         val profileD = PosixRuntimeConfig.buildProfileDEnvScript()
         assertTrue(profileD.contains(".local/bin"))

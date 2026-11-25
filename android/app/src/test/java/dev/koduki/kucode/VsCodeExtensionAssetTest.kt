@@ -18,7 +18,7 @@ class VsCodeExtensionAssetTest {
             assertTrue(extDir.resolve("acp-webview.js").isFile)
             val pkgJson = JSONObject(extDir.resolve("package.json").readText())
             assertEquals("kucode-tools", pkgJson.getString("name"))
-            assertEquals("0.9.0", pkgJson.getString("version"))
+            assertEquals("0.9.1", pkgJson.getString("version"))
             assertEquals("./extension.js", pkgJson.getString("main"))
 
             val contributes = pkgJson.getJSONObject("contributes")
@@ -26,6 +26,7 @@ class VsCodeExtensionAssetTest {
             val commandIds = (0 until commands.length()).map { commands.getJSONObject(it).getString("command") }
             assertTrue(commandIds.contains("kucode.openAcpChat"))
             assertTrue(commandIds.contains("kucode.sendSelectionToAcp"))
+            assertTrue(commandIds.contains("kucode.setupAntigravityCli"))
             assertTrue(commandIds.contains("kucode.setupCopilotCli"))
             assertTrue(commandIds.contains("kucode.openMenu"))
             assertTrue(commandIds.contains("kucode.runDiagnostics"))

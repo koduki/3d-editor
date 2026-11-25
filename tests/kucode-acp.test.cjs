@@ -16,14 +16,17 @@ const {
   DEFAULT_AGENT_PRESETS,
   resolveSafeWorkspacePath,
   sliceLines,
+  isAuthRequiredError,
   AcpSessionClient,
 } = require(acpClientPath);
 
 /**
  * Writes a self-contained mock ACP v1 agent script to disk.
- * Exercises initialize, session/new, session/prompt, streaming session/update,
+ * Exercises initialize, authenticate, session/new (with configOptions),
+ * session/set_config_option, session/prompt, streaming session/update
+ * (including config_option_update & session_info_update),
  * session/request_permission, fs/read_text_file, fs/write_text_file,
- * terminal/{create,wait_for_exit,output,release}, and session/cancel.
+ * terminal/{create,wait_for_exit,output,release}, session/cancel, and -32000 auth errors.
  */
 function createMockAcpAgentScript(tempDir) {
   const scriptPath = path.join(tempDir, 'mock-acp-agent.cjs');
@@ -36,6 +39,44 @@ const pendingClientCalls = new Map();
 let activePromptId = null;
 let activeCancelTimer = null;
 let cancelledCurrent = false;
+let authenticated = process.env.MOCK_REQUIRE_AUTH !== '1';
+let currentModel = 'gemini-4-hydrogen';
+let currentThinking = 'Medium';
+
+function buildConfigOptions() {
+  return [
+    {
+      id: 'model',
+      name: 'Model',
+      category: 'model',
+      type: 'select',
+      currentValue: currentModel,
+      options: [
+        {
+          group: 'gemini',
+          name: 'Gemini',
+          options: [
+            { value: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' },
+            { value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'thought_level',
+      name: 'Thinking level',
+      category: 'thought_level',
+      type: 'select',
+      currentValue: currentThinking,
+      options: [
+        { value: 'Low', name: 'Low' },
+        { value: 'Medium', name: 'Medium' },
+        { value: 'High', name: 'High' },
+        { value: 'Max', name: 'Max' },
+      ],
+    },
+  ];
+}
 
 function send(obj) {
   process.stdout.write(JSON.stringify(obj) + '\\n');
@@ -71,21 +112,39 @@ rl.on('line', async (line) => {
       id: msg.id,
       result: {
         protocolVersion: 1,
-        agentInfo: { name: 'mock-acp-agent', version: '1.0.0' },
-        agentCapabilities: { loadSession: false },
-        authMethods: [],
+        agentInfo: { name: 'Antigravity ACP Server', version: '1.5.16' },
+        agentCapabilities: { loadSession: true },
+        authMethods: [
+          { id: 'oauth-personal', name: 'Log in with Google' },
+          { id: 'terminal-login', name: 'Log in from the terminal' },
+        ],
       },
     });
     return;
   }
 
+  if (msg.method === 'authenticate') {
+    authenticated = true;
+    send({ jsonrpc: '2.0', id: msg.id, result: {} });
+    return;
+  }
+
   if (msg.method === 'session/new') {
+    if (!authenticated) {
+      send({
+        jsonrpc: '2.0',
+        id: msg.id,
+        error: { code: -32000, message: 'Authentication required' },
+      });
+      return;
+    }
     send({
       jsonrpc: '2.0',
       id: msg.id,
       result: {
         sessionId: 'sess-mock-001',
         modes: { currentModeId: 'code', availableModes: [{ id: 'code', name: 'Code' }] },
+        configOptions: buildConfigOptions(),
       },
     });
     send({
@@ -98,6 +157,19 @@ rl.on('line', async (line) => {
           availableCommands: [{ name: 'review', description: 'Code review' }],
         },
       },
+    });
+    return;
+  }
+
+  if (msg.method === 'session/set_config_option') {
+    const cid = msg.params && msg.params.configId;
+    const val = msg.params && msg.params.value;
+    if (cid === 'model') currentModel = String(val);
+    if (cid === 'thought_level') currentThinking = String(val);
+    send({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { configOptions: buildConfigOptions() },
     });
     return;
   }
@@ -141,6 +213,14 @@ rl.on('line', async (line) => {
     }
 
     if (text.includes('TRIGGER_FULL_FLOW')) {
+      send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'sess-mock-001',
+          update: { sessionUpdate: 'session_info_update', title: 'Refactored hello.txt' },
+        },
+      });
       send({
         jsonrpc: '2.0',
         method: 'session/update',
@@ -227,6 +307,9 @@ rl.on('line', async (line) => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'tc-1',
             status: 'completed',
+            content: [
+              { type: 'diff', path: 'sub/output.txt', oldText: '', newText: 'slice=L2\\nL3|blocked=true' },
+            ],
           },
         },
       });
@@ -253,7 +336,10 @@ rl.on('line', async (line) => {
       method: 'session/update',
       params: {
         sessionId: 'sess-mock-001',
-        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ECHO: ' + text } },
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ECHO [' + currentModel + '/' + currentThinking + ']: ' + text },
+        },
       },
     });
     send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } });
@@ -285,14 +371,24 @@ test('resolveSafeWorkspacePath enforces workspace boundary and blocks traversal 
   assert.throws(() => resolveSafeWorkspacePath(workspace, 'a\0b'), /Invalid file path/);
 });
 
-test('sliceLines slices 1-based line ranges cleanly', () => {
+test('sliceLines slices 1-based line ranges cleanly and isAuthRequiredError recognizes ACP -32000', () => {
   const sample = 'line1\nline2\nline3\nline4';
   assert.equal(sliceLines(sample, 2, 2), 'line2\nline3');
   assert.equal(sliceLines(sample, 3), 'line3\nline4');
   assert.equal(sliceLines(sample), sample);
+
+  assert.equal(isAuthRequiredError({ code: -32000, message: 'Authentication required' }), true);
+  assert.equal(isAuthRequiredError(new Error('HTTP 401 unauthorized')), true);
+  assert.equal(isAuthRequiredError(new Error('Network timeout')), false);
+
+  assert.equal(Object.keys(DEFAULT_AGENT_PRESETS)[0], 'antigravity');
+  assert.equal(DEFAULT_AGENT_PRESETS.antigravity.command, 'agy');
+  assert.deepEqual(DEFAULT_AGENT_PRESETS.antigravity.args, ['acp', '--disable-telemetry']);
+  assert.equal(DEFAULT_AGENT_PRESETS.antigravity.installCommand, 'kucode-install-agy && agy acp --login');
+  assert.equal(DEFAULT_AGENT_PRESETS.antigravity.loginCommand, 'agy acp --login');
 });
 
-test('AcpSessionClient completes full ACP v1 handshake, fs, terminal, permission, and cancel flow', async (t) => {
+test('AcpSessionClient completes full ACP v1 handshake, configOptions, fs, terminal, permission, and cancel flow', async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kucode-acp-e2e-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
 
@@ -321,16 +417,27 @@ test('AcpSessionClient completes full ACP v1 handshake, fs, terminal, permission
   client.on('sessionUpdate', (params) => updates.push(params));
 
   assert.equal(PROTOCOL_VERSION, 1);
+  assert.ok(DEFAULT_AGENT_PRESETS.antigravity);
   assert.ok(DEFAULT_AGENT_PRESETS.copilot);
   assert.deepEqual(DEFAULT_AGENT_PRESETS.copilot.args, ['--acp', '--stdio']);
 
   const ready = await client.connect();
   assert.equal(ready.sessionId, 'sess-mock-001');
-  assert.equal(ready.agentInfo.name, 'mock-acp-agent');
+  assert.equal(ready.agentInfo.name, 'Antigravity ACP Server');
+  assert.equal(ready.configOptions.length, 2);
+  assert.equal(ready.configOptions[0].id, 'model');
+  assert.equal(ready.configOptions[1].id, 'thought_level');
 
-  // 1. Full flow: thought + tool call + permission + fs read/write + traversal block + terminal + message
+  // Switch model & thinking level via ACP v1 session/set_config_option
+  const afterModel = await client.setConfigOption('model', 'gemini-3.8-flash', 'select');
+  assert.equal(afterModel.find((c) => c.id === 'model').currentValue, 'gemini-3.8-flash');
+  const afterThink = await client.setConfigOption('thought_level', 'High', 'select');
+  assert.equal(afterThink.find((c) => c.id === 'thought_level').currentValue, 'High');
+
+  // 1. Full flow: session title + thought + tool call + permission + fs read/write + traversal block + terminal + diff + message
   const res = await client.prompt('TRIGGER_FULL_FLOW');
   assert.equal(res.stopReason, 'end_turn');
+  assert.equal(client.sessionTitle, 'Refactored hello.txt');
   assert.equal(permissionsSeen.length, 1);
   assert.equal(permissionsSeen[0].toolCall.title, 'Write hello.txt');
 
@@ -354,7 +461,7 @@ test('AcpSessionClient completes full ACP v1 handshake, fs, terminal, permission
   assert.equal(cancelRes.stopReason, 'cancelled');
 });
 
-test('AcpChatViewProvider renders strict CSP OST webview and completes prompt roundtrip', async (t) => {
+test('AcpChatViewProvider defaults to antigravity, renders strict CSP OST webview, switches configOptions, and handles -32000 auth errors', async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kucode-acp-wv-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
 
@@ -365,6 +472,7 @@ test('AcpChatViewProvider renders strict CSP OST webview and completes prompt ro
   const postedMessages = [];
   let messageListener = null;
   let disposeListener = null;
+  let requireAuth = false;
 
   const mockVscode = {
     workspace: {
@@ -373,14 +481,17 @@ test('AcpChatViewProvider renders strict CSP OST webview and completes prompt ro
       getConfiguration() {
         return {
           get(key) {
-            if (key === 'acp.defaultAgent') return 'mock';
+            if (key === 'acp.defaultAgent') return undefined; // Verify default falls back to antigravity
             if (key === 'acp.permissionMode') return 'ask';
             if (key === 'acp.agents') {
               return {
-                mock: {
-                  label: 'Mock ACP',
+                antigravity: {
+                  label: 'Google Antigravity (agy acp)',
                   command: process.execPath,
                   args: [agentScript],
+                  env: requireAuth ? { MOCK_REQUIRE_AUTH: '1' } : {},
+                  installCommand: 'kucode-install-agy && agy acp --login',
+                  loginCommand: 'agy acp --login',
                 },
               };
             }
@@ -410,7 +521,7 @@ test('AcpChatViewProvider renders strict CSP OST webview and completes prompt ro
     Module._load = origLoad;
   }
 
-  const provider = new AcpChatViewProvider({ extensionVersion: '0.9.0' });
+  const provider = new AcpChatViewProvider({ extensionVersion: '0.9.1' });
   t.after(async () => {
     await provider.dispose();
   });
@@ -437,31 +548,54 @@ test('AcpChatViewProvider renders strict CSP OST webview and completes prompt ro
 
   provider.resolveWebviewView(webviewView);
 
-  // Verify strict CSP nonce, OST pure-black palette, and syntactically valid inline JS
+  // Verify strict CSP nonce, OST pure-black palette, configBar, and syntactically valid inline JS
   assert.match(webviewView.webview.html, /Content-Security-Policy/);
   assert.match(webviewView.webview.html, /script-src 'nonce-[A-Za-z0-9+/=]+'/);
   assert.match(webviewView.webview.html, /--bg:.*#000000/);
+  assert.match(webviewView.webview.html, /id="configBar"/);
   const scriptMatch = webviewView.webview.html.match(/<script[^>]*>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch, 'Expected inline <script> block in webview HTML');
   assert.doesNotThrow(() => new Function(scriptMatch[1]), 'Inline webview script must be syntactically valid JS');
 
-  // Simulate webview ready & prompt roundtrip
+  // 1. Default agent is antigravity
   assert.equal(typeof messageListener, 'function');
   assert.equal(typeof disposeListener, 'function');
   messageListener({ type: 'ready' });
   await new Promise((r) => setTimeout(r, 30));
   const bootstrap = postedMessages.find((m) => m.type === 'bootstrap');
   assert.ok(bootstrap);
-  assert.equal(bootstrap.activeAgentId, 'mock');
-  assert.ok(bootstrap.agents.some((a) => a.id === 'mock' && a.installed === true));
+  assert.equal(bootstrap.activeAgentId, 'antigravity');
+  assert.ok(bootstrap.agents.some((a) => a.id === 'antigravity' && a.installed === true));
 
-  messageListener({ type: 'sendPrompt', text: 'Hello ACP World' });
-  await new Promise((r) => setTimeout(r, 400));
+  // 2. Connect, update configOption (Thinking level -> Max), and verify prompt reflects updated option
+  messageListener({ type: 'connect' });
+  await new Promise((r) => setTimeout(r, 250));
+  const cfgMsg = postedMessages.find((m) => m.type === 'configOptions' && m.items.length === 2);
+  assert.ok(cfgMsg, 'Expected initial configOptions posted on connect');
+
+  messageListener({ type: 'setConfigOption', configId: 'thought_level', value: 'Max', optionType: 'select' });
+  await new Promise((r) => setTimeout(r, 120));
+  const updatedCfg = [...postedMessages].reverse().find((m) => m.type === 'configOptions' && m.items.length === 2);
+  assert.equal(updatedCfg.items.find((c) => c.id === 'thought_level').currentValue, 'Max');
+
+  messageListener({ type: 'sendPrompt', text: 'Hello Antigravity ACP' });
+  await new Promise((r) => setTimeout(r, 300));
 
   const chunks = postedMessages
     .filter((m) => m.type === 'sessionUpdate' && m.update && m.update.sessionUpdate === 'agent_message_chunk')
     .map((m) => m.update.content && m.update.content.text)
     .join('');
-  assert.equal(chunks, 'ECHO: Hello ACP World');
+  assert.equal(chunks, 'ECHO [gemini-4-hydrogen/Max]: Hello Antigravity ACP');
   assert.ok(postedMessages.some((m) => m.type === 'turnEnd' && m.stopReason === 'end_turn'));
+
+  // 3. Verify -32000 Authentication required surfaces needsLogin banner with agy acp --login & authMethods
+  requireAuth = true;
+  messageListener({ type: 'connect' });
+  await new Promise((r) => setTimeout(r, 250));
+  const needsLogin = postedMessages.find((m) => m.type === 'needsLogin');
+  assert.ok(needsLogin, 'Expected needsLogin message on -32000 Authentication required');
+  assert.equal(needsLogin.agentId, 'antigravity');
+  assert.equal(needsLogin.loginCommand, 'agy acp --login');
+  assert.match(needsLogin.detail, /agy acp --login/);
+  assert.ok(Array.isArray(needsLogin.authMethods) && needsLogin.authMethods.some((m) => m.id === 'oauth-personal'));
 });

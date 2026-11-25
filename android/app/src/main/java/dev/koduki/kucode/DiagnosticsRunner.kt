@@ -313,11 +313,11 @@ object DiagnosticsRunner {
             "Debian apt HTTP" to httpProbe("http://deb.debian.org/debian/dists/bookworm/Release"),
             "Debian apt HTTPS (システム CA)" to httpsSystemCaProbeCommand("https://deb.debian.org/debian/dists/bookworm/Release"),
             "GitHub HTTPS (システム CA)" to httpsSystemCaProbeCommand("https://api.github.com/zen"),
-            "CLI (必須: bash/apt, 任意: node/git/gh/curl/copilot)" to """
+            "CLI (必須: bash/apt, 任意: node/git/gh/curl/agy/copilot)" to """
                 set -e
                 command -v bash
                 command -v apt
-                for bin in node git gh curl copilot; do
+                for bin in node git gh curl agy copilot; do
                     printf '%s=%s\n' "${'$'}bin" "$(command -v "${'$'}bin" || echo 未導入)"
                 done
             """.trimIndent(),

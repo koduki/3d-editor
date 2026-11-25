@@ -230,14 +230,15 @@ test('extension.js, acp-client.js, acp-webview.js pass node --check and manifest
 
   const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   assert.equal(pkg.name, 'kucode-tools');
-  assert.equal(pkg.version, '0.9.0');
+  assert.equal(pkg.version, '0.9.1');
   assert.equal(pkg.main, './extension.js');
-  assert.ok(Array.isArray(pkg.contributes.commands) && pkg.contributes.commands.length >= 16);
+  assert.ok(Array.isArray(pkg.contributes.commands) && pkg.contributes.commands.length >= 17);
 
   const commandIds = new Set(pkg.contributes.commands.map((c) => c.command));
   for (const required of [
     'kucode.openAcpChat',
     'kucode.sendSelectionToAcp',
+    'kucode.setupAntigravityCli',
     'kucode.setupCopilotCli',
     'kucode.editorCopy',
     'kucode.editorCut',
@@ -250,7 +251,10 @@ test('extension.js, acp-client.js, acp-webview.js pass node --check and manifest
 
   const views = pkg.contributes.views.kucode || [];
   assert.ok(views.some((v) => v.id === 'kucode.acpChatView' && v.type === 'webview'));
-  assert.ok(pkg.contributes.configuration.properties['kucode.acp.defaultAgent']);
+  const defaultAgentProp = pkg.contributes.configuration.properties['kucode.acp.defaultAgent'];
+  assert.ok(defaultAgentProp);
+  assert.equal(defaultAgentProp.default, 'antigravity');
+  assert.equal(defaultAgentProp.enum[0], 'antigravity');
   assert.ok(pkg.contributes.configuration.properties['kucode.acp.permissionMode']);
   assert.ok(pkg.contributes.configuration.properties['kucode.acp.agents']);
 
@@ -295,10 +299,11 @@ test('activate registers all manifest commands, ACP webview provider, sidebar tr
   assert.ok(mock.treeProviders.has('kucode.menuView'));
   const provider = mock.treeProviders.get('kucode.menuView');
   const entries = provider.getChildren();
-  assert.ok(entries.length >= 14);
+  assert.ok(entries.length >= 15);
   const sidebarCommands = new Set(entries.map((e) => e.command));
   for (const required of [
     'kucode.openAcpChat',
+    'kucode.setupAntigravityCli',
     'kucode.setupCopilotCli',
     'kucode.editorCopy',
     'kucode.editorCut',
@@ -373,10 +378,15 @@ test('commands invoke authenticated host endpoints and apply spatial scale & opt
   assert.deepEqual(mock.openedDocs[1], { content: 'boot log', language: 'plaintext' });
   assert.equal(mock.openedDocOptions[1].preview, false);
 
-  await mock.commands.get('kucode.setupCopilotCli')();
+  await mock.commands.get('kucode.setupAntigravityCli')();
   assert.equal(mock.createdTerminals.length, 1);
-  assert.equal(mock.createdTerminals[0].sent[0].text, 'kucode-install-copilot && copilot login');
+  assert.equal(mock.createdTerminals[0].sent[0].text, 'kucode-install-agy && agy acp --login');
   assert.equal(mock.createdTerminals[0].sent[0].addNewLine, true);
+
+  await mock.commands.get('kucode.setupCopilotCli')();
+  assert.equal(mock.createdTerminals.length, 2);
+  assert.equal(mock.createdTerminals[1].sent[0].text, 'kucode-install-copilot && copilot login');
+  assert.equal(mock.createdTerminals[1].sent[0].addNewLine, true);
 
   await mock.commands.get('kucode.openManager')();
   await mock.commands.get('kucode.requestStorage')();

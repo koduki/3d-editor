@@ -27,8 +27,9 @@ XREAL Android XR Puck 実機（`v0.8.0-debug`）で取得した Flight Recorder 
 ### 2.1 内蔵 ACP v1（Agent Client Protocol）AI エージェントパネルの実装
 - OpenVSCode の内蔵チャットセットアップ UI は `user/Machine/settings.json` に `"chat.disableAIFeatures": true` を設定して非表示にする（Open VSX ポリシー遵守）。
 - 代わりに、内蔵拡張 `kucode-tools` 内に **ゼロ依存・MIT ライセンスの ACP v1（JSON-RPC 2.0 NDJSON over stdio）クライアント**（`acp-client.js`）と **OST 純黒 Webview チャットパネル**（`acp-webview.js`, ビュー ID `kucode.acpChatView`）を実装する。
-- 対応プリセット：
-  - **GitHub Copilot CLI (`copilot --acp --stdio`)**（既定、`kucode-install-copilot` で arm64 環境へワンクリック導入＆`ld-linux-aarch64` ラッパー自動フォールバック）
+- 対応プリセット（v0.9.1 で Google Antigravity を既定に追加）：
+  - **Google Antigravity CLI (`agy acp --disable-telemetry`)**（既定、`kucode-install-agy` で公式 `antigravity.google/cli/install.sh` から arm64 環境へ導入＆`agy acp --login` 認証。ACP v1 `configOptions` / `session/set_config_option` によるモデル・思考レベル切替、Diff 表示、`-32000` 認証誘導に対応。単体 `agy_acp_server.par` の TCMalloc 48-bit VA 問題と異なり、公式 `agy` CLI は標準 `malloc` 採用のため 39-bit VA Android ARM64 カーネルでも動作しやすい）
+  - **GitHub Copilot CLI (`copilot --acp --stdio`)**（`kucode-install-copilot` で arm64 環境へワンクリック導入＆`ld-linux-aarch64` ラッパー自動フォールバック）
   - **Gemini CLI (`gemini --experimental-acp`)**
   - **Claude Code (`claude-agent-acp`)**
   - **Codex CLI (`codex-acp`)**

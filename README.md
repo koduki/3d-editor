@@ -63,7 +63,7 @@ adb install -r kucode-release.apk
 
 | 操作 | 方法 |
 | --- | --- |
-| AI エージェント (ACP) チャットを開く | 左端 **KuCode** アイコン → **AI エージェント (ACP)**（Copilot CLI / Gemini / Claude / Codex / OpenCode） |
+| AI エージェント (ACP) チャットを開く | 左端 **KuCode** アイコン → **AI エージェント (ACP)**（既定: **Google Antigravity `agy acp`** / Copilot CLI / Gemini / Claude / Codex / OpenCode） |
 | 選択範囲を AI (ACP) チャットへ送る | エディタで `Ctrl+Shift+I`、または右クリックメニュー |
 | ファイルを開く / クイックオープン | 左エクスプローラー、または `Ctrl+P` / `Ctrl+O` |
 | コピー / 切り取り / 貼り付け（エディタ） | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`、右クリックメニュー、または左端 **KuCode** メニュー |
@@ -78,7 +78,10 @@ adb install -r kucode-release.apk
 ### 3. AI エージェント (ACP) & CLI ツール導入例（統合ターミナル内）
 
 ```bash
-# GitHub Copilot CLI (ACP) を導入してログイン（左 KuCode パネルからワンクリック実行も可能）
+# Google Antigravity CLI (既定 ACP エージェント) を導入してログイン（左 KuCode パネルからワンクリック実行も可能）
+kucode-install-agy && agy acp --login
+
+# GitHub Copilot CLI (ACP) を導入してログイン
 kucode-install-copilot && copilot login
 
 # 一般的な CLI ツール導入例
@@ -86,7 +89,7 @@ apt update && apt install -y ca-certificates git gh curl openssh-client
 gh --version && node -v
 ```
 
-`~/.local/bin`・`~/.ssh`・`~/.gitconfig`・`~/.config/gh` は `rootfs/` 外の永続領域（`/root`）に保存されるため、アプリ更新後も引き継がれます。
+`~/.local/bin`・`~/.gemini`・`~/.ssh`・`~/.gitconfig`・`~/.config/gh` は `rootfs/` 外の永続領域（`/root`）に保存されるため、アプリ更新後も引き継がれます。
 
 ---
 
@@ -109,7 +112,7 @@ flowchart TB
         direction TB
         PROOT["libproot.so + libproot-loader.so<br/>(jniLibs/arm64-v8a / 16KB ページ完全対応 / PROOT_LOADER)"]
         VSC["openvscode-server v1.109.5<br/>127.0.0.1:18765 (固定優先ポート) + 統合ターミナル"]
-        EXT["内蔵拡張 kucode-tools (v0.9.0)<br/>内蔵 ACP v1 AI チャット (Copilot/Gemini/Claude/Codex/OpenCode)<br/>左 Activity Bar メニュー / 右クリック / テーマ・ズーム切替"]
+        EXT["内蔵拡張 kucode-tools (v0.9.1)<br/>内蔵 ACP v1 AI チャット (Antigravity agy / Copilot / Gemini / Claude / Codex / OpenCode)<br/>モデル・思考レベル切替 / 左 Activity Bar メニュー / 右クリック / テーマ・ズーム切替"]
     end
 
     subgraph Storage["永続ストレージ & マウント境界"]
@@ -141,7 +144,7 @@ flowchart TB
 | ホスト側（Android） | ゲスト側（Debian） | 用途・永続性 |
 | --- | --- | --- |
 | `filesDir/workspace` | `/workspace` | 作業用コード領域。`rootfs/` 外に分離され更新時も保持。`KuCodeDocumentsProvider` 経由で Android 標準「Files」アプリから直接読み書き可能。 |
-| `filesDir/home` | `/root` | 永続ホーム（`~/.bashrc`, `~/.profile`, `~/.local/bin`, `~/.ssh`, `~/.gitconfig`, `~/.config/gh`, 履歴）。 |
+| `filesDir/home` | `/root` | 永続ホーム（`~/.bashrc`, `~/.profile`, `~/.local/bin`, `~/.gemini`, `~/.ssh`, `~/.gitconfig`, `~/.config/gh`, 履歴）。 |
 | `filesDir/runtime/vscode-data` | `/var/lib/kucode-vscode` | `openvscode-server` の `user/Machine/settings.json`・拡張・状態領域（初期値は Machine 側のみにアトミック適用）。 |
 | `filesDir/runtime/rootfs` | `/` | Debian 12 minimal + `/opt/openvscode-server` + `/usr/local/bin/node`（更新時は `staging/` 経由でアトミック入替、失敗時は自動ロールバック）。 |
 | `getExternalFilesDir("shared")` | `/android/shared` | 権限不要の Android 共有領域（`/workspace/android/shared` から参照）。 |
@@ -152,7 +155,7 @@ flowchart TB
 
 ## 主な機能
 
-- **内蔵 ACP v1 AI エージェントチャット**：OpenVSCode / Open VSX の制約に縛られず、`kucode-tools` 内蔵の OST 純黒チャットパネルから GitHub Copilot CLI（`copilot --acp --stdio`）・Gemini CLI・Claude Code・Codex CLI・OpenCode 等の ACP 対応エージェントをネイティブ接続（`/workspace` 境界強制・権限承認 UI・選択範囲送信 `Ctrl+Shift+I`・`kucode-install-copilot` 自動導入）。
+- **内蔵 ACP v1 AI エージェントチャット（Google Antigravity 標準対応）**：OpenVSCode / Open VSX の制約に縛られず、`kucode-tools` 内蔵の OST 純黒チャットパネルから **Google Antigravity CLI（`agy acp`）** を既定エージェントとして、GitHub Copilot CLI（`copilot --acp --stdio`）・Gemini CLI・Claude Code・Codex CLI・OpenCode 等の ACP v1 エージェントをネイティブ接続（`configOptions` によるモデル・思考レベル切替、Diff 表示、`-32000` 認証誘導、`/workspace` 境界強制、権限承認 UI、選択範囲送信 `Ctrl+Shift+I`、`kucode-install-agy` / `kucode-install-copilot` 自動導入）。
 - **ランタイム起動 & 耐障害性**：`.tgz` アトミック展開（symlink/hardlink/chmod 保持＆パストラバーサル防御）、rootfs 内バージョン管理と READY コミット／失敗時ロールバック、優先固定ポート `18765`＋孤児プロセス自動回収、Android システム DNS & 信頼済み CA 証明書（システム＋ユーザー CA）の自動同期、PRoot 向け `apt` 設定、起動失敗時 `PROOT_NO_SECCOMP=1` 自動リトライ、`libproot.so` / `libproot-loader.so` 双方の 16KB ページアライメント対応、`specialUse` FGS。
 - **空間デスクトップ UX**：OST 純黒 `#000000` / VST 暗灰 `#12141a` 切替、表示サイズ 3 段階、フォーカス枠（`#38BDF8` / `#18181B`）＋非フォーカス自動減光（`alpha = 0.55f`）、Edge-to-Edge WindowInsets 対応、ファイル選択＆D&D、レンダラー自動復旧（エディタ＆管理画面）、ピンチズーム抑止、Back 誤終了ガード、`onCreateWindow` による隣ウィンドウ外部ブラウザ起動、統合ターミナル `gpuAcceleration: "off"`。
 - **内蔵拡張 & 実機診断 / Flight Recorder**：左 Activity Bar の `KuCode` メニュー（`kucode-tools` を起動時自動同期）、Android `ClipboardManager` 連携によるエディタ／統合ターミナルのコピー＆貼り付け（`POST /copy`・`GET /clipboard`・`kucode-copy` / `kucode-paste`）、並列実機診断レポート、起動〜終了単位 Flight Recorder（異常終了照合・OpenVSCode サブログ回収・機密リダクション・AI 診断バンドル自動出力）、非 PTY フォールバック CLI コンソール（`boot.html`）。
