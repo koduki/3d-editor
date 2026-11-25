@@ -15,6 +15,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.file.Files
@@ -27,10 +31,13 @@ import java.util.TimeZone
 
 /**
  * Built-in on-device diagnostics script for XREAL AURA / Android XR verification.
- * Runs non-destructive checks (parallelized after PRoot Gate 1 for fast completion)
- * and outputs a single copy-pasteable Markdown report with recent error logs.
+ * Runs non-destructive checks with bounded concurrency (max 3 concurrent PRoot probes)
+ * under a single-flight mutex and outputs a single copy-pasteable Markdown report.
  */
 object DiagnosticsRunner {
+
+    private const val MAX_CONCURRENT_PROBES = 3
+    private val collectMutex = Mutex()
 
     data class CheckItem(
         val name: String,
@@ -92,139 +99,153 @@ object DiagnosticsRunner {
     }
 
     suspend fun collect(context: Context, runtime: PosixRuntimeManager): String =
-        withContext(Dispatchers.IO) {
-            val paths = runtime.getPaths()
-            val status = runtime.getStatus()
-            val systemDns = runtime.querySystemDnsServers()
-            val telemetry = SessionTelemetryManager.getInstance(context)
-            val sessions = telemetry.listSessionSummaries()
-            val currentSession = sessions.firstOrNull { it.isCurrentSession }
-            val previousSession = sessions.firstOrNull { !it.isCurrentSession }
+        collectMutex.withLock {
+            withContext(Dispatchers.IO) {
+                val telemetry = SessionTelemetryManager.getInstance(context)
+                runCatching { telemetry.captureMetricSnapshot("diagnostics_start", includePss = true) }
+                try {
+                    val paths = runtime.getPaths()
+                    val status = runtime.getStatus()
+                    val systemDns = runtime.querySystemDnsServers()
+                    val sessions = telemetry.listSessionSummaries()
+                    val currentSession = sessions.firstOrNull { it.isCurrentSession }
+                    val previousSession = sessions.firstOrNull { !it.isCurrentSession }
 
-            val deviceInfo = linkedMapOf<String, String>()
-            deviceInfo["Device"] = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})"
-            deviceInfo["Android"] = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
-            deviceInfo["ABIs"] = Build.SUPPORTED_ABIS.joinToString(", ")
-            deviceInfo["Page Size"] = queryPageSize()
-            deviceInfo["SELinux Context"] = querySelinuxContext()
-            deviceInfo["WebView"] = queryWebViewInfo()
-            deviceInfo["Display / Window"] = queryDisplayInfo(context)
-            deviceInfo["Input Devices (KB/Mouse)"] = queryInputDevices(context)
-            deviceInfo["System DNS"] = if (systemDns.isEmpty()) "(fallback 1.1.1.1/8.8.8.8)" else systemDns.joinToString(", ")
-            deviceInfo["System CA Bundle"] = querySystemCaSummary(paths)
-            deviceInfo["App"] = "${context.packageName} (targetSdk=${context.applicationInfo.targetSdkVersion})"
-            deviceInfo["XR Spatial Feature"] =
-                context.packageManager.hasSystemFeature("android.software.xr.api.spatial").toString()
-            deviceInfo["All Files Access"] = status.hasAllFilesAccess.toString()
-            deviceInfo["Battery Opt Ignored"] = queryBatteryOptIgnored(context)
-            deviceInfo["Notifications Enabled"] = queryNotificationsEnabled(context)
-            deviceInfo["Free Disk (filesDir)"] = "${context.filesDir.usableSpace / (1024 * 1024)} MB"
-            deviceInfo["Memory"] = queryMemorySummary(context)
-            deviceInfo["Runtime State"] = "${status.state} (port=${status.port}, msg=${status.message})"
-            deviceInfo["Current Session"] = currentSession?.let {
-                "${it.sessionId} (pid=${it.pid}, events=${it.totalEvents}, err=${it.errorCount}, warn=${it.warnCount})"
-            } ?: "(none)"
-            deviceInfo["Previous Session"] = previousSession?.let {
-                "${it.sessionId} [${it.status}/${it.exitCategory}: ${it.exitSummary}]"
-            } ?: "(none)"
-            deviceInfo["Workspace Path"] = paths.workspaceDir.absolutePath
-            deviceInfo["Home Path (/root)"] = paths.homeDir.absolutePath
-            deviceInfo["Diagnostics Path (/var/log/kucode)"] = paths.diagnosticsDir.absolutePath
-            deviceInfo["NativeLibDir"] = paths.nativeLibDir.absolutePath
+                    val deviceInfo = linkedMapOf<String, String>()
+                    deviceInfo["Device"] = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})"
+                    deviceInfo["Android"] = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+                    deviceInfo["ABIs"] = Build.SUPPORTED_ABIS.joinToString(", ")
+                    deviceInfo["Page Size"] = queryPageSize()
+                    deviceInfo["SELinux Context"] = querySelinuxContext()
+                    deviceInfo["WebView"] = queryWebViewInfo()
+                    deviceInfo["Display / Window"] = queryDisplayInfo(context)
+                    deviceInfo["Input Devices (KB/Mouse)"] = queryInputDevices(context)
+                    deviceInfo["System DNS"] = if (systemDns.isEmpty()) "(fallback 1.1.1.1/8.8.8.8)" else systemDns.joinToString(", ")
+                    deviceInfo["System CA Bundle"] = querySystemCaSummary(paths)
+                    deviceInfo["App"] = "${context.packageName} (targetSdk=${context.applicationInfo.targetSdkVersion})"
+                    deviceInfo["XR Spatial Feature"] =
+                        context.packageManager.hasSystemFeature("android.software.xr.api.spatial").toString()
+                    deviceInfo["All Files Access"] = status.hasAllFilesAccess.toString()
+                    deviceInfo["Battery Opt Ignored"] = queryBatteryOptIgnored(context)
+                    deviceInfo["Notifications Enabled"] = queryNotificationsEnabled(context)
+                    deviceInfo["Free Disk (filesDir)"] = "${context.filesDir.usableSpace / (1024 * 1024)} MB"
+                    deviceInfo["Memory"] = queryMemorySummary(context)
+                    deviceInfo["Runtime State"] = "${status.state} (port=${status.port}, msg=${status.message})"
+                    deviceInfo["Current Session"] = currentSession?.let {
+                        "${it.sessionId} (pid=${it.pid}, events=${it.totalEvents}, err=${it.errorCount}, warn=${it.warnCount})"
+                    } ?: "(none)"
+                    deviceInfo["Previous Session"] = previousSession?.let {
+                        "${it.sessionId} [${it.status}/${it.exitCategory}: ${it.exitSummary}]"
+                    } ?: "(none)"
+                    deviceInfo["Workspace Path"] = paths.workspaceDir.absolutePath
+                    deviceInfo["Home Path (/root)"] = paths.homeDir.absolutePath
+                    deviceInfo["Diagnostics Path (/var/log/kucode)"] = paths.diagnosticsDir.absolutePath
+                    deviceInfo["NativeLibDir"] = paths.nativeLibDir.absolutePath
 
-            val checks = mutableListOf<CheckItem>()
+                    val checks = mutableListOf<CheckItem>()
 
-            // 1-3. Fast local Android-side checks
-            checks.add(checkNativeBinaries(paths))
-            checks.add(checkExtractedRuntime(paths))
+                    // 1-3. Fast local Android-side checks
+                    checks.add(checkNativeBinaries(paths))
+                    checks.add(checkExtractedRuntime(paths))
 
-            // 4. PRoot Gate 1
-            val prootCheck = runProotProbe(runtime)
-            checks.add(prootCheck)
+                    // 4. PRoot Gate 1
+                    val prootCheck = runProotProbe(runtime)
+                    checks.add(prootCheck)
 
-            // 5-9. Run independent POSIX probes in parallel to keep total runtime well under timeout
-            if (prootCheck.ok) {
-                val probeScript = context.assets.open("runtime-probes.cjs").bufferedReader().use { it.readText() }
-                val parallelChecks = coroutineScope {
-                    val documentsTask = async { checkDocumentsProvider(context, runtime) }
-                    val nodeTask = async {
-                        runTimedCommand(
-                            name = "Node.js & openvscode-server 実行確認",
-                            runtime = runtime,
-                            command = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node -v && ${PosixRuntimeConfig.GUEST_OPENVSCODE_BIN} --version",
-                            timeoutSeconds = 15,
-                        )
+                    // 5-9. Run independent POSIX probes with bounded concurrency (max 3 PRoot processes at once)
+                    if (prootCheck.ok) {
+                        val probeScript = context.assets.open("runtime-probes.cjs").bufferedReader().use { it.readText() }
+                        val sem = Semaphore(MAX_CONCURRENT_PROBES)
+                        val parallelChecks = coroutineScope {
+                            val documentsTask = async { sem.withPermit { checkDocumentsProvider(context, runtime) } }
+                            val nodeTask = async {
+                                sem.withPermit {
+                                    runTimedCommand(
+                                        name = "Node.js & openvscode-server 実行確認",
+                                        runtime = runtime,
+                                        command = "${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node -v && ${PosixRuntimeConfig.GUEST_OPENVSCODE_BIN} --version",
+                                        timeoutSeconds = 15,
+                                    )
+                                }
+                            }
+                            val ptyTask = async {
+                                sem.withPermit {
+                                    runTimedCommand(
+                                        name = "統合ターミナル (PTY 入出力・リサイズ)",
+                                        runtime = runtime,
+                                        command = nativeProbeCommand("pty", probeScript),
+                                        timeoutSeconds = 15,
+                                    )
+                                }
+                            }
+                            val watcherTask = async {
+                                sem.withPermit {
+                                    runTimedCommand(
+                                        name = "ワークスペースのファイル作成通知 (@parcel/watcher)",
+                                        runtime = runtime,
+                                        command = nativeProbeCommand("watcher", probeScript),
+                                        timeoutSeconds = 15,
+                                    )
+                                }
+                            }
+                            val homeTask = async { sem.withPermit { checkBindMount(runtime, paths.homeDir, "/root") } }
+                            val sharedTask = async { sem.withPermit { checkBindMount(runtime, paths.androidSharedDir, "/workspace/android/shared") } }
+                            val diagMountTask = async { sem.withPermit { checkBindMount(runtime, paths.diagnosticsDir, PosixRuntimeConfig.GUEST_DIAGNOSTICS_DIR) } }
+                            val sdcardTask = paths.androidSdcardDir?.takeIf { it.isDirectory && it.canWrite() }?.let { sdDir ->
+                                async { sem.withPermit { checkBindMount(runtime, sdDir, "/workspace/android/sdcard") } }
+                            }
+                            val networkTasks = networkChecks().map { (name, command) ->
+                                async { sem.withPermit { runTimedCommand(name, runtime, command, timeoutSeconds = 15) } }
+                            }
+                            listOfNotNull(
+                                documentsTask.await(),
+                                nodeTask.await(),
+                                ptyTask.await(),
+                                watcherTask.await(),
+                                homeTask.await(),
+                                sharedTask.await(),
+                                diagMountTask.await(),
+                                sdcardTask?.await(),
+                            ) + networkTasks.awaitAll()
+                        }
+                        checks.addAll(parallelChecks)
+                    } else {
+                        checks.add(checkDocumentsProvider(context, null))
                     }
-                    val ptyTask = async {
-                        runTimedCommand(
-                            name = "統合ターミナル (PTY 入出力・リサイズ)",
-                            runtime = runtime,
-                            command = nativeProbeCommand("pty", probeScript),
-                            timeoutSeconds = 15,
-                        )
+
+                    // 10. Embedded HTTP server health check
+                    checks.add(checkLocalServerHttp(runtime, status))
+
+                    val tailLogs = runtime.getLogsText()
+                        .lines()
+                        .takeLast(80)
+                        .joinToString("\n")
+
+                    val sessionListDigest = buildString {
+                        appendLine("Stored Sessions: ${sessions.size} (CLI: `kucode-logs list` / `kucode-logs show prev`)")
+                        for (s in sessions.take(5)) {
+                            val tag = if (s.isCurrentSession) "CURRENT" else s.status.name
+                            appendLine("- ${s.sessionId} [$tag / ${s.exitCategory}] dur=${SessionLogStore.formatDurationHuman(s.durationMs)} err=${s.errorCount} warn=${s.warnCount} (${s.exitSummary})")
+                        }
                     }
-                    val watcherTask = async {
-                        runTimedCommand(
-                            name = "ワークスペースのファイル作成通知 (@parcel/watcher)",
-                            runtime = runtime,
-                            command = nativeProbeCommand("watcher", probeScript),
-                            timeoutSeconds = 15,
-                        )
+
+                    val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+                        timeZone = TimeZone.getTimeZone("UTC")
                     }
-                    val homeTask = async { checkBindMount(runtime, paths.homeDir, "/root") }
-                    val sharedTask = async { checkBindMount(runtime, paths.androidSharedDir, "/workspace/android/shared") }
-                    val diagMountTask = async { checkBindMount(runtime, paths.diagnosticsDir, PosixRuntimeConfig.GUEST_DIAGNOSTICS_DIR) }
-                    val sdcardTask = paths.androidSdcardDir?.takeIf { it.isDirectory && it.canWrite() }?.let { sdDir ->
-                        async { checkBindMount(runtime, sdDir, "/workspace/android/sdcard") }
-                    }
-                    val networkTasks = networkChecks().map { (name, command) ->
-                        async { runTimedCommand(name, runtime, command, timeoutSeconds = 15) }
-                    }
-                    listOfNotNull(
-                        documentsTask.await(),
-                        nodeTask.await(),
-                        ptyTask.await(),
-                        watcherTask.await(),
-                        homeTask.await(),
-                        sharedTask.await(),
-                        diagMountTask.await(),
-                        sdcardTask?.await(),
-                    ) + networkTasks.awaitAll()
+
+                    formatMarkdownReport(
+                        ReportInput(
+                            timestampUtc = fmt.format(Date()),
+                            deviceInfo = deviceInfo,
+                            checks = checks,
+                            recentLogs = tailLogs,
+                            sessionSummaryText = sessionListDigest,
+                        ),
+                    )
+                } finally {
+                    runCatching { telemetry.captureMetricSnapshot("diagnostics_end", includePss = true) }
                 }
-                checks.addAll(parallelChecks)
-            } else {
-                checks.add(checkDocumentsProvider(context, null))
             }
-
-            // 10. Embedded HTTP server health check
-            checks.add(checkLocalServerHttp(runtime, status))
-
-            val tailLogs = runtime.getLogsText()
-                .lines()
-                .takeLast(80)
-                .joinToString("\n")
-
-            val sessionListDigest = buildString {
-                appendLine("Stored Sessions: ${sessions.size} (CLI: `kucode-logs list` / `kucode-logs show prev`)")
-                for (s in sessions.take(5)) {
-                    val tag = if (s.isCurrentSession) "CURRENT" else s.status.name
-                    appendLine("- ${s.sessionId} [$tag / ${s.exitCategory}] dur=${SessionLogStore.formatDurationHuman(s.durationMs)} err=${s.errorCount} warn=${s.warnCount} (${s.exitSummary})")
-                }
-            }
-
-            val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-                timeZone = TimeZone.getTimeZone("UTC")
-            }
-
-            formatMarkdownReport(
-                ReportInput(
-                    timestampUtc = fmt.format(Date()),
-                    deviceInfo = deviceInfo,
-                    checks = checks,
-                    recentLogs = tailLogs,
-                    sessionSummaryText = sessionListDigest,
-                ),
-            )
         }
 
     internal fun nativeProbeCommand(mode: String, script: String): String {
@@ -292,11 +313,11 @@ object DiagnosticsRunner {
             "Debian apt HTTP" to httpProbe("http://deb.debian.org/debian/dists/bookworm/Release"),
             "Debian apt HTTPS (システム CA)" to httpsSystemCaProbeCommand("https://deb.debian.org/debian/dists/bookworm/Release"),
             "GitHub HTTPS (システム CA)" to httpsSystemCaProbeCommand("https://api.github.com/zen"),
-            "CLI (必須: bash/apt, 任意: git/gh/curl)" to """
+            "CLI (必須: bash/apt, 任意: node/git/gh/curl/copilot)" to """
                 set -e
                 command -v bash
                 command -v apt
-                for bin in git gh curl; do
+                for bin in node git gh curl copilot; do
                     printf '%s=%s\n' "${'$'}bin" "$(command -v "${'$'}bin" || echo 未導入)"
                 done
             """.trimIndent(),

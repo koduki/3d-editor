@@ -23,7 +23,9 @@ class PosixRuntimeConfigTest {
         )
 
         assertEquals(File(paths.rootfsDir, ".kucode-runtime-version"), paths.versionMarker)
-        assertEquals(File(paths.vscodeDataDir, "data/Machine/settings.json"), paths.machineSettingsFile)
+        assertEquals(File(paths.vscodeDataDir, "user/Machine/settings.json"), paths.machineSettingsFile)
+        assertEquals(File(paths.vscodeDataDir, "data/Machine/settings.json"), paths.legacyMachineSettingsFile)
+        assertEquals(File(paths.vscodeDataDir, ".server-pid"), paths.serverPidFile)
 
         val cmd = PosixRuntimeConfig.buildProotCommand(
             paths = paths,
@@ -55,6 +57,7 @@ class PosixRuntimeConfigTest {
         assertEquals("secret-token", env["KUCODE_ADMIN_TOKEN"])
         assertEquals("/usr/local/bin/kucode-open", env["BROWSER"])
         assertEquals("/usr/local/bin/kucode-open", env["GH_BROWSER"])
+        assertTrue(env["PATH"]!!.startsWith("/root/.local/bin:"))
         assertEquals("/tmp", env["TMPDIR"])
         assertEquals("/etc/ssl/certs/ca-certificates.crt", env["SSL_CERT_FILE"])
         assertEquals("/etc/ssl/certs", env["SSL_CERT_DIR"])
@@ -77,10 +80,15 @@ class PosixRuntimeConfigTest {
         assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 18765, 18765))
         assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 18765, 18765))
 
-        // Dev servers on other ports and external websites must open in sibling XR browser
+        // Main-frame dev servers on other ports and external websites must open in sibling XR browser
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 3000, 18765))
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 5173, 18765))
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("https", "github.com", -1, 18765))
+
+        // Loopback dev-server iframes stay inside WebView (except adminServerPort!)
+        assertTrue(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 3000, 18765, isForMainFrame = false, adminServerPort = 39049))
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "127.0.0.1", 39049, 18765, isForMainFrame = false, adminServerPort = 39049))
+        assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("http", "localhost", 39049, 18765, isForMainFrame = false, adminServerPort = 39049))
 
         // VS Code webview subframes (*.vscode-cdn.net, about:blank, blob:) stay inside iframe ONLY when !isForMainFrame
         assertFalse(PosixRuntimeConfig.shouldKeepInsideWebView("https", "abc123.vscode-cdn.net", -1, 18765, isForMainFrame = true))
@@ -107,6 +115,7 @@ class PosixRuntimeConfigTest {
         assertEquals(false, json.getBoolean("editor.minimap.enabled"))
         assertEquals(false, json.getBoolean("breadcrumbs.enabled"))
         assertEquals(false, json.getBoolean("security.workspace.trust.enabled"))
+        assertEquals(true, json.getBoolean("chat.disableAIFeatures"))
         assertEquals("off", json.getString("telemetry.telemetryLevel"))
         assertEquals("off", json.getString("files.autoSave"))
         assertEquals("off", json.getString("terminal.integrated.gpuAcceleration"))
@@ -220,6 +229,21 @@ class PosixRuntimeConfigTest {
         assertTrue(files.containsKey("vmstat"))
         assertTrue(files.getValue("stat").contains("cpu3 "))
         assertFalse(files.getValue("stat").contains("cpu4 "))
+    }
+
+    @Test
+    fun buildHostCliHelperScriptsAndProfiles_includeCopilotInstallerAndLocalBinPath() {
+        val scripts = PosixRuntimeConfig.buildHostCliHelperScripts()
+        assertTrue(scripts.containsKey("kucode-install-copilot"))
+        val installer = scripts.getValue("kucode-install-copilot")
+        assertTrue(installer.startsWith("#!/usr/bin/env bash\n"))
+        assertTrue(installer.contains(".local/bin"))
+        assertTrue(installer.contains("ld-linux-aarch64.so.1"))
+
+        val profileD = PosixRuntimeConfig.buildProfileDEnvScript()
+        assertTrue(profileD.contains(".local/bin"))
+        val profile = PosixRuntimeConfig.buildDefaultProfile()
+        assertTrue(profile.contains(".local/bin"))
     }
 }
 

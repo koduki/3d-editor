@@ -11,7 +11,7 @@ import java.io.File
  */
 object PosixRuntimeConfig {
 
-    const val RUNTIME_VERSION = "0.8.0-debian12-openvscode-1.109.5"
+    const val RUNTIME_VERSION = "0.9.0-debian12-openvscode-1.109.5"
     const val ASSET_ROOTFS = "runtime/debian-arm64-rootfs.tgz"
     const val ASSET_OPENVSCODE = "runtime/openvscode-server-linux-arm64.tgz"
 
@@ -44,7 +44,10 @@ object PosixRuntimeConfig {
         val shmDir: File get() = File(runtimeRoot, "shm")
         val tmpDir: File get() = File(runtimeRoot, "tmp")
         val vscodeDataDir: File get() = File(runtimeRoot, "vscode-data")
-        val machineSettingsFile: File get() = File(vscodeDataDir, "data/Machine/settings.json")
+        // Matches `--user-data-dir /var/lib/kucode-vscode/user` passed to openvscode-server
+        val machineSettingsFile: File get() = File(vscodeDataDir, "user/Machine/settings.json")
+        val legacyMachineSettingsFile: File get() = File(vscodeDataDir, "data/Machine/settings.json")
+        val serverPidFile: File get() = File(vscodeDataDir, ".server-pid")
         val versionMarker: File get() = File(rootfsDir, ".kucode-runtime-version")
         val backupRootfsDir: File get() = File(runtimeRoot, "rootfs.previous")
         val guestCaBundleHostFile: File get() = File(rootfsDir, "etc/ssl/certs/ca-certificates.crt")
@@ -60,8 +63,8 @@ object PosixRuntimeConfig {
      * an external Android XR browser window (e.g. a dev server on 127.0.0.1:3000 or GitHub auth).
      *
      * Allows VS Code's own sandboxed webview subframes (`*.vscode-cdn.net`, `about:blank`, `blob:`,
-     * `data:`) when [isForMainFrame] is `false` so Markdown previews and extension pages work
-     * without misfiring external browser intents.
+     * `data:`) and local dev-server preview iframes (Simple Browser, excluding [adminServerPort])
+     * when [isForMainFrame] is `false` so previews and extension panels work cleanly.
      */
     fun shouldKeepInsideWebView(
         scheme: String?,
@@ -69,11 +72,13 @@ object PosixRuntimeConfig {
         port: Int,
         editorServerPort: Int,
         isForMainFrame: Boolean = true,
+        adminServerPort: Int = 0,
     ): Boolean {
         val normalizedScheme = scheme?.lowercase()
         val normalizedHost = host?.lowercase()
+        val isLoopback = normalizedHost == "127.0.0.1" || normalizedHost == "localhost"
         if (normalizedScheme == "http" &&
-            (normalizedHost == "127.0.0.1" || normalizedHost == "localhost") &&
+            isLoopback &&
             editorServerPort > 0 &&
             port == editorServerPort
         ) {
@@ -86,6 +91,13 @@ object PosixRuntimeConfig {
             if (normalizedScheme == "https" &&
                 normalizedHost != null &&
                 (normalizedHost == "vscode-cdn.net" || normalizedHost.endsWith(".vscode-cdn.net"))
+            ) {
+                return true
+            }
+            if (normalizedScheme == "http" &&
+                isLoopback &&
+                port > 0 &&
+                (adminServerPort <= 0 || port != adminServerPort)
             ) {
                 return true
             }
@@ -178,7 +190,7 @@ object PosixRuntimeConfig {
             "COLORTERM" to "truecolor",
             "LANG" to "C.UTF-8",
             "LC_ALL" to "C.UTF-8",
-            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH" to "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "VSCODE_AGENT_FOLDER" to GUEST_VSCODE_DATA,
             "SSL_CERT_FILE" to GUEST_CA_BUNDLE,
             "SSL_CERT_DIR" to GUEST_CA_DIR,
@@ -229,6 +241,8 @@ object PosixRuntimeConfig {
      * - Medium font weight (500), 16px editor font, 0.5 zoom for 70° FOV legibility
      * - Thick solid cursor (3px) and brightened comments so text survives real-world ambient light
      * - DOM-rendered integrated terminal (`gpuAcceleration: "off"`) for WebView stability
+     * - Disables built-in Microsoft Copilot Chat setup (which 404s on Open VSX) in favor of
+     *   KuCode's built-in ACP (Agent Client Protocol) sidebar chat
      */
     fun buildMinimalVsCodeSettingsObject(): JSONObject {
         val colorCustomizations = JSONObject()
@@ -277,6 +291,7 @@ object PosixRuntimeConfig {
             .put("workbench.tips.enabled", false)
             .put("workbench.welcomePage.walkthroughs.openOnInstall", false)
             .put("workbench.secondarySideBar.defaultVisibility", "hidden")
+            .put("chat.disableAIFeatures", true)
             .put("window.zoomLevel", 0.5)
             .put("editor.minimap.enabled", false)
             .put("editor.fontSize", 16)
@@ -723,8 +738,63 @@ object PosixRuntimeConfig {
             });
         """.trimIndent() + "\n"
 
+        result["kucode-install-copilot"] = """
+            #!/usr/bin/env bash
+            set -euo pipefail
+            export PATH="${'$'}HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            echo "[kucode] Setting up official GitHub Copilot CLI (for ACP chat & terminal)..."
+            if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+              echo "[kucode] Installing curl & git via apt..."
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git
+            fi
+            mkdir -p "${'$'}HOME/.local/bin"
+            PREFIX="${'$'}HOME/.local" curl -fsSL https://gh.io/copilot-install | bash
+            BIN="${'$'}HOME/.local/bin/copilot"
+            if [ ! -x "${'$'}BIN" ]; then
+              echo "[kucode] ERROR: copilot binary not found at ${'$'}BIN" >&2
+              exit 1
+            fi
+            if ! "${'$'}BIN" --version >/dev/null 2>&1; then
+              if [ -x /lib/ld-linux-aarch64.so.1 ] && /lib/ld-linux-aarch64.so.1 "${'$'}BIN" --version >/dev/null 2>&1; then
+                echo "[kucode] Applying ld-linux-aarch64.so.1 exec wrapper for kernel compatibility..."
+                mv "${'$'}BIN" "${'$'}HOME/.local/bin/copilot.real"
+                cat > "${'$'}BIN" <<'WRAP'
+            #!/bin/sh
+            exec /lib/ld-linux-aarch64.so.1 "${'$'}HOME/.local/bin/copilot.real" "${'$'}@"
+            WRAP
+                chmod 755 "${'$'}BIN"
+              fi
+            fi
+            echo "[kucode] Installed: $( "${'$'}BIN" --version 2>&1 || echo ok )"
+            echo "[kucode] Next step: run 'copilot login' (or 'gh auth login') if not authenticated yet."
+        """.trimIndent() + "\n"
+
         return result
     }
+
+    fun buildProfileDEnvScript(): String = """
+        # Managed by KuCode: keep user-local CLI tools (Copilot CLI, Claude, uv, etc.) on PATH
+        if [ -d "${'$'}{HOME:-/root}/.local/bin" ]; then
+          case ":${'$'}PATH:" in
+            *":${'$'}{HOME:-/root}/.local/bin:"*) ;;
+            *) export PATH="${'$'}{HOME:-/root}/.local/bin:${'$'}PATH" ;;
+          esac
+        fi
+    """.trimIndent() + "\n"
+
+    fun buildDefaultProfile(): String = """
+        # ~/.profile: executed by Bourne-compatible login shells (KuCode persistent /root)
+        if [ -n "${'$'}BASH_VERSION" ] && [ -f "${'$'}HOME/.bashrc" ]; then
+          . "${'$'}HOME/.bashrc"
+        fi
+        if [ -d "${'$'}HOME/.local/bin" ]; then
+          case ":${'$'}PATH:" in
+            *":${'$'}HOME/.local/bin:"*) ;;
+            *) export PATH="${'$'}HOME/.local/bin:${'$'}PATH" ;;
+          esac
+        fi
+    """.trimIndent() + "\n"
 
     fun buildDefaultBashrc(): String = """
         # KuCode persistent Debian shell config (/root is mounted outside rootfs)
@@ -732,6 +802,12 @@ object PosixRuntimeConfig {
         export LC_ALL=C.UTF-8
         export HISTCONTROL=ignoredups:erasedups
         export HISTSIZE=2000
+        if [ -d "${'$'}HOME/.local/bin" ]; then
+          case ":${'$'}PATH:" in
+            *":${'$'}HOME/.local/bin:"*) ;;
+            *) export PATH="${'$'}HOME/.local/bin:${'$'}PATH" ;;
+          esac
+        fi
         alias ls='ls --color=auto'
         alias ll='ls -la'
         PS1='\[\e[36m\]kucode\[\e[0m\]:\[\e[32m\]\w\[\e[0m\]\$ '
@@ -740,7 +816,12 @@ object PosixRuntimeConfig {
     fun buildWelcomeReadme(): String = """
 # KuCode Workspace (`/workspace`)
 
-**空間に、書く。** — APK 1 本で完結する、空間コンピューティングのためのコードエディタ（Debian minimal + 内蔵 `openvscode-server`）です。
+**空間に、書く。** — APK 1 本で完結する、空間コンピューティングのためのコードエディタ（Debian minimal + 内蔵 `openvscode-server` + 内蔵 ACP AI チャット）です。
+
+## AI エージェント（Zed ACP プロトコル内蔵）
+- 左端 **KuCode** アイコン上部の **「AI エージェント (ACP)」** パネルから、GitHub Copilot CLI (`copilot --acp --stdio`)・Gemini CLI・Claude Code・Codex CLI・OpenCode を OST 純黒 UI で直接操作できます。
+- 選択コードの添付は **`Ctrl+Shift+I`**（またはパネル内の「+ 選択範囲」）。
+- 初回の Copilot CLI 導入＆ログインはパネル内のボタン、またはターミナルで `kucode-install-copilot && copilot login` を実行してください（Node.js v22 は `/usr/local/bin/node` として初期導入済み）。
 
 ## 基本操作（物理キーボード）
 - **ファイルを開く**: 左サイドバーをクリック、または `Ctrl+P` / `Ctrl+O`
@@ -756,12 +837,13 @@ object PosixRuntimeConfig {
 ## Android ↔ POSIX ファイル共有 & 永続領域
 - **POSIX → Android**: `/workspace/android`（`/android/shared` および全ファイルアクセス許可時は `/android/sdcard`）
 - **Android → POSIX**: Android XR の「Files」アプリから **KuCode**（`/workspace`）および **KuCode Logs**（起動〜終了ごとの診断レポート）を直接参照できます。
-- **永続ホーム (`/root`)**: `~/.ssh`, `~/.gitconfig`, `~/.config/gh` は rootfs 外に分離保存されるため、アプリ更新後も引き継がれます。
+- **永続ホーム (`/root`)**: `~/.ssh`, `~/.gitconfig`, `~/.config/gh`, `~/.local/bin` は rootfs 外に分離保存されるため、アプリ更新後も引き継がれます。
 
-## `gh` / `git` などの CLI 導入（POSIX ターミナル内）
+## `gh` / `git` / Copilot CLI 導入（POSIX ターミナル内）
 ```bash
 apt update && apt install -y ca-certificates git gh curl openssh-client
 gh auth login
+kucode-install-copilot && copilot login
 ```
 """.trimIndent() + "\n"
 }

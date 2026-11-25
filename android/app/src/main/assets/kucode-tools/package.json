@@ -1,8 +1,8 @@
 {
   "name": "kucode-tools",
   "displayName": "KuCode Diagnostics & Tools",
-  "description": "Built-in Android XR diagnostics, clipboard bridge, optical presets, log viewer, and storage menu for KuCode",
-  "version": "0.8.0",
+  "description": "Built-in Android XR ACP AI agent chat, diagnostics, clipboard bridge, optical presets, log viewer, and storage menu for KuCode",
+  "version": "0.9.0",
   "publisher": "koduki",
   "engines": {
     "vscode": "^1.80.0"
@@ -16,6 +16,19 @@
   "main": "./extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "kucode.openAcpChat",
+        "title": "KuCode: AI エージェント (ACP) チャットを開く",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "kucode.sendSelectionToAcp",
+        "title": "KuCode: 選択範囲を AI (ACP) チャットへ送る"
+      },
+      {
+        "command": "kucode.setupCopilotCli",
+        "title": "KuCode: GitHub Copilot CLI (ACP) をインストール / ログイン"
+      },
       {
         "command": "kucode.openMenu",
         "title": "KuCode: チェック & 管理メニューを開く",
@@ -76,6 +89,11 @@
     ],
     "keybindings": [
       {
+        "command": "kucode.sendSelectionToAcp",
+        "key": "ctrl+shift+i",
+        "when": "editorTextFocus"
+      },
+      {
         "command": "kucode.editorCopy",
         "key": "ctrl+c",
         "when": "editorTextFocus"
@@ -122,6 +140,10 @@
           "command": "kucode.editorPaste",
           "when": "!editorReadonly",
           "group": "1_kucode_clipboard@3"
+        },
+        {
+          "command": "kucode.sendSelectionToAcp",
+          "group": "2_kucode_ai@1"
         },
         {
           "command": "kucode.runDiagnostics",
@@ -181,10 +203,46 @@
     "views": {
       "kucode": [
         {
+          "id": "kucode.acpChatView",
+          "type": "webview",
+          "name": "AI エージェント (ACP)"
+        },
+        {
           "id": "kucode.menuView",
           "name": "実機チェック & 空間表示"
         }
       ]
+    },
+    "configuration": {
+      "title": "KuCode",
+      "properties": {
+        "kucode.acp.defaultAgent": {
+          "type": "string",
+          "default": "copilot",
+          "enum": [
+            "copilot",
+            "gemini",
+            "claude",
+            "codex",
+            "opencode"
+          ],
+          "description": "既定で使用する ACP (Agent Client Protocol) 対応 AI エージェント"
+        },
+        "kucode.acp.permissionMode": {
+          "type": "string",
+          "default": "ask",
+          "enum": [
+            "ask",
+            "allowAll"
+          ],
+          "description": "ACP エージェントのツール実行権限モード（ask: 都度確認 / allowAll: 自動許可）"
+        },
+        "kucode.acp.agents": {
+          "type": "object",
+          "default": {},
+          "description": "カスタム ACP エージェント定義マップ（キー: ID, 値: { label, command, args, env, installCommand, loginCommand }）"
+        }
+      }
     }
   }
 }

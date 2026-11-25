@@ -46,11 +46,12 @@ class OpenVsCodeLauncherTest {
                     val script = if (attempt == 1) {
                         "echo 'seccomp blocked'; exit 159"
                     } else {
-                        "echo 'Web UI available at http://localhost:$port/?tkn=super-secret-token-123'; cat"
+                        "echo 'Web UI available at http://localhost:$port/?tkn=super-secret-token-123'; sleep 30"
                     }
                     listOf("sh", "-c", script) to emptyMap()
                 },
                 healthChecker = { port, token -> port == 29876 && token == "super-secret-token-123" },
+                orphanReclaimer = { _, _ -> false },
             )
 
             val result = launcher.launch(
@@ -69,11 +70,54 @@ class OpenVsCodeLauncherTest {
             assertTrue("Should have retried with disableSeccomp=true", ready.disableSeccomp)
             assertEquals(listOf(false, true), seenSeccompFlags.toList())
             assertEquals("super-secret-token-123", File(paths.vscodeDataDir, ".editor-token").readText())
+            assertTrue(".server-pid should exist while server is running", paths.serverPidFile.isFile)
             assertTrue(logs.any { it.contains("[redacted]") })
             assertTrue("Token must never appear in plain text logs", logs.none { it.contains("super-secret-token-123") })
         } finally {
             launchedProcess?.let(::terminateServer)
             scope.cancel()
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    fun reclaimOrphanServerIfNeeded_killsMatchingKuCodeProcessAndSkipsUnrelatedCmdline() {
+        val base = Files.createTempDirectory("xr-orphan-test").toFile()
+        try {
+            val paths = testPaths(base)
+            paths.vscodeDataDir.mkdirs()
+
+            // 1. Unrelated cmdline must NEVER be killed
+            paths.serverPidFile.writeText("12345\n")
+            val sentUnrelated = mutableListOf<Pair<Long, String>>()
+            val reclaimedUnrelated = reclaimOrphanServerIfNeeded(
+                paths = paths,
+                preferredPort = 18765,
+                isPortAvailable = { false },
+                readProcCmdline = { "/system/bin/surfaceflinger" },
+                sendSignal = { pid, sig -> sentUnrelated.add(pid to sig); true },
+            )
+            assertFalse(reclaimedUnrelated)
+            assertTrue(sentUnrelated.isEmpty())
+
+            // 2. Matching PRoot/openvscode cmdline gets SIGTERM and cleans up .server-pid
+            var alive = true
+            val sentMatching = mutableListOf<Pair<Long, String>>()
+            val reclaimed = reclaimOrphanServerIfNeeded(
+                paths = paths,
+                preferredPort = 18765,
+                isPortAvailable = { !alive },
+                readProcCmdline = { if (alive) "/data/app/libproot.so -r ${paths.rootfsDir.absolutePath} openvscode-server" else null },
+                sendSignal = { pid, sig ->
+                    sentMatching.add(pid to sig)
+                    if (sig == "TERM") alive = false
+                    true
+                },
+            )
+            assertTrue(reclaimed)
+            assertEquals(listOf(12345L to "TERM"), sentMatching)
+            assertFalse(paths.serverPidFile.exists())
+        } finally {
             deleteTreeNoFollow(base)
         }
     }

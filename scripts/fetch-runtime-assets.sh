@@ -51,6 +51,15 @@ else
 fi
 
 # 1. Debian minimal arm64 rootfs via Docker image export
+if [[ -f "$ROOTFS_OUT" && "${FORCE_FETCH:-0}" != "1" ]]; then
+  if gzip -t "$ROOTFS_OUT" 2>/dev/null; then
+    echo "[assets] Reusing verified cached $ROOTFS_OUT"
+  else
+    echo "[assets] Cached $ROOTFS_OUT failed gzip integrity test; re-exporting..."
+    rm -f "$ROOTFS_OUT" "$MANIFEST_OUT"
+  fi
+fi
+
 if [[ ! -f "$ROOTFS_OUT" || "${FORCE_FETCH:-0}" == "1" ]]; then
   echo "[assets] Exporting ${DEBIAN_IMAGE} (linux/arm64) rootfs..."
   docker pull --platform linux/arm64 "$DEBIAN_IMAGE"
@@ -59,12 +68,11 @@ if [[ ! -f "$ROOTFS_OUT" || "${FORCE_FETCH:-0}" == "1" ]]; then
   TMP_ROOTFS="${ROOTFS_OUT}.tmp"
   trap 'docker rm -f "$CID" >/dev/null 2>&1 || true; rm -f "$TMP_ROOTFS"' EXIT
   docker export "$CID" | gzip -6 > "$TMP_ROOTFS"
+  gzip -t "$TMP_ROOTFS"
   docker rm -f "$CID" >/dev/null 2>&1 || true
   mv "$TMP_ROOTFS" "$ROOTFS_OUT"
   trap - EXIT
   rm -f "$MANIFEST_OUT"
-else
-  echo "[assets] Reusing cached $ROOTFS_OUT"
 fi
 
 # 2. Generate Debian package & source manifest directly from var/lib/dpkg/status inside the rootfs archive

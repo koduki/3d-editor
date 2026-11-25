@@ -12,6 +12,7 @@ import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.URL
+import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
@@ -22,9 +23,9 @@ internal enum class ServerStartup { READY, EXITED, TIMED_OUT }
  * Pure-JVM launcher for the embedded openvscode-server process (under PRoot in production,
  * or injectable process starter in unit tests).
  *
- * Handles atomic `.editor-token` creation, log draining with token redaction,
- * startup health verification, automatic `PROOT_NO_SECCOMP=1` retry on early exit,
- * and reliable subprocess termination.
+ * Handles atomic `.editor-token` creation, orphan PRoot PID reclamation for fixed port 18765,
+ * log draining with token redaction, startup health verification, automatic `PROOT_NO_SECCOMP=1`
+ * retry on early exit, and reliable subprocess termination.
  */
 internal class OpenVsCodeLauncher(
     private val scope: CoroutineScope,
@@ -56,6 +57,7 @@ internal class OpenVsCodeLauncher(
         }.start()
     },
     private val healthChecker: (port: Int, token: String) -> Boolean = ::verifyEditorAccess,
+    private val orphanReclaimer: (PosixRuntimeConfig.Paths, (String) -> Unit) -> Boolean = ::reclaimOrphanServerIfNeeded,
 ) {
     sealed interface LaunchResult {
         data class Ready(
@@ -89,6 +91,8 @@ internal class OpenVsCodeLauncher(
         var disableSeccomp = initialDisableSeccomp
         var retryAllowed = allowSeccompRetry
 
+        runCatching { orphanReclaimer(paths, onLog) }
+
         while (true) {
             val port = portPicker()
             onStarting(port)
@@ -100,6 +104,13 @@ internal class OpenVsCodeLauncher(
             onLog("[runtime] Launching PRoot (disableSeccomp=$disableSeccomp) on 127.0.0.1:$port (admin=$adminPort)")
 
             val proc = processStarter(prootCmd, env)
+            runCatching { proc.outputStream.close() }
+            val procPid = extractProcessPid(proc)
+            if (procPid != null && procPid > 0L) {
+                runCatching {
+                    writeTextAtomically(paths.serverPidFile, "$procPid\n", Charsets.US_ASCII)
+                }
+            }
             onProcessCreated(proc)
 
             val announced = AtomicBoolean(false)
@@ -126,6 +137,9 @@ internal class OpenVsCodeLauncher(
                     Thread.currentThread().interrupt()
                     -1
                 }
+                if (procPid != null && procPid > 0L) {
+                    clearServerPidIfMatches(paths.serverPidFile, procPid)
+                }
                 onLog("[runtime] openvscode-server exited with code $code")
                 onUnexpectedExit(proc, code)
             }
@@ -136,6 +150,9 @@ internal class OpenVsCodeLauncher(
                 }
             } catch (cancel: CancellationException) {
                 terminateServer(proc)
+                if (procPid != null && procPid > 0L) {
+                    clearServerPidIfMatches(paths.serverPidFile, procPid)
+                }
                 throw cancel
             }
 
@@ -161,6 +178,9 @@ internal class OpenVsCodeLauncher(
                 }
 
                 ServerStartup.TIMED_OUT -> {
+                    if (procPid != null && procPid > 0L) {
+                        clearServerPidIfMatches(paths.serverPidFile, procPid)
+                    }
                     return LaunchResult.TimedOut(timeoutMs = startupTimeoutMs, disableSeccomp = disableSeccomp)
                 }
             }
@@ -191,8 +211,131 @@ internal fun terminateServer(process: Process) {
     process.destroy()
     if (!process.waitFor(2, TimeUnit.SECONDS)) {
         process.destroyForcibly()
-        process.waitFor()
+        process.waitFor(2, TimeUnit.SECONDS)
     }
+}
+
+internal fun extractProcessPid(process: Process): Long? {
+    runCatching {
+        val m = process.javaClass.getMethod("pid")
+        val value = m.invoke(process) as? Long
+        if (value != null && value > 0L) return value
+    }
+    runCatching {
+        val f = process.javaClass.getDeclaredField("pid")
+        f.isAccessible = true
+        val value = (f.get(process) as? Number)?.toLong()
+        if (value != null && value > 0L) return value
+    }
+    val match = Regex("\\bpid=(\\d+)\\b").find(process.toString())
+    return match?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0L }
+}
+
+internal fun clearServerPidIfMatches(pidFile: File, expectedPid: Long) {
+    runCatching {
+        if (!pidFile.isFile) return
+        val recorded = pidFile.readText(Charsets.US_ASCII).trim().toLongOrNull()
+        if (recorded == expectedPid) {
+            Files.deleteIfExists(pidFile.toPath())
+        }
+    }
+}
+
+internal fun isLocalPortAvailable(port: Int): Boolean {
+    return try {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        ServerSocket(port, 1, loopback).use { true }
+    } catch (_: IOException) {
+        false
+    }
+}
+
+/**
+ * Reclaims a lingering orphan PRoot/openvscode-server process recorded in `.server-pid`
+ * after a prior JVM crash so WebView keeps fixed port 18765 (and its IndexedDB origin).
+ */
+internal fun reclaimOrphanServerIfNeeded(
+    paths: PosixRuntimeConfig.Paths,
+    onLog: (String) -> Unit = {},
+    preferredPort: Int = PosixRuntimeConfig.PREFERRED_SERVER_PORT,
+    isPortAvailable: (Int) -> Boolean = ::isLocalPortAvailable,
+    readProcCmdline: (Long) -> String? = ::readLinuxProcCmdline,
+    sendSignal: (Long, String) -> Boolean = ::sendPosixSignal,
+): Boolean {
+    val pidFile = paths.serverPidFile
+    if (!pidFile.isFile) return false
+    val recordedPid = runCatching { pidFile.readText(Charsets.US_ASCII).trim().toLongOrNull() }.getOrNull()
+    if (recordedPid == null || recordedPid <= 1L) {
+        runCatching { Files.deleteIfExists(pidFile.toPath()) }
+        return false
+    }
+    if (isPortAvailable(preferredPort)) {
+        runCatching { Files.deleteIfExists(pidFile.toPath()) }
+        return false
+    }
+    val cmdline = readProcCmdline(recordedPid)
+    if (cmdline.isNullOrBlank()) {
+        runCatching { Files.deleteIfExists(pidFile.toPath()) }
+        return false
+    }
+    val isKuCodeServer = cmdline.contains("libproot.so") ||
+        cmdline.contains("openvscode-server") ||
+        cmdline.contains(paths.rootfsDir.absolutePath)
+    if (!isKuCodeServer) {
+        return false
+    }
+
+    onLog("[runtime] Reclaiming orphan server PID=$recordedPid holding port $preferredPort...")
+    sendSignal(recordedPid, "TERM")
+    var waitedMs = 0L
+    while (waitedMs < 1_500L) {
+        if (isPortAvailable(preferredPort) || readProcCmdline(recordedPid).isNullOrBlank()) {
+            runCatching { Files.deleteIfExists(pidFile.toPath()) }
+            onLog("[runtime] Reclaimed orphan server PID=$recordedPid cleanly.")
+            return true
+        }
+        try {
+            Thread.sleep(100)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            break
+        }
+        waitedMs += 100L
+    }
+    sendSignal(recordedPid, "KILL")
+    waitedMs = 0L
+    while (waitedMs < 1_000L) {
+        if (isPortAvailable(preferredPort) || readProcCmdline(recordedPid).isNullOrBlank()) {
+            break
+        }
+        try {
+            Thread.sleep(100)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            break
+        }
+        waitedMs += 100L
+    }
+    runCatching { Files.deleteIfExists(pidFile.toPath()) }
+    onLog("[runtime] Force-reclaimed orphan server PID=$recordedPid.")
+    return true
+}
+
+private fun readLinuxProcCmdline(pid: Long): String? = runCatching {
+    val f = File("/proc/$pid/cmdline")
+    if (!f.isFile) return null
+    val raw = f.readBytes()
+    if (raw.isEmpty()) return null
+    String(raw, Charsets.UTF_8).replace('\u0000', ' ').trim()
+}.getOrNull()
+
+private fun sendPosixSignal(pid: Long, signalName: String): Boolean {
+    val killCandidates = listOf("/system/bin/kill", "/bin/kill", "/usr/bin/kill")
+    val killBin = killCandidates.firstOrNull { File(it).canExecute() } ?: "kill"
+    return runCatching {
+        val p = ProcessBuilder(killBin, "-$signalName", pid.toString()).start()
+        p.waitFor(2, TimeUnit.SECONDS) && p.exitValue() == 0
+    }.getOrDefault(false)
 }
 
 /**

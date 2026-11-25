@@ -14,13 +14,19 @@ class VsCodeExtensionAssetTest {
         try {
             val extDir = VsCodeExtensionAsset.installInto(dir)
             assertTrue(extDir.resolve("icon.svg").isFile)
+            assertTrue(extDir.resolve("acp-client.js").isFile)
+            assertTrue(extDir.resolve("acp-webview.js").isFile)
             val pkgJson = JSONObject(extDir.resolve("package.json").readText())
             assertEquals("kucode-tools", pkgJson.getString("name"))
+            assertEquals("0.9.0", pkgJson.getString("version"))
             assertEquals("./extension.js", pkgJson.getString("main"))
 
             val contributes = pkgJson.getJSONObject("contributes")
             val commands = contributes.getJSONArray("commands")
             val commandIds = (0 until commands.length()).map { commands.getJSONObject(it).getString("command") }
+            assertTrue(commandIds.contains("kucode.openAcpChat"))
+            assertTrue(commandIds.contains("kucode.sendSelectionToAcp"))
+            assertTrue(commandIds.contains("kucode.setupCopilotCli"))
             assertTrue(commandIds.contains("kucode.openMenu"))
             assertTrue(commandIds.contains("kucode.runDiagnostics"))
             assertTrue(commandIds.contains("kucode.openLogs"))
@@ -40,6 +46,7 @@ class VsCodeExtensionAssetTest {
             assertTrue(js.contains("KUCODE_ADMIN_PORT"))
             assertTrue(js.contains("KUCODE_ADMIN_TOKEN"))
             assertTrue(js.contains("registerTreeDataProvider"))
+            assertTrue(js.contains("registerWebviewViewProvider"))
             assertTrue(js.contains("StatusBarAlignment.Left"))
             assertTrue(js.contains("OST_COLORS"))
             assertTrue(js.contains("VST_COLORS"))

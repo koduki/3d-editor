@@ -10,11 +10,15 @@ const { spawnSync } = require('node:child_process');
 
 const extDir = path.resolve(__dirname, '../android/app/src/main/assets/kucode-tools');
 const extensionPath = path.join(extDir, 'extension.js');
+const acpClientPath = path.join(extDir, 'acp-client.js');
+const acpWebviewPath = path.join(extDir, 'acp-webview.js');
 const packageJsonPath = path.join(extDir, 'package.json');
 const iconSvgPath = path.join(extDir, 'icon.svg');
 
 function loadExtensionWithMockVscode(mockVscode) {
   delete require.cache[extensionPath];
+  delete require.cache[acpWebviewPath];
+  delete require.cache[acpClientPath];
   const origLoad = Module._load;
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === 'vscode') return mockVscode;
@@ -32,6 +36,7 @@ function createMockVscode() {
   const executedCommands = [];
   const configUpdates = [];
   const openedDocs = [];
+  const openedDocOptions = [];
   const clipboardWrites = [];
   let clipboardWriteError = null;
   let clipboardReadAttempts = 0;
@@ -39,6 +44,8 @@ function createMockVscode() {
   const errorMessages = [];
   const statusMessages = [];
   const treeProviders = new Map();
+  const webviewViewProviders = new Map();
+  const createdTerminals = [];
   const statusItems = [];
   let quickPickResolver = null;
 
@@ -75,6 +82,30 @@ function createMockVscode() {
         treeProviders.set(viewId, provider);
         return { dispose() {} };
       },
+      registerWebviewViewProvider(viewId, provider, options) {
+        webviewViewProviders.set(viewId, { provider, options });
+        return { dispose() {} };
+      },
+      createTerminal(opts) {
+        const sent = [];
+        let shown = false;
+        const term = {
+          name: opts && opts.name,
+          sent,
+          get shown() {
+            return shown;
+          },
+          show() {
+            shown = true;
+          },
+          sendText(text, addNewLine) {
+            sent.push({ text, addNewLine });
+          },
+          dispose() {},
+        };
+        createdTerminals.push(term);
+        return term;
+      },
       createStatusBarItem(alignment, priority) {
         const item = { alignment, priority, shown: false, show() { this.shown = true; }, dispose() {} };
         statusItems.push(item);
@@ -87,8 +118,9 @@ function createMockVscode() {
       async withProgress(_opts, task) {
         return await task();
       },
-      async showTextDocument(doc) {
+      async showTextDocument(doc, options) {
         openedDocs.push(doc);
+        openedDocOptions.push(options || {});
       },
       async showQuickPick(items) {
         return quickPickResolver ? quickPickResolver(items) : undefined;
@@ -101,11 +133,16 @@ function createMockVscode() {
       },
     },
     workspace: {
+      workspaceFolders: [],
+      textDocuments: [],
       async openTextDocument(opts) {
         return opts;
       },
       getConfiguration() {
         return {
+          get() {
+            return undefined;
+          },
           async update(key, value, target) {
             configUpdates.push({ key, value, target });
           },
@@ -132,6 +169,7 @@ function createMockVscode() {
     executedCommands,
     configUpdates,
     openedDocs,
+    openedDocOptions,
     clipboardWrites,
     get clipboardReadAttempts() {
       return clipboardReadAttempts;
@@ -143,6 +181,8 @@ function createMockVscode() {
     errorMessages,
     statusMessages,
     treeProviders,
+    webviewViewProviders,
+    createdTerminals,
     statusItems,
     setQuickPick(fn) {
       quickPickResolver = fn;
@@ -182,17 +222,23 @@ function createMockEditor({ lines, selections, eol = 1 }) {
   return { editor, edits };
 }
 
-test('extension.js passes node --check and manifest/icon are valid', () => {
-  const syntax = spawnSync(process.execPath, ['--check', extensionPath], { encoding: 'utf8' });
-  assert.equal(syntax.status, 0, syntax.stderr);
+test('extension.js, acp-client.js, acp-webview.js pass node --check and manifest/icon are valid', () => {
+  for (const scriptPath of [extensionPath, acpClientPath, acpWebviewPath]) {
+    const syntax = spawnSync(process.execPath, ['--check', scriptPath], { encoding: 'utf8' });
+    assert.equal(syntax.status, 0, `${path.basename(scriptPath)}: ${syntax.stderr}`);
+  }
 
   const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   assert.equal(pkg.name, 'kucode-tools');
+  assert.equal(pkg.version, '0.9.0');
   assert.equal(pkg.main, './extension.js');
-  assert.ok(Array.isArray(pkg.contributes.commands) && pkg.contributes.commands.length >= 13);
+  assert.ok(Array.isArray(pkg.contributes.commands) && pkg.contributes.commands.length >= 16);
 
   const commandIds = new Set(pkg.contributes.commands.map((c) => c.command));
   for (const required of [
+    'kucode.openAcpChat',
+    'kucode.sendSelectionToAcp',
+    'kucode.setupCopilotCli',
     'kucode.editorCopy',
     'kucode.editorCut',
     'kucode.editorPaste',
@@ -202,7 +248,14 @@ test('extension.js passes node --check and manifest/icon are valid', () => {
     assert.ok(commandIds.has(required), `Missing command ${required} in package.json`);
   }
 
+  const views = pkg.contributes.views.kucode || [];
+  assert.ok(views.some((v) => v.id === 'kucode.acpChatView' && v.type === 'webview'));
+  assert.ok(pkg.contributes.configuration.properties['kucode.acp.defaultAgent']);
+  assert.ok(pkg.contributes.configuration.properties['kucode.acp.permissionMode']);
+  assert.ok(pkg.contributes.configuration.properties['kucode.acp.agents']);
+
   const keybindings = pkg.contributes.keybindings || [];
+  assert.ok(keybindings.some((k) => k.command === 'kucode.sendSelectionToAcp' && k.key === 'ctrl+shift+i' && k.when === 'editorTextFocus'));
   assert.ok(keybindings.some((k) => k.command === 'kucode.editorCopy' && k.key === 'ctrl+c' && k.when === 'editorTextFocus'));
   assert.ok(keybindings.some((k) => k.command === 'kucode.editorCut' && k.key === 'ctrl+x' && k.when === 'editorTextFocus && !editorReadonly'));
   assert.ok(keybindings.some((k) => k.command === 'kucode.editorPaste' && k.key === 'ctrl+v' && k.when === 'editorTextFocus && !editorReadonly'));
@@ -215,6 +268,7 @@ test('extension.js passes node --check and manifest/icon are valid', () => {
   assert.ok(editorCtx.includes('kucode.editorCut'));
   assert.ok(editorCtx.includes('kucode.editorCopy'));
   assert.ok(editorCtx.includes('kucode.editorPaste'));
+  assert.ok(editorCtx.includes('kucode.sendSelectionToAcp'));
 
   const terminalCtx = pkg.contributes.menus['terminal/context'].map((m) => m.command);
   assert.ok(terminalCtx.includes('kucode.terminalCopy'));
@@ -224,7 +278,7 @@ test('extension.js passes node --check and manifest/icon are valid', () => {
   assert.match(svg, /<svg\b/);
 });
 
-test('activate registers all manifest commands, sidebar tree provider, and status bar item', () => {
+test('activate registers all manifest commands, ACP webview provider, sidebar tree provider, and status bar item', () => {
   const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   const mock = createMockVscode();
   const ext = loadExtensionWithMockVscode(mock.vscode);
@@ -235,12 +289,17 @@ test('activate registers all manifest commands, sidebar tree provider, and statu
   for (const cmd of pkg.contributes.commands) {
     assert.ok(mock.commands.has(cmd.command), `Missing command handler for ${cmd.command}`);
   }
+  assert.ok(mock.webviewViewProviders.has('kucode.acpChatView'));
+  assert.equal(mock.webviewViewProviders.get('kucode.acpChatView').options.webviewOptions.retainContextWhenHidden, true);
+
   assert.ok(mock.treeProviders.has('kucode.menuView'));
   const provider = mock.treeProviders.get('kucode.menuView');
   const entries = provider.getChildren();
-  assert.ok(entries.length >= 12);
+  assert.ok(entries.length >= 14);
   const sidebarCommands = new Set(entries.map((e) => e.command));
   for (const required of [
+    'kucode.openAcpChat',
+    'kucode.setupCopilotCli',
     'kucode.editorCopy',
     'kucode.editorCut',
     'kucode.editorPaste',
@@ -305,12 +364,19 @@ test('commands invoke authenticated host endpoints and apply spatial scale & opt
 
   await mock.commands.get('kucode.runDiagnostics')();
   assert.deepEqual(mock.openedDocs[0], { content: '# Diagnostics OK', language: 'markdown' });
+  assert.equal(mock.openedDocOptions[0].preview, true);
   assert.equal(mock.clipboardWrites[0], '# Diagnostics OK');
   assert.ok(received.some((r) => r.method === 'GET' && r.url === '/diagnostics'));
   assert.ok(received.some((r) => r.method === 'POST' && r.url === '/copy' && r.body === '# Diagnostics OK'));
 
   await mock.commands.get('kucode.openLogs')();
   assert.deepEqual(mock.openedDocs[1], { content: 'boot log', language: 'plaintext' });
+  assert.equal(mock.openedDocOptions[1].preview, false);
+
+  await mock.commands.get('kucode.setupCopilotCli')();
+  assert.equal(mock.createdTerminals.length, 1);
+  assert.equal(mock.createdTerminals[0].sent[0].text, 'kucode-install-copilot && copilot login');
+  assert.equal(mock.createdTerminals[0].sent[0].addNewLine, true);
 
   await mock.commands.get('kucode.openManager')();
   await mock.commands.get('kucode.requestStorage')();

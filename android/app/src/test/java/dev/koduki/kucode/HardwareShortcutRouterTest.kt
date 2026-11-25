@@ -20,5 +20,8 @@ class HardwareShortcutRouterTest {
         assertFalse(router.isDiagnosticsToggleKey(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_D, ctrl = true, meta = false, alt = false))
         assertFalse(router.isDiagnosticsToggleKey(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_D, ctrl = false, meta = false, alt = false))
         assertFalse(router.isDiagnosticsToggleKey(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_D, ctrl = true, meta = false, alt = true))
+        // Shift modifier and key-repeat events must NOT trigger view toggling
+        assertFalse(router.isDiagnosticsToggleKey(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_D, ctrl = true, meta = false, alt = true, shift = true))
+        assertFalse(router.isDiagnosticsToggleKey(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_D, ctrl = true, meta = false, alt = true, repeatCount = 1))
     }
 }

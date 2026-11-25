@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   OPENVSCODE_VERSION: "1.109.5"
   OPENVSCODE_X64_SHA256: "b433bf4f0227321a7014d8460d10a8f958adc0f45aa79bd889e84e65e8f88363"
@@ -58,7 +62,7 @@ jobs:
       - name: Fetch Debian Minimal Rootfs & OpenVSCode Server
         run: ./scripts/fetch-runtime-assets.sh
 
-      - name: Exercise extension & native diagnostics with matching OpenVSCode on the Linux runner
+      - name: Exercise extension, ACP & OpenVSCode server flags on the Linux runner
         run: |
           tag="openvscode-server-v${OPENVSCODE_VERSION}"
           archive="$RUNNER_TEMP/${tag}-linux-x64.tar.gz"
@@ -70,20 +74,66 @@ jobs:
           rm -f "$archive"
           "$server/node" --check android/app/src/main/assets/runtime-probes.cjs
           "$server/node" --check android/app/src/main/assets/kucode-tools/extension.js
-          KUCODE_NATIVE_MODULES="$server/node_modules" "$server/node" --test tests/runtime-probes.test.cjs tests/kucode-extension.test.cjs
+          "$server/node" --check android/app/src/main/assets/kucode-tools/acp-client.js
+          "$server/node" --check android/app/src/main/assets/kucode-tools/acp-webview.js
+          KUCODE_NATIVE_MODULES="$server/node_modules" "$server/node" --test \
+            tests/runtime-probes.test.cjs \
+            tests/kucode-extension.test.cjs \
+            tests/kucode-acp.test.cjs
+
+          # Live smoke test of exact OpenVSCode Server CLI flags & user/Machine + user/logs layout
+          smoke_dir="$RUNNER_TEMP/openvscode-smoke"
+          rm -rf "$smoke_dir"
+          mkdir -p "$smoke_dir/user/Machine" "$smoke_dir/extensions" "$smoke_dir/workspace"
+          printf '{"chat.disableAIFeatures":true}\n' > "$smoke_dir/user/Machine/settings.json"
+          printf 'kucode-ci-smoke-token\n' > "$smoke_dir/token"
+          "$server/bin/openvscode-server" \
+            --host 127.0.0.1 \
+            --port 19876 \
+            --connection-token-file "$smoke_dir/token" \
+            --accept-server-license-terms \
+            --telemetry-level off \
+            --disable-workspace-trust \
+            --without-browser-env-var \
+            --default-folder "$smoke_dir/workspace" \
+            --server-data-dir "$smoke_dir" \
+            --user-data-dir "$smoke_dir/user" \
+            --extensions-dir "$smoke_dir/extensions" \
+            > "$smoke_dir/stdout.log" 2>&1 &
+          smoke_pid=$!
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:19876/?tkn=kucode-ci-smoke-token" >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          kill "$smoke_pid" 2>/dev/null || true
+          wait "$smoke_pid" 2>/dev/null || true
+          if [ "$ready" -ne 1 ]; then
+            cat "$smoke_dir/stdout.log"
+            echo "ERROR: OpenVSCode Server smoke test failed to respond on port 19876" >&2
+            exit 1
+          fi
+          find "$smoke_dir/user/logs" -name 'remoteagent.log' | grep -q 'remoteagent.log'
+          rm -rf "$smoke_dir"
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Run Small & Medium Unit Tests and Build Debug APK
+      - name: Run Small, Medium & Release Unit Tests and Build Debug + Unsigned Release APKs
         working-directory: android
-        run: ./gradlew :app:testDebugUnitTest :app:testDebugMediumUnitTest :app:assembleDebug --stacktrace
+        run: ./gradlew :app:testDebugUnitTest :app:testDebugMediumUnitTest :app:testReleaseUnitTest :app:assembleDebug :app:assembleRelease --stacktrace
 
-      - name: Verify Embedded Runtime, Extension & License Notices Inside Debug APK
+      - name: Verify Embedded Runtime, 16KB ELF Alignment, Extension & License Notices Inside APKs
         run: |
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
-          ls -lh "$APK"
+          RELEASE_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          ls -lh "$APK" "$RELEASE_APK"
           unzip -p "$APK" assets/runtime-probes.cjs | cmp - android/app/src/main/assets/runtime-probes.cjs
           unzip -p "$APK" assets/kucode-tools/extension.js | cmp - android/app/src/main/assets/kucode-tools/extension.js
+          unzip -p "$APK" assets/kucode-tools/acp-client.js | cmp - android/app/src/main/assets/kucode-tools/acp-client.js
+          unzip -p "$APK" assets/kucode-tools/acp-webview.js | cmp - android/app/src/main/assets/kucode-tools/acp-webview.js
           unzip -p "$APK" assets/kucode-tools/package.json | cmp - android/app/src/main/assets/kucode-tools/package.json
           unzip -p "$APK" assets/kucode-tools/icon.svg | cmp - android/app/src/main/assets/kucode-tools/icon.svg
           unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tgz|openvscode-server-linux-arm64\.tgz|boot\.html|assets/kucode-tools/|assets/licenses/"
@@ -92,15 +142,46 @@ jobs:
           unzip -l "$APK" | grep -q "assets/runtime/debian-arm64-rootfs.tgz"
           unzip -l "$APK" | grep -q "assets/runtime/openvscode-server-linux-arm64.tgz"
           unzip -l "$APK" | grep -q "assets/kucode-tools/extension.js"
+          unzip -l "$APK" | grep -q "assets/kucode-tools/acp-client.js"
+          unzip -l "$APK" | grep -q "assets/kucode-tools/acp-webview.js"
           unzip -l "$APK" | grep -q "assets/kucode-tools/package.json"
           unzip -l "$APK" | grep -q "assets/kucode-tools/icon.svg"
           unzip -l "$APK" | grep -q "assets/licenses/LICENSE"
           unzip -l "$APK" | grep -q "assets/licenses/THIRD_PARTY_NOTICES.md"
-          unzip -l "$APK" | grep -q "assets/licenses/GPL-3.0.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/GPL-2.0.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/LGPL-3.0.txt"
+          unzip -l "$APK" | grep -q "assets/licenses/MIT-OpenVSCode.txt"
           unzip -l "$APK" | grep -q "assets/licenses/Apache-2.0.txt"
+          unzip -l "$APK" | grep -q "assets/licenses/GPL-2.0.txt"
+          unzip -l "$APK" | grep -q "assets/licenses/GPL-3.0.txt"
+          unzip -l "$APK" | grep -q "assets/licenses/LGPL-2.1.txt"
+          unzip -l "$APK" | grep -q "assets/licenses/LGPL-3.0.txt"
           unzip -l "$APK" | grep -q "assets/licenses/debian-manifest.txt"
+
+          # Verify 16KB ELF LOAD segment alignment for all bundled native libraries
+          READELF="$(find "$ANDROID_HOME/ndk" -name llvm-readelf -type f | sort -V | tail -n 1)"
+          ELF_TMP="$RUNNER_TEMP/apk-elf-check"
+          rm -rf "$ELF_TMP" && mkdir -p "$ELF_TMP"
+          unzip -j -o "$APK" "lib/arm64-v8a/*.so" -d "$ELF_TMP"
+          for elf in "$ELF_TMP"/*.so; do
+            "$READELF" -lW "$elf" | python3 -c '
+          import sys
+          bin_name = sys.argv[1]
+          loads = 0
+          for line in sys.stdin:
+              parts = line.split()
+              if parts and parts[0] == "LOAD":
+                  loads += 1
+                  offset = int(parts[1], 16)
+                  vaddr = int(parts[2], 16)
+                  align = int(parts[-1], 16)
+                  if align < 0x4000 or (offset - vaddr) % 0x4000 != 0:
+                      raise SystemExit(f"FAIL: {bin_name} LOAD offset={hex(offset)} vaddr={hex(vaddr)} align={hex(align)}")
+          if loads == 0:
+              raise SystemExit(f"FAIL: {bin_name} has no LOAD segments")
+          print(f"OK 16KB LOAD alignment ({loads} segments): {bin_name}")
+          ' "$(basename "$elf")"
+          done
+          rm -rf "$ELF_TMP"
+
           mkdir -p dist-apk
           cp "$APK" "dist-apk/kucode-debug.apk"
           cp "android/app/src/main/assets/runtime/debian-manifest.txt" "dist-apk/debian-manifest.txt"

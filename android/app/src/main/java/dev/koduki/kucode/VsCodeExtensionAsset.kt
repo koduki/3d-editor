@@ -16,6 +16,8 @@ object VsCodeExtensionAsset {
         "icon.svg",
         "package.json",
         "extension.js",
+        "acp-client.js",
+        "acp-webview.js",
     )
 
     fun installInto(

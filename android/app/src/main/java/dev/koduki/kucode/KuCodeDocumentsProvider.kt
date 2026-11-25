@@ -6,6 +6,8 @@ import android.database.MatrixCursor
 import android.graphics.Point
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
@@ -35,6 +37,9 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
         val readOnly: Boolean,
     )
 
+    @Volatile
+    private var lastDiagnosticsRefreshElapsedMs: Long = 0L
+
     private val defaultRootProjection = arrayOf(
         Root.COLUMN_ROOT_ID,
         Root.COLUMN_MIME_TYPES,
@@ -54,6 +59,8 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
         Document.COLUMN_FLAGS,
         Document.COLUMN_SIZE,
     )
+
+    private fun documentsAuthority(): String? = context?.packageName?.let { "$it.documents" }
 
     private fun workspaceBaseDir(): File {
         val ctx = context ?: throw IllegalStateException("Context not available")
@@ -89,6 +96,26 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
                 rootId = WorkspaceDocumentStore.ROOT_ID,
                 rootDocId = WorkspaceDocumentStore.ROOT_DOC_ID,
                 readOnly = false,
+            )
+        }
+    }
+
+    private fun refreshLatestDiagnosticsReportDebounced() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDiagnosticsRefreshElapsedMs < DIAGNOSTICS_REFRESH_DEBOUNCE_MS) return
+        lastDiagnosticsRefreshElapsedMs = now
+        context?.let { ctx ->
+            runCatching { SessionTelemetryManager.getInstance(ctx).renderSessionBundle("latest", "ai") }
+        }
+    }
+
+    private fun notifyParentChildrenChanged(parentDocId: String) {
+        val ctx = context ?: return
+        val authority = documentsAuthority() ?: return
+        runCatching {
+            ctx.contentResolver.notifyChange(
+                DocumentsContract.buildChildDocumentsUri(authority, parentDocId),
+                null,
             )
         }
     }
@@ -150,11 +177,9 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
 
     override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
         val root = resolveRootForDocId(documentId)
-        // Refresh latest-ai-report.md on demand when browsing the diagnostics root
+        // Refresh latest-ai-report.md on demand (debounced) when browsing the diagnostics root
         if (root.readOnly && (documentId == root.rootDocId || documentId == "${root.rootDocId}/latest-ai-report.md")) {
-            context?.let { ctx ->
-                runCatching { SessionTelemetryManager.getInstance(ctx).renderSessionBundle("latest", "ai") }
-            }
+            refreshLatestDiagnosticsReportDebounced()
         }
         val target = WorkspaceDocumentStore.fileForDocId(root.baseDir, documentId, root.rootDocId, root.rootId)
         val result = MatrixCursor(projection ?: defaultDocumentProjection)
@@ -169,14 +194,20 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
     ): Cursor {
         val root = resolveRootForDocId(parentDocumentId)
         if (root.readOnly && parentDocumentId == root.rootDocId) {
-            context?.let { ctx ->
-                runCatching { SessionTelemetryManager.getInstance(ctx).renderSessionBundle("latest", "ai") }
-            }
+            refreshLatestDiagnosticsReportDebounced()
         }
         val parent = WorkspaceDocumentStore.fileForDocId(root.baseDir, parentDocumentId, root.rootDocId, root.rootId)
         val result = MatrixCursor(projection ?: defaultDocumentProjection)
         for (child in WorkspaceDocumentStore.listChildren(root.baseDir, parent)) {
             includeFile(result, root, child)
+        }
+        val ctx = context
+        val authority = documentsAuthority()
+        if (ctx != null && authority != null) {
+            result.setNotificationUri(
+                ctx.contentResolver,
+                DocumentsContract.buildChildDocumentsUri(authority, parentDocumentId),
+            )
         }
         return result
     }
@@ -191,11 +222,12 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
             throw FileNotFoundException("Diagnostics logs root is read-only")
         }
         if (root.readOnly && documentId == "${root.rootDocId}/latest-ai-report.md") {
-            context?.let { ctx ->
-                runCatching { SessionTelemetryManager.getInstance(ctx).renderSessionBundle("latest", "ai") }
-            }
+            refreshLatestDiagnosticsReportDebounced()
         }
         val file = WorkspaceDocumentStore.fileForDocId(root.baseDir, documentId, root.rootDocId, root.rootId)
+        if (Files.isDirectory(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+            throw FileNotFoundException("Cannot open directory as file: $documentId")
+        }
         val parsedMode = if (root.readOnly) ParcelFileDescriptor.MODE_READ_ONLY else ParcelFileDescriptor.parseMode(mode)
         return ParcelFileDescriptor.open(file, parsedMode)
     }
@@ -207,8 +239,16 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
     ): AssetFileDescriptor {
         val root = resolveRootForDocId(documentId)
         val file = WorkspaceDocumentStore.fileForDocId(root.baseDir, documentId, root.rootDocId, root.rootId)
+        if (Files.isDirectory(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+            throw FileNotFoundException("Cannot open thumbnail for directory: $documentId")
+        }
         val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-        return AssetFileDescriptor(pfd, 0, file.length())
+        return try {
+            AssetFileDescriptor(pfd, 0, AssetFileDescriptor.UNKNOWN_LENGTH)
+        } catch (e: Throwable) {
+            runCatching { pfd.close() }
+            throw e
+        }
     }
 
     override fun createDocument(
@@ -225,22 +265,33 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
             isDirectory = Document.MIME_TYPE_DIR == mimeType,
             displayName = displayName,
         )
-        return WorkspaceDocumentStore.docIdForFile(root.baseDir, target, root.rootDocId)
+        val newDocId = WorkspaceDocumentStore.docIdForFile(root.baseDir, target, root.rootDocId)
+        notifyParentChildrenChanged(WorkspaceDocumentStore.docIdForFile(root.baseDir, parent, root.rootDocId))
+        return newDocId
     }
 
     override fun renameDocument(documentId: String, displayName: String): String {
         val root = resolveRootForDocId(documentId)
         if (root.readOnly) throw FileNotFoundException("Cannot rename files inside read-only diagnostics root")
         val source = WorkspaceDocumentStore.fileForDocId(root.baseDir, documentId, root.rootDocId, root.rootId)
+        val parentDocId = source.parentFile?.let {
+            runCatching { WorkspaceDocumentStore.docIdForFile(root.baseDir, it, root.rootDocId) }.getOrNull()
+        }
         val target = WorkspaceDocumentStore.rename(root.baseDir, source, displayName)
-        return WorkspaceDocumentStore.docIdForFile(root.baseDir, target, root.rootDocId)
+        val newDocId = WorkspaceDocumentStore.docIdForFile(root.baseDir, target, root.rootDocId)
+        if (parentDocId != null) notifyParentChildrenChanged(parentDocId)
+        return newDocId
     }
 
     override fun deleteDocument(documentId: String) {
         val root = resolveRootForDocId(documentId)
         if (root.readOnly) throw FileNotFoundException("Cannot delete files inside read-only diagnostics root")
         val target = WorkspaceDocumentStore.fileForDocId(root.baseDir, documentId, root.rootDocId, root.rootId)
+        val parentDocId = target.parentFile?.let {
+            runCatching { WorkspaceDocumentStore.docIdForFile(root.baseDir, it, root.rootDocId) }.getOrNull()
+        }
         WorkspaceDocumentStore.delete(root.baseDir, target)
+        if (parentDocId != null) notifyParentChildrenChanged(parentDocId)
     }
 
     override fun getDocumentType(documentId: String): String {
@@ -248,8 +299,18 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
         return mimeTypeForFile(WorkspaceDocumentStore.fileForDocId(root.baseDir, documentId, root.rootDocId, root.rootId))
     }
 
-    override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean =
-        WorkspaceDocumentStore.isChildDocument(parentDocumentId, documentId)
+    override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean {
+        val parentRoot = resolveRootForDocId(parentDocumentId)
+        val childRoot = resolveRootForDocId(documentId)
+        if (parentRoot.rootId != childRoot.rootId) return false
+        return WorkspaceDocumentStore.isChildDocument(
+            baseDir = parentRoot.baseDir,
+            parentDocumentId = parentDocumentId,
+            documentId = documentId,
+            rootDocId = parentRoot.rootDocId,
+            rootId = parentRoot.rootId,
+        )
+    }
 
     override fun querySearchDocuments(
         rootId: String,
@@ -280,7 +341,7 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
             }
         }
         val mimeType = mimeTypeForFile(file)
-        if (mimeType.startsWith("image/")) {
+        if (mimeType.startsWith("image/") && mimeType != "image/svg+xml") {
             flags = flags or Document.FLAG_SUPPORTS_THUMBNAIL
         }
 
@@ -293,6 +354,10 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
             add(Document.COLUMN_FLAGS, flags)
             add(Document.COLUMN_ICON, R.mipmap.ic_launcher)
         }
+    }
+
+    companion object {
+        private const val DIAGNOSTICS_REFRESH_DEBOUNCE_MS = 1_500L
     }
 
     private fun mimeTypeForFile(file: File): String {

@@ -119,15 +119,40 @@ class LocalDiagnosticsServer(
         }
     }
 
+    private val unauthorizedAuditLock = Any()
+    private var unauthorizedAuditWindowStartMs: Long = 0L
+    private var unauthorizedAuditCountInWindow: Int = 0
+
+    private fun shouldEmitUnauthorizedAudit(): Boolean = synchronized(unauthorizedAuditLock) {
+        val now = System.currentTimeMillis()
+        if (now - unauthorizedAuditWindowStartMs >= UNAUTHORIZED_AUDIT_WINDOW_MS) {
+            unauthorizedAuditWindowStartMs = now
+            unauthorizedAuditCountInWindow = 1
+            true
+        } else if (unauthorizedAuditCountInWindow < UNAUTHORIZED_AUDIT_MAX_PER_WINDOW) {
+            unauthorizedAuditCountInWindow++
+            true
+        } else {
+            false
+        }
+    }
+
     private fun handleClient(socket: Socket) {
         val t0 = System.currentTimeMillis()
+        val authDeadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(preAuthTimeoutMs.toLong())
         socket.use { s ->
-            s.soTimeout = preAuthTimeoutMs
+            fun applyPreAuthRemainingTimeout() {
+                val remainingMs = TimeUnit.NANOSECONDS.toMillis(authDeadlineNs - System.nanoTime())
+                if (remainingMs <= 0L) throw SocketTimeoutException("Pre-auth deadline exceeded")
+                s.soTimeout = remainingMs.coerceAtMost(preAuthTimeoutMs.toLong()).toInt().coerceAtLeast(1)
+            }
+
             val input = BufferedInputStream(s.getInputStream())
             val output = s.getOutputStream()
 
             val requestLine = try {
-                readBoundedLine(input, MAX_LINE_BYTES) ?: return
+                applyPreAuthRemainingTimeout()
+                readBoundedLine(input, MAX_LINE_BYTES) { applyPreAuthRemainingTimeout() }?.first ?: return
             } catch (limit: HttpLimitExceededException) {
                 safeWriteResponse(output, 414, limit.message ?: "URI Too Long")
                 return
@@ -153,10 +178,12 @@ class LocalDiagnosticsServer(
             var headerCount = 0
             try {
                 while (true) {
-                    val line = readBoundedLine(input, MAX_LINE_BYTES) ?: break
+                    applyPreAuthRemainingTimeout()
+                    val readResult = readBoundedLine(input, MAX_LINE_BYTES) { applyPreAuthRemainingTimeout() } ?: break
+                    val (line, lineBytes) = readResult
                     if (line.isEmpty()) break
                     headerCount++
-                    totalHeaderBytes += line.length + 2
+                    totalHeaderBytes += lineBytes + 2
                     if (headerCount > MAX_HEADERS || totalHeaderBytes > MAX_TOTAL_HEADER_BYTES) {
                         safeWriteResponse(output, 431, "Request Header Fields Too Large")
                         return
@@ -168,6 +195,10 @@ class LocalDiagnosticsServer(
                     }
                     val key = line.substring(0, colon).trim().lowercase()
                     val value = line.substring(colon + 1).trim()
+                    if (key == "content-length" && headers.containsKey(key)) {
+                        safeWriteResponse(output, 400, "Duplicate Content-Length")
+                        return
+                    }
                     headers[key] = value
                 }
             } catch (_: HttpLimitExceededException) {
@@ -180,31 +211,55 @@ class LocalDiagnosticsServer(
                 return
             }
 
+            // Reject browser-originated requests (CSRF / DNS-rebinding defense-in-depth)
+            if (headers["origin"] != null || headers["sec-fetch-site"] != null) {
+                safeWriteResponse(output, 403, "Forbidden")
+                if (shouldEmitUnauthorizedAudit()) {
+                    runCatching { onAuditRequest(method, path, 403, System.currentTimeMillis() - t0, "browser_origin_rejected") }
+                }
+                return
+            }
+            val hostHeader = headers["host"]
+            if (hostHeader != null && !isAllowedLoopbackHost(hostHeader)) {
+                safeWriteResponse(output, 403, "Forbidden")
+                if (shouldEmitUnauthorizedAudit()) {
+                    runCatching { onAuditRequest(method, path, 403, System.currentTimeMillis() - t0, "invalid_host") }
+                }
+                return
+            }
+
             if (!isTokenAuthorized(headers["x-kucode-token"])) {
                 safeWriteResponse(output, 403, "Forbidden")
-                runCatching { onAuditRequest(method, path, 403, System.currentTimeMillis() - t0, "unauthorized") }
+                if (shouldEmitUnauthorizedAudit()) {
+                    runCatching { onAuditRequest(method, path, 403, System.currentTimeMillis() - t0, "unauthorized") }
+                }
                 return
             }
 
             s.soTimeout = postAuthTimeoutMs
 
+            if (headers["transfer-encoding"] != null) {
+                safeWriteResponse(output, 501, "Transfer-Encoding Not Supported")
+                return
+            }
+
             val contentLengthHeader = headers["content-length"]
             val contentLength = if (contentLengthHeader == null) {
                 0
             } else {
-                val parsed = contentLengthHeader.toIntOrNull()
-                if (parsed == null || parsed < 0) {
+                val parsed = contentLengthHeader.toLongOrNull()
+                if (parsed == null || parsed < 0L) {
                     safeWriteResponse(output, 400, "Invalid Content-Length")
                     return
                 }
-                if (parsed > MAX_BODY_BYTES) {
+                if (parsed > MAX_BODY_BYTES.toLong()) {
                     safeWriteResponse(output, 413, "Payload Too Large")
                     return
                 }
-                parsed
+                parsed.toInt()
             }
 
-            val body = if (contentLength > 0) {
+            val bodyBytes = if (contentLength > 0) {
                 try {
                     val buf = ByteArray(contentLength)
                     var offset = 0
@@ -213,7 +268,11 @@ class LocalDiagnosticsServer(
                         if (read <= 0) break
                         offset += read
                     }
-                    String(buf, 0, offset, Charsets.UTF_8)
+                    if (offset < contentLength) {
+                        safeWriteResponse(output, 400, "Incomplete Request Body")
+                        return
+                    }
+                    buf
                 } catch (_: SocketTimeoutException) {
                     safeWriteResponse(output, 408, "Request Timeout")
                     return
@@ -221,8 +280,9 @@ class LocalDiagnosticsServer(
                     return
                 }
             } else {
-                ""
+                ByteArray(0)
             }
+            val body = String(bodyBytes, Charsets.UTF_8)
 
             fun audit(statusCode: Int, detail: String = "") {
                 if (path != "/event") {
@@ -230,35 +290,39 @@ class LocalDiagnosticsServer(
                 }
             }
 
+            fun respond(statusCode: Int, text: String, contentType: String = "text/plain; charset=utf-8"): Int {
+                val bytes = text.toByteArray(Charsets.UTF_8)
+                safeWriteResponseBytes(output, statusCode, bytes, contentType)
+                return bytes.size
+            }
+
             try {
                 when {
                     method == "GET" && path == "/diagnostics" -> {
                         val report = runBlocking { onRunDiagnostics() }
-                        writeResponse(output, 200, report)
-                        audit(200, "bytes=${report.length}")
+                        val byteLen = respond(200, report)
+                        audit(200, "bytes=$byteLen")
                     }
 
                     method == "GET" && path == "/logs" -> {
                         val logs = onGetLogs()
-                        writeResponse(output, 200, logs)
-                        audit(200, "bytes=${logs.length}")
+                        val byteLen = respond(200, logs)
+                        audit(200, "bytes=$byteLen")
                     }
 
                     method == "GET" && path == "/sessions" -> {
                         val sessionsJson = onListSessions()
-                        writeResponse(output, 200, sessionsJson, contentType = "application/json; charset=utf-8")
+                        respond(200, sessionsJson, contentType = "application/json; charset=utf-8")
                         audit(200)
                     }
 
                     method == "GET" && path.startsWith("/sessions/") -> {
                         val rawSelector = path.removePrefix("/sessions/")
-                        val selector = runCatching {
-                            java.net.URLDecoder.decode(rawSelector, Charsets.UTF_8.name())
-                        }.getOrDefault(rawSelector)
+                        val selector = decodeUrlPathSegment(rawSelector)
                         val format = parseQueryParam(rawQuery, "format") ?: "ai"
                         val bundle = onGetSessionBundle(selector, format)
                         if (bundle == null) {
-                            writeResponse(output, 404, "Session not found")
+                            respond(404, "Session not found")
                             audit(404, "selector=$selector")
                         } else {
                             val ct = if (format.equals("json", ignoreCase = true)) {
@@ -266,7 +330,7 @@ class LocalDiagnosticsServer(
                             } else {
                                 "text/plain; charset=utf-8"
                             }
-                            writeResponse(output, 200, bundle, contentType = ct)
+                            respond(200, bundle, contentType = ct)
                             audit(200, "selector=$selector,format=$format")
                         }
                     }
@@ -283,12 +347,12 @@ class LocalDiagnosticsServer(
                             editorServerPort = editorPort,
                         )
                         if (!safe) {
-                            writeResponse(output, 400, "Invalid or disallowed external URL")
+                            respond(400, "Invalid or disallowed external URL")
                             audit(400, "rejected_url")
                         } else {
                             val launched = onOpenExternalUrl(targetUrl)
                             val code = if (launched) 200 else 500
-                            writeResponse(output, code, if (launched) "ok" else "failed to launch external browser")
+                            respond(code, if (launched) "ok" else "failed to launch external browser")
                             audit(code, LogRedactor.redact(targetUrl))
                         }
                     }
@@ -312,61 +376,60 @@ class LocalDiagnosticsServer(
                                 onRecordClientEvent("INFO", "ext.kucode", trimmed)
                             }
                         }
-                        writeResponse(output, 200, "ok")
+                        respond(200, "ok")
                     }
 
                     method == "POST" && path == "/copy" -> {
                         val ok = onCopyToClipboard(body)
                         val code = if (ok) 200 else 500
-                        writeResponse(output, code, if (ok) "ok" else "clipboard unavailable")
-                        audit(code, "bytes=${body.length}")
+                        respond(code, if (ok) "ok" else "clipboard unavailable")
+                        audit(code, "bytes=${bodyBytes.size}")
                     }
 
                     method == "GET" && path == "/clipboard" -> {
                         val text = onReadFromClipboard()
-                        when {
-                            text == null -> {
-                                writeResponse(output, 503, "clipboard unavailable")
-                                audit(503)
-                            }
-                            text.toByteArray(Charsets.UTF_8).size > MAX_BODY_BYTES -> {
-                                writeResponse(output, 413, "Payload Too Large")
+                        if (text == null) {
+                            respond(503, "clipboard unavailable")
+                            audit(503)
+                        } else {
+                            val encoded = text.toByteArray(Charsets.UTF_8)
+                            if (encoded.size > MAX_BODY_BYTES) {
+                                respond(413, "Payload Too Large")
                                 audit(413)
-                            }
-                            else -> {
-                                writeResponse(output, 200, text)
-                                audit(200, "bytes=${text.length}")
+                            } else {
+                                safeWriteResponseBytes(output, 200, encoded, "text/plain; charset=utf-8")
+                                audit(200, "bytes=${encoded.size}")
                             }
                         }
                     }
 
                     method == "POST" && path == "/open-boot" -> {
                         onOpenBootPage()
-                        writeResponse(output, 200, "ok")
+                        respond(200, "ok")
                         audit(200)
                     }
 
                     method == "POST" && path == "/storage-permission" -> {
                         onRequestStoragePermission()
-                        writeResponse(output, 200, "ok")
+                        respond(200, "ok")
                         audit(200)
                     }
 
                     method == "POST" && path == "/restart" -> {
                         onRestartServer()
-                        writeResponse(output, 200, "ok")
+                        respond(200, "ok")
                         audit(200)
                     }
 
                     else -> {
-                        writeResponse(output, 404, "Not Found")
+                        respond(404, "Not Found")
                         audit(404)
                     }
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (e: Exception) {
-                safeWriteResponse(output, 500, "Internal Error: ${e.message}")
+                safeWriteResponse(output, 500, "Internal Error: ${LogRedactor.redact(e.message.orEmpty())}")
                 audit(500, e.javaClass.simpleName)
             }
         }
@@ -380,18 +443,59 @@ class LocalDiagnosticsServer(
         )
     }
 
-    private fun readBoundedLine(input: BufferedInputStream, maxBytes: Int): String? {
+    private fun isAllowedLoopbackHost(rawHost: String): Boolean {
+        val h = rawHost.trim().lowercase()
+        val hostPart = when {
+            h.startsWith("[::1]") -> h.removePrefix("[::1]").let { rest ->
+                if (rest.isEmpty() || (rest.startsWith(":") && rest.substring(1).toIntOrNull() != null)) return true
+                return false
+            }
+            ':' in h -> {
+                val portPart = h.substringAfterLast(':')
+                if (portPart.toIntOrNull() == null) return false
+                h.substringBeforeLast(':')
+            }
+            else -> h
+        }
+        return hostPart == "127.0.0.1" || hostPart == "localhost"
+    }
+
+    private fun decodeUrlPathSegment(raw: String): String {
+        if ('%' !in raw) return raw
+        val out = ByteArrayOutputStream(raw.length)
+        var i = 0
+        while (i < raw.length) {
+            if (raw[i] == '%' && i + 2 < raw.length) {
+                val hex = raw.substring(i + 1, i + 3).toIntOrNull(16)
+                if (hex != null) {
+                    out.write(hex)
+                    i += 3
+                    continue
+                }
+            }
+            out.write(raw[i].code and 0xFF)
+            i++
+        }
+        return out.toString(Charsets.UTF_8.name())
+    }
+
+    private fun readBoundedLine(
+        input: BufferedInputStream,
+        maxBytes: Int,
+        onBeforeRead: () -> Unit = {},
+    ): Pair<String, Int>? {
         val baos = ByteArrayOutputStream()
         var prev = -1
         while (true) {
+            onBeforeRead()
             val b = input.read()
             if (b == -1) {
-                return if (baos.size() == 0) null else baos.toString(Charsets.UTF_8.name())
+                return if (baos.size() == 0) null else baos.toString(Charsets.UTF_8.name()) to baos.size()
             }
             if (b == '\n'.code) {
                 val bytes = baos.toByteArray()
                 val len = if (prev == '\r'.code && bytes.isNotEmpty()) bytes.size - 1 else bytes.size
-                return String(bytes, 0, len, Charsets.UTF_8)
+                return String(bytes, 0, len, Charsets.UTF_8) to len
             }
             if (baos.size() >= maxBytes) {
                 throw HttpLimitExceededException("Line exceeds $maxBytes bytes")
@@ -402,8 +506,17 @@ class LocalDiagnosticsServer(
     }
 
     private fun safeWriteResponse(output: OutputStream, statusCode: Int, body: String) {
+        safeWriteResponseBytes(output, statusCode, body.toByteArray(Charsets.UTF_8), "text/plain; charset=utf-8")
+    }
+
+    private fun safeWriteResponseBytes(
+        output: OutputStream,
+        statusCode: Int,
+        bodyBytes: ByteArray,
+        contentType: String,
+    ) {
         try {
-            writeResponse(output, statusCode, body)
+            writeResponseBytes(output, statusCode, bodyBytes, contentType)
         } catch (_: IOException) {
             // Client already closed connection
         }
@@ -428,6 +541,15 @@ class LocalDiagnosticsServer(
         body: String,
         contentType: String = "text/plain; charset=utf-8",
     ) {
+        writeResponseBytes(output, statusCode, body.toByteArray(Charsets.UTF_8), contentType)
+    }
+
+    private fun writeResponseBytes(
+        output: OutputStream,
+        statusCode: Int,
+        bodyBytes: ByteArray,
+        contentType: String,
+    ) {
         val statusText = when (statusCode) {
             200 -> "OK"
             400 -> "Bad Request"
@@ -437,10 +559,10 @@ class LocalDiagnosticsServer(
             413 -> "Payload Too Large"
             414 -> "URI Too Long"
             431 -> "Request Header Fields Too Large"
+            501 -> "Not Implemented"
             503 -> "Service Unavailable"
             else -> "Internal Server Error"
         }
-        val bodyBytes = body.toByteArray(Charsets.UTF_8)
         val header = buildString {
             append("HTTP/1.1 $statusCode $statusText\r\n")
             append("Content-Type: $contentType\r\n")
@@ -465,6 +587,8 @@ class LocalDiagnosticsServer(
         private const val DEFAULT_BACKLOG = 16
         private const val DEFAULT_PRE_AUTH_TIMEOUT_MS = 5_000
         private const val DEFAULT_POST_AUTH_TIMEOUT_MS = 60_000
+        private const val UNAUTHORIZED_AUDIT_WINDOW_MS = 5_000L
+        private const val UNAUTHORIZED_AUDIT_MAX_PER_WINDOW = 5
 
         private fun createWorkerPool(maxWorkers: Int, maxQueued: Int): ThreadPoolExecutor {
             val safeWorkers = maxWorkers.coerceAtLeast(1)

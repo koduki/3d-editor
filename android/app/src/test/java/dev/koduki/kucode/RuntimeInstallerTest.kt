@@ -120,7 +120,7 @@ class RuntimeInstallerTest {
             )
             val userSettings = File(paths.vscodeDataDir, "user/User/settings.json")
 
-            // 1. Fresh install creates ONLY data/Machine/settings.json, never user/User/settings.json
+            // 1. Fresh install creates ONLY user/Machine/settings.json, never user/User/settings.json
             installer.ensureMachineVsCodeSettings(paths)
             assertTrue(paths.machineSettingsFile.isFile)
             assertFalse(userSettings.exists())
@@ -147,7 +147,36 @@ class RuntimeInstallerTest {
             assertEquals(24, merged.getInt("editor.fontSize"))
             assertEquals("keep", merged.getString("custom.key"))
             assertEquals("off", merged.getString("terminal.integrated.gpuAcceleration"))
+            assertEquals(true, merged.getBoolean("chat.disableAIFeatures"))
             assertEquals(userJsonc, userSettings.readText())
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    fun ensureMachineVsCodeSettingsMigratesLegacyDataMachineSettingsIncludingJsonc() {
+        val base = Files.createTempDirectory("xr-settings-migrate").toFile()
+        try {
+            val paths = testPaths(base)
+            val installer = RuntimeInstaller(openAsset = { throw AssertionError("unexpected asset open") })
+
+            // Case 1: Legacy strict JSON migrates and merges missing defaults into user/Machine/settings.json
+            paths.legacyMachineSettingsFile.parentFile!!.mkdirs()
+            paths.legacyMachineSettingsFile.writeText("""{"editor.fontSize": 21, "custom.migrated": true}""")
+            installer.ensureMachineVsCodeSettings(paths)
+            assertTrue(paths.machineSettingsFile.isFile)
+            val merged = JSONObject(paths.machineSettingsFile.readText())
+            assertEquals(21, merged.getInt("editor.fontSize"))
+            assertEquals(true, merged.getBoolean("custom.migrated"))
+            assertEquals(true, merged.getBoolean("chat.disableAIFeatures"))
+
+            // Case 2: Legacy JSONC migrates verbatim when user/Machine/settings.json does not exist
+            paths.machineSettingsFile.delete()
+            val legacyJsonc = "{\n  // legacy comment\n  \"editor.fontSize\": 18,\n}\n"
+            paths.legacyMachineSettingsFile.writeText(legacyJsonc)
+            installer.ensureMachineVsCodeSettings(paths)
+            assertEquals(legacyJsonc, paths.machineSettingsFile.readText())
         } finally {
             deleteTreeNoFollow(base)
         }
@@ -158,6 +187,10 @@ class RuntimeInstallerTest {
         val base = Files.createTempDirectory("xr-prepare-test").toFile()
         try {
             val paths = testPaths(base)
+            // Seed bundled openvscode node binary so prepareRuntimeDirectories links /usr/local/bin/node
+            File(paths.rootfsDir, "opt/openvscode-server").mkdirs()
+            File(paths.rootfsDir, "opt/openvscode-server/node").writeText("#!/bin/sh\n")
+
             val caEntries = listOf(
                 CaCertificateEntry("system:root.0", byteArrayOf(0x30, 0x01, 0x02), isUserAdded = false),
                 CaCertificateEntry("user:corp.0", byteArrayOf(0x30, 0x03, 0x04), isUserAdded = true),
@@ -166,6 +199,7 @@ class RuntimeInstallerTest {
                 openAsset = { throw AssertionError("unexpected asset open") },
                 querySystemDnsServers = { listOf("103.5.140.7", "103.5.140.8") },
                 loadHostCaCertificates = { caEntries },
+                installExtension = { dir -> File(dir, "extensions/kucode-tools").apply { mkdirs() } },
             )
 
             installer.prepareRuntimeDirectories(paths, availableProcessors = 4)
@@ -202,14 +236,21 @@ class RuntimeInstallerTest {
                     Files.getPosixFilePermissions(paths.shmDir.toPath()),
             )
 
-            // Confirm CLI host helpers are installed in /usr/local/bin with 0755 permissions
-            for (helper in listOf("kucode-copy", "kucode-paste", "kucode-open", "xdg-open", "kucode-logs")) {
+            // Confirm CLI host helpers (including kucode-install-copilot) are installed in /usr/local/bin with 0755 permissions
+            for (helper in listOf("kucode-copy", "kucode-paste", "kucode-open", "xdg-open", "kucode-logs", "kucode-install-copilot")) {
                 val scriptFile = File(paths.rootfsDir, "usr/local/bin/$helper")
                 assertTrue("$helper should be installed", scriptFile.isFile)
                 val perms = Files.getPosixFilePermissions(scriptFile.toPath())
                 assertTrue(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE in perms)
                 assertTrue(java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE in perms)
             }
+            // Confirm bundled Node 22 symlink and login shell profile scripts
+            val nodeLink = File(paths.rootfsDir, "usr/local/bin/node").toPath()
+            assertTrue(Files.isSymbolicLink(nodeLink))
+            assertEquals("/opt/openvscode-server/node", Files.readSymbolicLink(nodeLink).toString())
+            assertTrue(File(paths.homeDir, ".local/bin").isDirectory)
+            assertTrue(File(paths.homeDir, ".profile").isFile)
+            assertTrue(File(paths.rootfsDir, "etc/profile.d/kucode-env.sh").isFile)
             assertTrue(File(paths.rootfsDir, "var/log/kucode").isDirectory)
 
             // Confirm secret atomic writes remain owner-only (0600) by default

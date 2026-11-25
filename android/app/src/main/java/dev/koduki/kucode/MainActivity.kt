@@ -1,23 +1,31 @@
 package dev.koduki.kucode
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.net.http.SslError
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.provider.Settings
+import android.view.DragAndDropPermissions
+import android.view.DragEvent
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.JsResult
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.SslErrorHandler
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -26,8 +34,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -38,15 +51,22 @@ import java.util.concurrent.atomic.AtomicReference
  * 1. Pure-black boot/diagnostics page (`file:///android_asset/boot.html`) with isolated `KuCodeHost` bridge
  * 2. Dedicated authenticated editor WebView, without a native bridge, with:
  *    - Multi-window popup interception (`setSupportMultipleWindows(true)` + `onCreateWindow`) so
- *      `window.open(..., "_blank", "noopener")` (e.g. `gh auth` or VS Code external links) opens a
- *      sibling XR browser window without triggering `beforeunload` / VS Code workbench shutdown
- *    - Automatic WebView renderer crash/LMKD recovery (`onRenderProcessGone`)
- *    - Native trusted KeyEvents flowing directly to Monaco / xterm.js, and XR multi-window focus dimming
+ *      `window.open(..., "_blank", "noopener")` (e.g. `gh auth`, Copilot CLI login, or VS Code external links)
+ *      opens a sibling XR browser window without triggering `beforeunload` / VS Code workbench shutdown
+ *    - Automatic WebView renderer crash/LMKD recovery (`onRenderProcessGone`) on both editor and boot views
+ *    - Native trusted KeyEvents flowing directly to Monaco / xterm.js, file chooser & drag-and-drop support,
+ *      edge-to-edge WindowInsets handling, and XR multi-window focus dimming
  */
 class MainActivity : AppCompatActivity() {
 
+    private data class ActivePopup(
+        val webView: WebView,
+        val cleanup: () -> Unit,
+    )
+
     private lateinit var rootFrame: FrameLayout
     private lateinit var webView: WebView
+    private lateinit var bootView: WebView
     private lateinit var runtimeManager: PosixRuntimeManager
     private lateinit var telemetry: SessionTelemetryManager
     private lateinit var bootBridge: BootHostBridge
@@ -55,14 +75,47 @@ class MainActivity : AppCompatActivity() {
 
     private var showingEditor = false
     private var autoOpenedEditor = false
-    private lateinit var bootView: WebView
     private var loadedEditorUrl: String? = null
+    private var pendingFilePathCallback: ValueCallback<Array<Uri>>? = null
+    private var activeDragPermissions: DragAndDropPermissions? = null
+    private val activePopups = LinkedHashSet<ActivePopup>()
+
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val callback = pendingFilePathCallback
+        pendingFilePathCallback = null
+        if (callback == null) return@registerForActivityResult
+        val uris: Array<Uri>? = if (result.resultCode == RESULT_OK) {
+            val data = result.data
+            val clip = data?.clipData
+            when {
+                clip != null && clip.itemCount > 0 -> {
+                    Array(clip.itemCount) { idx -> clip.getItemAt(idx).uri }
+                }
+                data?.data != null -> arrayOf(data.data!!)
+                else -> WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
+            }
+        } else {
+            null
+        }
+        runCatching { callback.onReceiveValue(uris) }
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        telemetry.info("android.permission", "POST_NOTIFICATIONS runtime request completed (granted=$granted)")
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         window.decorView.setBackgroundColor(Color.BLACK)
+        showingEditor = savedInstanceState?.getBoolean(KEY_SHOWING_EDITOR, false) ?: false
+        autoOpenedEditor = savedInstanceState?.getBoolean(KEY_AUTO_OPENED_EDITOR, false) ?: false
+
         telemetry = SessionTelemetryManager.getInstance(this).also {
             it.ensureSessionActive("main_activity_create")
         }
@@ -120,32 +173,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         webView = createEditorWebView()
-
-        bootView = WebView(this).apply {
-            setBackgroundColor(Color.BLACK)
-            settings.javaScriptEnabled = true
-            settings.allowFileAccess = false
-            settings.allowContentAccess = false
-            webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
-            }
-            webChromeClient = object : WebChromeClient() {
-                override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                    if (consoleMessage != null) {
-                        telemetry.recordWebViewConsole(
-                            viewTag = "boot",
-                            levelName = consoleMessage.messageLevel()?.name ?: "LOG",
-                            message = consoleMessage.message().orEmpty(),
-                            sourceId = consoleMessage.sourceId(),
-                            lineNumber = consoleMessage.lineNumber(),
-                        )
-                    }
-                    return true
-                }
-            }
-            addJavascriptInterface(bootBridge, "KuCodeHost")
-            loadUrl("file:///android_asset/boot.html")
-        }
+        bootView = createBootWebView()
 
         val borderPx = (resources.displayMetrics.density * 1.5f).toInt().coerceAtLeast(1)
         rootFrame = FrameLayout(this).apply {
@@ -158,17 +186,42 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 ),
             )
+            addView(
+                bootView,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
         }
-        rootFrame.addView(bootView)
+        ViewCompat.setOnApplyWindowInsetsListener(rootFrame) { view, windowInsets ->
+            val insets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime(),
+            )
+            view.setPadding(
+                insets.left + borderPx,
+                insets.top + borderPx,
+                insets.right + borderPx,
+                insets.bottom + borderPx,
+            )
+            WindowInsetsCompat.CONSUMED
+        }
         setContentView(rootFrame)
+        ViewCompat.requestApplyInsets(rootFrame)
 
-        // Prevent stray Back/Esc gestures in XR from accidentally killing the editor & server
+        // Prevent stray Back/Esc gestures in XR from accidentally killing the editor & server,
+        // while allowing the user to exit cleanly when stuck on a boot error/idle screen.
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (!showingEditor && runtimeManager.getStatus().state == PosixRuntimeManager.State.READY) {
+                    val state = runtimeManager.getStatus().state
+                    if (!showingEditor && state == PosixRuntimeManager.State.READY) {
                         loadEditorIfReady()
+                    } else if (!showingEditor && (state == PosixRuntimeManager.State.ERROR || state == PosixRuntimeManager.State.IDLE)) {
+                        moveTaskToBack(true)
                     }
                 }
             },
@@ -191,6 +244,11 @@ class MainActivity : AppCompatActivity() {
 
         runtimeManager.setStatusListener { snapshot ->
             runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                if (showingEditor && (snapshot.state == PosixRuntimeManager.State.IDLE || snapshot.state == PosixRuntimeManager.State.ERROR)) {
+                    loadedEditorUrl = null
+                    loadBootPage()
+                }
                 if (!showingEditor && ::bootView.isInitialized) {
                     bootView.evaluateJavascript(
                         "window.__onHostStatus && window.__onHostStatus(${snapshot.toJsonString()});",
@@ -204,9 +262,68 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        loadBootPage()
+        if (showingEditor && runtimeManager.editorLaunchUrl() != null) {
+            loadEditorIfReady()
+        } else {
+            loadBootPage()
+        }
+        maybeRequestNotificationPermissionOnLaunch()
         ServerKeepAliveService.start(this)
         runtimeManager.startIfNeeded()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_SHOWING_EDITOR, showingEditor)
+        outState.putBoolean(KEY_AUTO_OPENED_EDITOR, autoOpenedEditor)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createBootWebView(): WebView = WebView(this).apply {
+        setBackgroundColor(Color.BLACK)
+        isFocusable = true
+        isFocusableInTouchMode = true
+        settings.javaScriptEnabled = true
+        settings.allowFileAccess = false
+        settings.allowContentAccess = false
+        settings.blockNetworkLoads = true
+        webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
+
+            override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError?) {
+                telemetry.error(
+                    "webview.ssl",
+                    "Boot WebView SSL error ${error?.primaryError} on ${LogRedactor.redact(error?.url.orEmpty())}",
+                )
+                handler.cancel()
+            }
+
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                telemetry.error(
+                    "webview.renderer",
+                    "Boot WebView render process gone (didCrash=${detail.didCrash()}, priorityAtExit=${detail.rendererPriorityAtExit()}); recreating boot WebView",
+                )
+                telemetry.captureMetricSnapshotAsync("boot_webview_renderer_gone", includePss = true)
+                recoverBootWebViewAfterRendererGone(view)
+                return true
+            }
+        }
+        webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                if (consoleMessage != null) {
+                    telemetry.recordWebViewConsole(
+                        viewTag = "boot",
+                        levelName = consoleMessage.messageLevel()?.name ?: "LOG",
+                        message = consoleMessage.message().orEmpty(),
+                        sourceId = consoleMessage.sourceId(),
+                        lineNumber = consoleMessage.lineNumber(),
+                    )
+                }
+                return true
+            }
+        }
+        addJavascriptInterface(bootBridge, "KuCodeHost")
+        loadUrl("file:///android_asset/boot.html")
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -214,6 +331,16 @@ class MainActivity : AppCompatActivity() {
         setBackgroundColor(Color.BLACK)
         isFocusable = true
         isFocusableInTouchMode = true
+
+        setOnDragListener { _, event ->
+            if (event.action == DragEvent.ACTION_DROP) {
+                runCatching {
+                    activeDragPermissions?.release()
+                    activeDragPermissions = requestDragAndDropPermissions(event)
+                }
+            }
+            false
+        }
 
         settings.apply {
             javaScriptEnabled = true
@@ -243,12 +370,22 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 val parsed = url?.let { runCatching { Uri.parse(it) }.getOrNull() } ?: return
                 val editorPort = runtimeManager.getStatus().port
+                val adminPort = runtimeManager.getAdminPort()
                 telemetry.info("webview.nav", "onPageStarted: ${LogRedactor.redact(url)}")
-                if (PosixRuntimeConfig.shouldKeepInsideWebView(parsed.scheme, parsed.host, parsed.port, editorPort)) {
+                if (PosixRuntimeConfig.shouldKeepInsideWebView(
+                        scheme = parsed.scheme,
+                        host = parsed.host,
+                        port = parsed.port,
+                        editorServerPort = editorPort,
+                        isForMainFrame = true,
+                        adminServerPort = adminPort,
+                    )
+                ) {
                     // 1. Mask navigator.clipboard.readText() so rightClickBehavior="copyPaste" never triggers
                     //    a sticky Android WebView permission modal (paste runs via kucode-tools GET /clipboard).
                     // 2. Forward uncaught window errors & unhandled promise rejections to console.error so
-                    //    WebChromeClient.onConsoleMessage captures full details in SessionTelemetryManager.
+                    //    WebChromeClient.onConsoleMessage captures full details in SessionTelemetryManager
+                    //    (filtering benign Chromium ResizeObserver loop notifications).
                     view.evaluateJavascript(
                         """
                         try {
@@ -258,7 +395,9 @@ class MainActivity : AppCompatActivity() {
                           if (!window.__kucodeDiagHooked) {
                             window.__kucodeDiagHooked = true;
                             window.addEventListener('error', function(e) {
-                              console.error('[window.onerror] ' + (e && (e.message || e.error) || 'unknown'));
+                              var msg = String(e && (e.message || e.error) || 'unknown');
+                              if (msg.indexOf('ResizeObserver loop') !== -1) return;
+                              console.error('[window.onerror] ' + msg);
                             });
                             window.addEventListener('unhandledrejection', function(e) {
                               var r = e && e.reason;
@@ -285,6 +424,7 @@ class MainActivity : AppCompatActivity() {
             ): Boolean {
                 val uri = request.url
                 val editorPort = runtimeManager.getStatus().port
+                val adminPort = runtimeManager.getAdminPort()
                 val isMain = request.isForMainFrame
                 if (PosixRuntimeConfig.shouldKeepInsideWebView(
                         scheme = uri.scheme,
@@ -292,6 +432,7 @@ class MainActivity : AppCompatActivity() {
                         port = uri.port,
                         editorServerPort = editorPort,
                         isForMainFrame = isMain,
+                        adminServerPort = adminPort,
                     )
                 ) {
                     return false
@@ -307,6 +448,13 @@ class MainActivity : AppCompatActivity() {
                     telemetry.warn(
                         "webview.nav",
                         "Blocked disallowed navigation (mainFrame=$isMain): ${LogRedactor.redact(uri.toString())}",
+                    )
+                    return true
+                }
+                if (!isMain && !request.hasGesture()) {
+                    telemetry.warn(
+                        "webview.nav",
+                        "Blocked non-gesture subframe external navigation: ${LogRedactor.redact(uri.toString())}",
                     )
                     return true
                 }
@@ -348,6 +496,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError?) {
+                telemetry.error(
+                    "webview.ssl",
+                    "Editor WebView SSL error ${error?.primaryError} on ${LogRedactor.redact(error?.url.orEmpty())}",
+                )
+                handler.cancel()
+            }
+
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 telemetry.error(
                     "webview.renderer",
@@ -360,6 +516,32 @@ class MainActivity : AppCompatActivity() {
         }
 
         webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                if (filePathCallback == null) return false
+                pendingFilePathCallback?.let { prev -> runCatching { prev.onReceiveValue(null) } }
+                pendingFilePathCallback = filePathCallback
+                val intent = runCatching { fileChooserParams?.createIntent() }.getOrNull()
+                    ?: Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "*/*"
+                    }
+                if (fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                    intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
+                return runCatching {
+                    fileChooserLauncher.launch(intent)
+                    true
+                }.getOrElse { e ->
+                    telemetry.warn("webview.chooser", "Failed to open file chooser: ${e.message}")
+                    pendingFilePathCallback = null
+                    false
+                }
+            }
+
             override fun onCreateWindow(
                 view: WebView,
                 isDialog: Boolean,
@@ -367,6 +549,13 @@ class MainActivity : AppCompatActivity() {
                 resultMsg: Message?,
             ): Boolean {
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                if (activePopups.size >= MAX_CONCURRENT_POPUPS) {
+                    telemetry.warn(
+                        "webview.popup",
+                        "Rejected onCreateWindow: concurrent popup limit ($MAX_CONCURRENT_POPUPS) reached",
+                    )
+                    return false
+                }
                 telemetry.info("webview.popup", "onCreateWindow(isDialog=$isDialog, isUserGesture=$isUserGesture)")
 
                 val handled = AtomicBoolean(false)
@@ -377,23 +566,40 @@ class MainActivity : AppCompatActivity() {
                     settings.allowContentAccess = false
                 }
 
+                lateinit var timeoutRunnable: Runnable
+                lateinit var activeEntry: ActivePopup
+
                 fun cleanupPopup() {
                     if (destroyed.compareAndSet(false, true)) {
-                        mainHandler.post {
+                        val destroyBlock = {
+                            mainHandler.removeCallbacks(timeoutRunnable)
+                            activePopups.remove(activeEntry)
                             runCatching {
                                 popupWebView.stopLoading()
                                 popupWebView.webViewClient = WebViewClient()
                                 popupWebView.destroy()
                             }
                         }
+                        if (Looper.myLooper() == Looper.getMainLooper()) {
+                            destroyBlock()
+                        } else {
+                            mainHandler.post { destroyBlock() }
+                        }
                     }
                 }
 
+                timeoutRunnable = Runnable { cleanupPopup() }
+                activeEntry = ActivePopup(popupWebView, ::cleanupPopup)
+                activePopups.add(activeEntry)
+
+                fun isAboutBlank(uri: Uri): Boolean {
+                    if (!uri.scheme.equals("about", ignoreCase = true)) return false
+                    val ssp = uri.schemeSpecificPart.orEmpty()
+                    return ssp.equals("blank", ignoreCase = true) || ssp.startsWith("blank?", ignoreCase = true)
+                }
+
                 fun interceptPopupUri(uri: Uri, via: String) {
-                    val scheme = uri.scheme?.lowercase()
-                    if (scheme == "about" && uri.toString().equals("about:blank", ignoreCase = true)) {
-                        return
-                    }
+                    if (isAboutBlank(uri)) return
                     if (!handled.compareAndSet(false, true)) return
                     val editorPort = runtimeManager.getStatus().port
                     if (PosixRuntimeConfig.isSafeExternalBrowserUri(
@@ -423,16 +629,41 @@ class MainActivity : AppCompatActivity() {
                         return true
                     }
 
+                    override fun shouldInterceptRequest(
+                        popup: WebView,
+                        request: WebResourceRequest,
+                    ): WebResourceResponse? {
+                        val uri = request.url
+                        val scheme = uri.scheme?.lowercase()
+                        if (request.isForMainFrame && (scheme == "http" || scheme == "https")) {
+                            // Intercept initial popup GET before WebView sends an actual HTTP request
+                            // (prevents consuming single-use OAuth/auth URLs twice).
+                            mainHandler.post { interceptPopupUri(uri, "intercept") }
+                            return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                        }
+                        return super.shouldInterceptRequest(popup, request)
+                    }
+
                     override fun onPageStarted(popup: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                         val parsed = url?.let { runCatching { Uri.parse(it) }.getOrNull() }
                         if (parsed != null) {
                             interceptPopupUri(parsed, "pageStarted")
                         }
                     }
+
+                    override fun onReceivedSslError(popup: WebView, handler: SslErrorHandler, error: SslError?) {
+                        handler.cancel()
+                        cleanupPopup()
+                    }
+
+                    override fun onRenderProcessGone(popup: WebView, detail: RenderProcessGoneDetail): Boolean {
+                        cleanupPopup()
+                        return true
+                    }
                 }
 
                 // Safety timeout so an unnavigated about:blank popup never leaks a detached WebView
-                mainHandler.postDelayed({ cleanupPopup() }, POPUP_CLEANUP_TIMEOUT_MS)
+                mainHandler.postDelayed(timeoutRunnable, POPUP_CLEANUP_TIMEOUT_MS)
 
                 transport.webView = popupWebView
                 resultMsg.sendToTarget()
@@ -468,14 +699,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun recoverEditorWebViewAfterRendererGone(deadView: WebView) {
-        if (isDestroyed || !::rootFrame.isInitialized) return
+        if (isDestroyed || !::rootFrame.isInitialized || !::webView.isInitialized || deadView !== webView) return
         runCatching {
             rootFrame.removeView(deadView)
             deadView.destroy()
         }
         loadedEditorUrl = null
+        val currentAlpha = if (hasWindowFocus()) 1.0f else 0.55f
         webView = createEditorWebView().apply {
             visibility = if (showingEditor) View.VISIBLE else View.GONE
+            alpha = currentAlpha
         }
         rootFrame.addView(
             webView,
@@ -487,6 +720,35 @@ class MainActivity : AppCompatActivity() {
         )
         if (showingEditor) {
             loadEditorIfReady()
+        } else {
+            webView.onPause()
+        }
+    }
+
+    private fun recoverBootWebViewAfterRendererGone(deadView: WebView) {
+        if (isDestroyed || !::rootFrame.isInitialized || !::bootView.isInitialized || deadView !== bootView) return
+        runCatching {
+            deadView.removeJavascriptInterface("KuCodeHost")
+            rootFrame.removeView(deadView)
+            deadView.destroy()
+        }
+        val currentAlpha = if (hasWindowFocus()) 1.0f else 0.55f
+        bootView = createBootWebView().apply {
+            visibility = if (showingEditor) View.GONE else View.VISIBLE
+            alpha = currentAlpha
+        }
+        rootFrame.addView(
+            bootView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        if (showingEditor) {
+            bootView.onPause()
+        } else {
+            bootView.onResume()
+            bootView.requestFocus()
         }
     }
 
@@ -509,14 +771,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onPause() {
+        if (showingEditor && ::webView.isInitialized) {
+            webView.onPause()
+        } else if (!showingEditor && ::bootView.isInitialized) {
+            bootView.onPause()
+        }
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
-        if (::webView.isInitialized) {
+        if (showingEditor && ::webView.isInitialized) {
             webView.onResume()
             webView.resumeTimers()
+        } else if (!showingEditor && ::bootView.isInitialized) {
+            bootView.onResume()
+            bootView.resumeTimers()
         }
         val snapshot = runtimeManager.getStatus()
-        // Re-assert foreground keep-alive if Android 15 dataSync service timed out earlier
+        // Re-assert foreground keep-alive if the foreground service was previously stopped
         if (snapshot.state != PosixRuntimeManager.State.IDLE) {
             ServerKeepAliveService.start(this)
         }
@@ -543,8 +817,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
+        activePopups.toList().forEach { runCatching { it.cleanup() } }
+        activePopups.clear()
+        pendingFilePathCallback?.let { runCatching { it.onReceiveValue(null) } }
+        pendingFilePathCallback = null
+        activeDragPermissions?.let { runCatching { it.release() } }
+        activeDragPermissions = null
+
         runtimeManager.setStatusListener(null)
         runtimeManager.setHostActions(null)
+        if (::bootBridge.isInitialized) {
+            bootBridge.close()
+        }
         if (isFinishing) {
             runtimeManager.stop()
             ServerKeepAliveService.stop(this)
@@ -570,8 +855,10 @@ class MainActivity : AppCompatActivity() {
     private fun loadBootPage() {
         showingEditor = false
         telemetry.updateWindowState(activeView = "BOOT")
+        webView.onPause()
         webView.visibility = View.GONE
         bootView.visibility = View.VISIBLE
+        bootView.onResume()
         bootView.requestFocus()
     }
 
@@ -584,9 +871,24 @@ class MainActivity : AppCompatActivity() {
         }
         showingEditor = true
         telemetry.updateWindowState(activeView = "EDITOR")
+        bootView.onPause()
         bootView.visibility = View.GONE
         webView.visibility = View.VISIBLE
+        webView.onResume()
         webView.requestFocus()
+    }
+
+    private fun maybeRequestNotificationPermissionOnLaunch() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(PREF_ASKED_NOTIFICATIONS, false)) return
+        prefs.edit().putBoolean(PREF_ASKED_NOTIFICATIONS, true).apply()
+        runCatching {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun openExternalBrowserUri(uri: Uri, source: String): Boolean {
@@ -620,6 +922,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openNotificationPermissionSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            telemetry.info("android.settings", "Requesting POST_NOTIFICATIONS runtime permission")
+            runCatching {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                return
+            }
+        }
         telemetry.info("android.settings", "Opening APP_NOTIFICATION_SETTINGS")
         val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
             putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
@@ -635,17 +947,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("BatteryLife")
     private fun openBatteryOptimizationSettings() {
-        telemetry.info("android.settings", "Opening IGNORE_BATTERY_OPTIMIZATION_SETTINGS")
-        runCatching {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        }.onFailure {
+        telemetry.info("android.settings", "Opening REQUEST_IGNORE_BATTERY_OPTIMIZATIONS")
+        val directIntent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:$packageName")
+        }
+        runCatching { startActivity(directIntent) }.onFailure {
             runCatching {
-                startActivity(
-                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                        data = Uri.parse("package:$packageName")
-                    },
-                )
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }.onFailure {
+                runCatching {
+                    startActivity(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.parse("package:$packageName")
+                        },
+                    )
+                }
             }
         }
     }
@@ -668,7 +986,10 @@ class MainActivity : AppCompatActivity() {
         runCatching {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                 ?: return@runCatching null
-            val clip = clipboard.primaryClip ?: return@runCatching ""
+            val clip = clipboard.primaryClip
+            if (clip == null) {
+                return@runCatching if (!hasWindowFocus()) null else ""
+            }
             if (clip.itemCount <= 0) return@runCatching ""
             clip.getItemAt(0).coerceToText(this)?.toString() ?: ""
         }.getOrNull()
@@ -695,5 +1016,10 @@ class MainActivity : AppCompatActivity() {
         private const val COLOR_BORDER_FOCUSED = 0xFF38BDF8.toInt()
         private const val COLOR_BORDER_UNFOCUSED = 0xFF18181B.toInt()
         private const val POPUP_CLEANUP_TIMEOUT_MS = 10_000L
+        private const val MAX_CONCURRENT_POPUPS = 2
+        private const val KEY_SHOWING_EDITOR = "kucode_showing_editor"
+        private const val KEY_AUTO_OPENED_EDITOR = "kucode_auto_opened_editor"
+        private const val PREFS_NAME = "kucode_host_prefs"
+        private const val PREF_ASKED_NOTIFICATIONS = "asked_post_notifications"
     }
 }

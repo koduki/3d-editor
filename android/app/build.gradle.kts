@@ -11,8 +11,8 @@ android {
         applicationId = "dev.koduki.kucode"
         minSdk = 34
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.8.0"
+        versionCode = 9
+        versionName = "0.9.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -23,9 +23,13 @@ android {
 
     signingConfigs {
         val ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
-        if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+        if (!ksPath.isNullOrBlank()) {
+            val ksFile = file(ksPath)
+            if (!ksFile.exists()) {
+                throw org.gradle.api.GradleException("ANDROID_KEYSTORE_PATH was set but file does not exist: $ksPath")
+            }
             create("release") {
-                storeFile = file(ksPath)
+                storeFile = ksFile
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: ""
                 keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: ""
                 keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: ""

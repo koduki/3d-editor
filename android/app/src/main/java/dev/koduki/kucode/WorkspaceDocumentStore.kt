@@ -41,15 +41,8 @@ internal object WorkspaceDocumentStore {
         rootId: String = ROOT_ID,
     ): File {
         val baseReal = baseDir.toPath().toRealPath()
-        val candidate = when {
-            docId == rootDocId || docId == rootId -> baseReal
-            docId.startsWith("$rootDocId/") -> {
-                val rel = docId.removePrefix("$rootDocId/")
-                if (rel.isEmpty()) throw FileNotFoundException("Empty relative documentId: $docId")
-                baseReal.resolve(rel).normalize()
-            }
-            else -> throw FileNotFoundException("Unknown documentId: $docId")
-        }
+        val candidate = resolveDocIdPath(baseReal, docId, rootDocId, rootId)
+            ?: throw FileNotFoundException("Unknown or invalid documentId: $docId")
         if (!isSafeDescendantNoSymlinks(baseReal, candidate) ||
             !Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)
         ) {
@@ -137,25 +130,27 @@ internal object WorkspaceDocumentStore {
             throw FileNotFoundException("Invalid parent directory")
         }
         val safeName = sanitizeDisplayName(displayName)
-        var target = parentPath.resolve(safeName)
-        var suffix = 2
-        while (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
-            target = parentPath.resolve("$safeName ($suffix)")
-            suffix++
-        }
-        if (!isSafeDescendantNoSymlinks(baseReal, target)) {
-            throw FileNotFoundException("Invalid path: $displayName")
-        }
-        try {
-            if (isDirectory) {
-                Files.createDirectory(target)
-            } else {
-                Files.createFile(target)
+        for (attempt in 1..1000) {
+            val candidateName = if (attempt == 1) safeName else "$safeName ($attempt)"
+            val target = parentPath.resolve(candidateName)
+            if (!isSafeDescendantNoSymlinks(baseReal, target)) {
+                throw FileNotFoundException("Invalid path: $displayName")
             }
-        } catch (e: IOException) {
-            throw FileNotFoundException("Failed to create ${target.fileName}: ${e.message}")
+            try {
+                if (isDirectory) {
+                    Files.createDirectory(target)
+                } else {
+                    Files.createFile(target)
+                }
+                return target.toFile()
+            } catch (_: java.nio.file.FileAlreadyExistsException) {
+                // Concurrent create or pre-existing file: retry with next suffix atomically
+                continue
+            } catch (e: IOException) {
+                throw FileNotFoundException("Failed to create ${target.fileName}: ${e.message}")
+            }
         }
-        return target.toFile()
+        throw FileNotFoundException("Failed to allocate unique filename for $displayName")
     }
 
     fun rename(baseDir: File, source: File, displayName: String): File {
@@ -197,9 +192,78 @@ internal object WorkspaceDocumentStore {
         }
     }
 
+    /**
+     * Strictly validates that [documentId] is inside [parentDocumentId] within the same SAF root,
+     * rejecting any `..`, `.`, backslash, or empty path segments that would bypass tree confinement.
+     */
     fun isChildDocument(parentDocumentId: String, documentId: String): Boolean {
-        val normalizedParent = parentDocumentId.trimEnd('/')
-        return documentId == normalizedParent || documentId.startsWith("$normalizedParent/")
+        val (parentRoot, parentSegs) = parseCanonicalDocId(parentDocumentId) ?: return false
+        val (childRoot, childSegs) = parseCanonicalDocId(documentId) ?: return false
+        if (parentRoot != childRoot) return false
+        if (childSegs.size < parentSegs.size) return false
+        for (i in parentSegs.indices) {
+            if (childSegs[i] != parentSegs[i]) return false
+        }
+        return true
+    }
+
+    /**
+     * Filesystem-backed version of [isChildDocument] that additionally verifies neither path
+     * escapes [baseDir] or traverses a symbolic link.
+     */
+    fun isChildDocument(
+        baseDir: File,
+        parentDocumentId: String,
+        documentId: String,
+        rootDocId: String = ROOT_DOC_ID,
+        rootId: String = ROOT_ID,
+    ): Boolean {
+        if (!isChildDocument(parentDocumentId, documentId)) return false
+        val baseReal = runCatching { baseDir.toPath().toRealPath() }.getOrNull() ?: return false
+        val parentPath = resolveDocIdPath(baseReal, parentDocumentId, rootDocId, rootId) ?: return false
+        val childPath = resolveDocIdPath(baseReal, documentId, rootDocId, rootId) ?: return false
+        if (!isSafeDescendantNoSymlinks(baseReal, parentPath)) return false
+        if (!isSafeDescendantNoSymlinks(baseReal, childPath)) return false
+        return childPath.startsWith(parentPath)
+    }
+
+    private fun resolveDocIdPath(
+        baseReal: Path,
+        docId: String,
+        rootDocId: String,
+        rootId: String,
+    ): Path? {
+        if (docId.contains('\\') || docId.contains('\u0000')) return null
+        val trimmed = docId.trimEnd('/')
+        if (trimmed == rootDocId || trimmed == rootId) return baseReal
+        if (!trimmed.startsWith("$rootDocId/")) return null
+        val rel = trimmed.removePrefix("$rootDocId/")
+        if (rel.isEmpty()) return null
+        val segments = rel.split('/')
+        if (segments.any { it.isEmpty() || it == "." || it == ".." }) return null
+        var current = baseReal
+        for (seg in segments) {
+            current = current.resolve(seg)
+        }
+        return current.normalize()
+    }
+
+    private fun parseCanonicalDocId(docId: String): Pair<String, List<String>>? {
+        if (docId.isEmpty() || docId.contains('\\') || docId.contains('\u0000')) return null
+        val trimmed = docId.trimEnd('/')
+        val rootPrefix = when {
+            trimmed == ROOT_DOC_ID || trimmed == ROOT_ID -> return ROOT_DOC_ID to emptyList()
+            trimmed == DIAGNOSTICS_ROOT_DOC_ID || trimmed == DIAGNOSTICS_ROOT_ID ->
+                return DIAGNOSTICS_ROOT_DOC_ID to emptyList()
+            trimmed.startsWith("$ROOT_DOC_ID/") -> ROOT_DOC_ID
+            trimmed.startsWith("$DIAGNOSTICS_ROOT_DOC_ID/") -> DIAGNOSTICS_ROOT_DOC_ID
+            else -> return null
+        }
+        val rel = trimmed.removePrefix("$rootPrefix/")
+        if (rel.isEmpty()) return null
+        val segments = rel.split('/')
+        if (segments.any { it.isEmpty() || it == "." || it == ".." }) return null
+        return rootPrefix to segments
     }
 
     fun sanitizeDisplayName(raw: String): String {

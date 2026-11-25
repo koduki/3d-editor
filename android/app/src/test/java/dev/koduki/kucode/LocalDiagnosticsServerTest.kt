@@ -435,6 +435,114 @@ class LocalDiagnosticsServerTest {
         }
     }
 
+    @Test
+    fun enforcesCsrfHeadersSmugglingGuardsSlowlorisDeadlineAndAuditRateLimiting() {
+        val audit403Count = java.util.concurrent.atomic.AtomicInteger(0)
+        val seenSelectors = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val server = LocalDiagnosticsServer(
+            onRunDiagnostics = { "ok" },
+            onGetLogs = { "ok" },
+            onCopyToClipboard = { true },
+            onGetSessionBundle = { selector, _ ->
+                seenSelectors.add(selector)
+                "bundle:$selector"
+            },
+            onAuditRequest = { _, _, status, _, _ ->
+                if (status == 403) audit403Count.incrementAndGet()
+            },
+            onOpenBootPage = {},
+            onRequestStoragePermission = {},
+            onRestartServer = {},
+            preAuthTimeoutMs = 400,
+        )
+        val port = server.start()
+        try {
+            // 1. Browser Origin / Sec-Fetch-Site / non-loopback Host rejected with 403 even with valid token
+            assertEquals(
+                403,
+                sendRawHttpStatus(
+                    port,
+                    "GET /logs HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nOrigin: https://evil.example\r\nX-KuCode-Token: ${server.authToken}\r\n\r\n",
+                ),
+            )
+            assertEquals(
+                403,
+                sendRawHttpStatus(
+                    port,
+                    "GET /logs HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nSec-Fetch-Site: cross-site\r\nX-KuCode-Token: ${server.authToken}\r\n\r\n",
+                ),
+            )
+            assertEquals(
+                403,
+                sendRawHttpStatus(
+                    port,
+                    "GET /logs HTTP/1.1\r\nHost: attacker.example:$port\r\nX-KuCode-Token: ${server.authToken}\r\n\r\n",
+                ),
+            )
+
+            // 2. Request smuggling guards: Transfer-Encoding -> 501, duplicate Content-Length -> 400
+            assertEquals(
+                501,
+                sendRawHttpStatus(
+                    port,
+                    "POST /copy HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nX-KuCode-Token: ${server.authToken}\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                ),
+            )
+            assertEquals(
+                400,
+                sendRawHttpStatus(
+                    port,
+                    "POST /copy HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nContent-Length: 2\r\nContent-Length: 3\r\nX-KuCode-Token: ${server.authToken}\r\n\r\nhi",
+                ),
+            )
+
+            // 3. Premature EOF on declared Content-Length -> 400
+            Socket("127.0.0.1", port).use { s ->
+                s.soTimeout = 3_000
+                s.getOutputStream().write(
+                    "POST /copy HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nX-KuCode-Token: ${server.authToken}\r\nContent-Length: 50\r\n\r\nshort".toByteArray(Charsets.US_ASCII),
+                )
+                s.getOutputStream().flush()
+                s.shutdownOutput()
+                val statusLine = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.US_ASCII)).readLine()
+                assertTrue("Expected 400 on premature EOF, got $statusLine", statusLine?.contains("400") == true)
+            }
+
+            // 4. Slowloris trickle exceeds wall-clock preAuthTimeoutMs -> 408
+            Socket("127.0.0.1", port).use { s ->
+                s.soTimeout = 3_000
+                val out = s.getOutputStream()
+                out.write("GET /logs HTTP/1.1\r\n".toByteArray(Charsets.US_ASCII))
+                out.flush()
+                for (i in 0 until 8) {
+                    Thread.sleep(90)
+                    runCatching {
+                        out.write("X-Slow-$i: a\r\n".toByteArray(Charsets.US_ASCII))
+                        out.flush()
+                    }
+                }
+                val statusLine = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.US_ASCII)).readLine()
+                assertTrue("Expected 408 on slowloris trickle, got $statusLine", statusLine?.contains("408") == true)
+            }
+
+            // 5. Literal '+' in session path segment must NOT be mangled to space
+            val plusConn = (URL("http://127.0.0.1:$port/sessions/sess+2026%2B1?format=ai").openConnection() as HttpURLConnection).apply {
+                setRequestProperty("X-KuCode-Token", server.authToken)
+            }
+            assertEquals(200, plusConn.responseCode)
+            assertEquals("bundle:sess+2026+1", plusConn.inputStream.bufferedReader(Charsets.UTF_8).readText())
+            plusConn.disconnect()
+
+            // 6. Burst of 403s is rate-limited in audit callback
+            repeat(15) {
+                assertEquals(403, sendRawHttpStatus(port, "GET /logs HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n"))
+            }
+            assertTrue("Audit 403 count should be throttled (<= 5), got ${audit403Count.get()}", audit403Count.get() <= 5)
+        } finally {
+            server.stop()
+        }
+    }
+
     private fun sendRawHttpStatus(port: Int, rawRequest: String): Int {
         Socket("127.0.0.1", port).use { socket ->
             socket.soTimeout = 3_000

@@ -94,9 +94,16 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         }
         val lower = trimmed.lowercase()
         when {
-            trimmed.startsWith("[error]") || lower.contains("error:") || lower.startsWith("uncaught") ->
+            trimmed.startsWith("[error]") ||
+                lower.startsWith("error:") ||
+                lower.startsWith("uncaught") ||
+                lower.contains("] [error]") ||
+                lower.contains("fatal error") ->
                 telemetry.error(source, trimmed)
-            trimmed.startsWith("[warn]") || lower.contains("warning:") ->
+            trimmed.startsWith("[warn]") ||
+                lower.startsWith("warning:") ||
+                lower.contains("] [warning]") ||
+                lower.contains("] [warn]") ->
                 telemetry.warn(source, trimmed)
             else ->
                 telemetry.info(source, trimmed)
@@ -134,10 +141,7 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     private var hostActions: HostActions? = null
 
     private val diagnosticsServer = LocalDiagnosticsServer(
-        onRunDiagnostics = {
-            telemetry.captureMetricSnapshot("diagnostics_run", includePss = true)
-            DiagnosticsRunner.collect(appContext, this)
-        },
+        onRunDiagnostics = { DiagnosticsRunner.collect(appContext, this) },
         onGetLogs = { getLogsText() },
         onCopyToClipboard = { text -> hostActions?.onCopyToClipboard?.invoke(text) ?: false },
         onReadFromClipboard = { hostActions?.onReadFromClipboard?.invoke() },
@@ -167,6 +171,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         onRequestStoragePermission = { hostActions?.onRequestStoragePermission?.invoke() },
         onRestartServer = { restart() },
     )
+
+    fun getAdminPort(): Int = diagnosticsServer.port
 
     init {
         LogRedactor.registerSecret(diagnosticsServer.authToken)

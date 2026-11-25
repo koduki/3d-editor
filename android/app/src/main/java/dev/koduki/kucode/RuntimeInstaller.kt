@@ -20,8 +20,9 @@ import java.nio.file.StandardCopyOption
  * - If startup fails before READY (or crashes mid-swap), [rollbackInstallation] /
  *   [recoverInterruptedInstall] restores `rootfs.previous` back to `rootfs` with its
  *   original version marker intact.
- * - Default settings are written ONLY to `data/Machine/settings.json` (never
- *   `user/User/settings.json`), atomically, and never overwrite unparseable JSONC files.
+ * - Default settings are written ONLY to `user/Machine/settings.json` (migrating once from
+ *   legacy `data/Machine/settings.json`, never touching `user/User/settings.json`), atomically,
+ *   and never overwrite unparseable JSONC files.
  */
 internal class RuntimeInstaller(
     private val openAsset: (String) -> InputStream,
@@ -188,11 +189,32 @@ internal class RuntimeInstaller(
             writeTextAtomically(readme, PosixRuntimeConfig.buildWelcomeReadme(), Charsets.UTF_8, worldReadable = true)
         }
 
-        // Seed persistent .bashrc in decoupled /root if absent
+        // Seed persistent .bashrc, .profile, and ~/.local/bin in decoupled /root
+        File(paths.homeDir, ".local/bin").mkdirs()
         val bashrc = File(paths.homeDir, ".bashrc")
         if (!bashrc.exists()) {
             writeTextAtomically(bashrc, PosixRuntimeConfig.buildDefaultBashrc(), Charsets.UTF_8, worldReadable = true)
         }
+        val profile = File(paths.homeDir, ".profile")
+        if (!profile.exists()) {
+            writeTextAtomically(profile, PosixRuntimeConfig.buildDefaultProfile(), Charsets.UTF_8, worldReadable = true)
+        }
+
+        // Ensure login shells (/etc/profile) always keep $HOME/.local/bin on PATH
+        val profileDDir = File(paths.rootfsDir, "etc/profile.d")
+        ensureDirectoryWithMode(profileDDir, 0b111_101_101)
+        val profileDEnv = File(profileDDir, "kucode-env.sh")
+        if (Files.isSymbolicLink(profileDEnv.toPath()) ||
+            Files.isDirectory(profileDEnv.toPath(), LinkOption.NOFOLLOW_LINKS)
+        ) {
+            deleteTreeNoFollow(profileDEnv)
+        }
+        writeTextAtomically(
+            profileDEnv,
+            PosixRuntimeConfig.buildProfileDEnvScript(),
+            Charsets.UTF_8,
+            worldReadable = true,
+        )
 
         // Write fake /proc files to avoid Android SELinux denials in Node.js / Linux tools
         for ((name, content) in PosixRuntimeConfig.buildFakeSysdataFiles(availableProcessors)) {
@@ -233,7 +255,7 @@ internal class RuntimeInstaller(
         // Sync Android trusted CA certificates (Conscrypt APEX system roots + user CAs) into Debian
         CaTrustSync.syncIntoRootfs(paths, loadHostCaCertificates(), onLog)
 
-        // Install CLI host helpers (`kucode-copy`, `kucode-paste`, `kucode-open`, `xdg-open`, `kucode-logs`)
+        // Install CLI host helpers (`kucode-copy`, `kucode-paste`, `kucode-open`, `xdg-open`, `kucode-logs`, `kucode-install-copilot`)
         val localBinDir = File(paths.rootfsDir, "usr/local/bin")
         ensureDirectoryWithMode(localBinDir, 0b111_101_101)
         for ((name, script) in PosixRuntimeConfig.buildHostCliHelperScripts()) {
@@ -247,6 +269,18 @@ internal class RuntimeInstaller(
             TarGzExtractor.DefaultPosixFsOps.chmod(target, 0b111_101_101)
         }
 
+        // Expose bundled Node.js v22 at /usr/local/bin/node unless the user replaced it with a regular binary
+        if (paths.openvscodeDir.exists()) {
+            val nodeLink = File(localBinDir, "node")
+            if (!Files.exists(nodeLink.toPath(), LinkOption.NOFOLLOW_LINKS) ||
+                Files.isSymbolicLink(nodeLink.toPath())
+            ) {
+                runCatching {
+                    TarGzExtractor.DefaultPosixFsOps.symlink("${PosixRuntimeConfig.GUEST_OPENVSCODE_DIR}/node", nodeLink)
+                }
+            }
+        }
+
         // Always sync the built-in extension (`kucode-tools`) so upgrades take effect
         // immediately without re-extracting the entire rootfs/openvscode-server archive
         if (paths.openvscodeDir.exists()) {
@@ -256,15 +290,25 @@ internal class RuntimeInstaller(
     }
 
     /**
-     * Seeds or merges spatial defaults ONLY into `data/Machine/settings.json` (never touching
-     * `user/User/settings.json`). If the existing file is non-strict JSON / JSONC or unreadable,
-     * it is left completely untouched; otherwise updates are replaced atomically.
+     * Seeds or merges spatial defaults ONLY into `user/Machine/settings.json` (matching
+     * `--user-data-dir /var/lib/kucode-vscode/user`, never touching `user/User/settings.json`).
+     * Migrates settings once from legacy `data/Machine/settings.json` if `user/Machine/settings.json`
+     * does not exist yet. If an existing file is non-strict JSON / JSONC or unreadable,
+     * it is preserved untouched; otherwise updates are replaced atomically.
      */
     fun ensureMachineVsCodeSettings(paths: PosixRuntimeConfig.Paths) {
         val target = paths.machineSettingsFile
-        val existing = if (Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+        val legacy = paths.legacyMachineSettingsFile
+        val targetExists = Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)
+        val sourceFile = when {
+            targetExists -> target
+            Files.isRegularFile(legacy.toPath(), LinkOption.NOFOLLOW_LINKS) -> legacy
+            else -> null
+        }
+
+        val existing = if (sourceFile != null) {
             try {
-                target.readText(Charsets.UTF_8)
+                sourceFile.readText(Charsets.UTF_8)
             } catch (e: IOException) {
                 onLog("[runtime] Skipped updating Machine settings.json (read error: ${e.message})")
                 return
@@ -275,10 +319,16 @@ internal class RuntimeInstaller(
 
         val merged = PosixRuntimeConfig.mergeDefaultVsCodeSettings(existing)
         if (merged == null) {
-            onLog("[runtime] Preserving existing Machine settings.json (could not parse as strict JSON / JSONC)")
+            if (!targetExists && existing != null) {
+                // Preserve legacy JSONC settings verbatim when migrating to user/Machine/settings.json
+                writeTextAtomically(target, existing, Charsets.UTF_8)
+                onLog("[runtime] Migrated legacy JSONC Machine settings.json to ${target.name}")
+            } else {
+                onLog("[runtime] Preserving existing Machine settings.json (could not parse as strict JSON / JSONC)")
+            }
             return
         }
-        if (merged != existing) {
+        if (!targetExists || merged != existing) {
             writeTextAtomically(target, merged, Charsets.UTF_8)
         }
     }

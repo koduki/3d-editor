@@ -124,4 +124,54 @@ class WorkspaceDocumentStoreTest {
             deleteTreeNoFollow(root)
         }
     }
+
+    @Test
+    fun isChildDocument_blocksTraversalPrefixConfusionBackslashesAndSymlinks() {
+        val root = Files.createTempDirectory("xr-doc-child").toFile()
+        try {
+            val workspace = File(root, "workspace").apply { mkdirs() }
+            val sub = File(workspace, "sub").apply { mkdirs() }
+            File(sub, "a.txt").writeText("ok")
+            val outside = File(root, "outside").apply { mkdirs() }
+            Files.createSymbolicLink(File(sub, "link").toPath(), outside.toPath())
+
+            assertTrue(WorkspaceDocumentStore.isChildDocument("workspace", "workspace/sub/a.txt"))
+            assertTrue(WorkspaceDocumentStore.isChildDocument("workspace/sub", "workspace/sub/a.txt"))
+            assertTrue(WorkspaceDocumentStore.isChildDocument("workspace/sub", "workspace/sub"))
+
+            assertFalse(WorkspaceDocumentStore.isChildDocument("workspace/sub", "workspace/sub2/a.txt"))
+            assertFalse(WorkspaceDocumentStore.isChildDocument("workspace/sub", "workspace/sub/../other.txt"))
+            assertFalse(WorkspaceDocumentStore.isChildDocument("workspace", "workspace/.."))
+            assertFalse(WorkspaceDocumentStore.isChildDocument("workspace", "workspace/."))
+            assertFalse(WorkspaceDocumentStore.isChildDocument("workspace", "other/a.txt"))
+            assertFalse(WorkspaceDocumentStore.isChildDocument("workspace", "workspace/a\\b"))
+            assertFalse(WorkspaceDocumentStore.isChildDocument("workspace", "workspace/a\u0000b"))
+
+            // Filesystem-backed overload also rejects symlinks
+            assertTrue(WorkspaceDocumentStore.isChildDocument(workspace, "workspace/sub", "workspace/sub/a.txt"))
+            assertFalse(WorkspaceDocumentStore.isChildDocument(workspace, "workspace/sub", "workspace/sub/link"))
+            assertFalse(WorkspaceDocumentStore.isChildDocument(workspace, "workspace/sub", "workspace/sub/../other.txt"))
+        } finally {
+            deleteTreeNoFollow(root)
+        }
+    }
+
+    @Test
+    fun create_handlesConcurrentSameNameRequestsAtomically() {
+        val root = Files.createTempDirectory("xr-doc-concurrent").toFile()
+        try {
+            val workspace = File(root, "workspace").apply { mkdirs() }
+            val createdNames = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+            val threads = (1..8).map {
+                Thread {
+                    val f = WorkspaceDocumentStore.create(workspace, workspace, isDirectory = false, displayName = "race.txt")
+                    createdNames.add(f.name)
+                }.apply { start() }
+            }
+            threads.forEach { it.join(5_000) }
+            assertEquals(8, createdNames.size)
+        } finally {
+            deleteTreeNoFollow(root)
+        }
+    }
 }

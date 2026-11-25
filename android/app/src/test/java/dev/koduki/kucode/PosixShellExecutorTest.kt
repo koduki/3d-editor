@@ -99,6 +99,26 @@ class PosixShellExecutorTest {
         }
     }
 
+    @Test
+    @Category(MediumTest::class)
+    fun execute_capsOutputAtMaxOutputCharsWithoutBlockingChild() = runBlocking {
+        val base = Files.createTempDirectory("kucode-shell-cap").toFile()
+        try {
+            val paths = testPaths(base)
+            val executor = PosixShellExecutor(
+                checkPrereqs = false,
+                maxOutputChars = 200,
+                commandBuilder = { _, command, _ -> listOf("sh", "-c", command) to emptyMap() },
+            )
+            val res = executor.execute(paths, "head -c 4096 /dev/zero | tr '\\0' 'A'")
+            assertEquals(0, res.exitCode)
+            assertTrue("Expected truncation notice in output: ${res.output}", res.output.contains("truncated"))
+            assertTrue("Output length should stay near cap, got ${res.output.length}", res.output.length < 400)
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
     private fun testPaths(base: File): PosixRuntimeConfig.Paths = PosixRuntimeConfig.Paths(
         runtimeRoot = File(base, "runtime"),
         workspaceDir = File(base, "workspace"),

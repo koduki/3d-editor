@@ -5,6 +5,7 @@ import android.webkit.JavascriptInterface
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
@@ -29,6 +30,10 @@ class BootHostBridge(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    fun close() {
+        scope.cancel()
+    }
+
     @JavascriptInterface
     fun getStatus(): String = runtimeManager.getStatus().toJsonString()
 
@@ -42,6 +47,7 @@ class BootHostBridge(
 
     @JavascriptInterface
     fun restartServer() {
+        ServerKeepAliveService.start(context)
         runtimeManager.restart()
     }
 

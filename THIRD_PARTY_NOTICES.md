@@ -22,14 +22,15 @@ The components below are executed as separate child processes via `ProcessBuilde
   - `lib/arm64-v8a/libproot-loader.so` (unbundled PRoot loader): **`GPL-2.0-or-later`**
 - **Modifications Made (GPL §5(a) Notice):**
   - On 2026-11-22, `scripts/build-proot-android.sh` applies a 1-line compatibility patch to `src/extension/ashmem_memfd/ashmem_memfd.c` prepending `#include <string.h>` so that Android NDK r27+ Clang compiles without implicit declaration errors for `strcmp`/`memset`.
-  - Both binaries are cross-compiled for `arm64-v8a` with `-Wl,-z,max-page-size=16384` and `PROOT_UNBUNDLE_LOADER` via `scripts/build-proot-android.sh`.
+  - On 2026-11-24, `scripts/build-proot-android.sh` patches `src/GNUmakefile` (`-z,noexecstack` → `-z,noexecstack,-z,max-page-size=16384,-z,common-page-size=16384`) so that the unbundled `libproot-loader.so` ELF `LOAD` segments are 16KB page-aligned alongside `libproot.so` for Android 15+ devices.
+  - Both binaries are cross-compiled for `arm64-v8a` with `-Wl,-z,max-page-size=16384,-z,common-page-size=16384` and `PROOT_UNBUNDLE_LOADER` via `scripts/build-proot-android.sh`.
 
 ### 1.2 OpenVSCode Server (`openvscode-server-linux-arm64.tgz`)
 - **Upstream:** https://github.com/gitpod-io/openvscode-server
 - **Version:** `openvscode-server-v1.109.5` (`linux-arm64`)
 - **Copyright:** Copyright (c) 2015 - present Microsoft Corporation; Gitpod contributors
 - **License:** MIT License (see `LICENSES/MIT-OpenVSCode.txt`; full `LICENSE.txt` and `ThirdPartyNotices.txt` are preserved verbatim inside `/opt/openvscode-server/`).
-- **Modifications:** Unmodified official release archive. KuCode installs its own MIT-licensed helper extension (`kucode-tools`) alongside it at runtime.
+- **Modifications:** Unmodified official release archive. KuCode installs its own MIT-licensed helper extension (`kucode-tools`, including its zero-dependency ACP v1 client) alongside it at runtime.
 
 ### 1.3 Debian GNU/Linux (`debian-arm64-rootfs.tgz`)
 - **Upstream:** https://www.debian.org/ (`debian:bookworm-slim`, `linux/arm64`)
@@ -41,13 +42,13 @@ The components below are executed as separate child processes via `ProcessBuilde
 
 ## 2. Linked Android Host Libraries (Apache License 2.0)
 
-The following libraries are linked into the Android host APK under the **Apache License 2.0** (see `LICENSES/Apache-2.0.txt`):
+The following direct and transitive libraries are linked into the Android host APK under the **Apache License 2.0** (see `LICENSES/Apache-2.0.txt`):
 
-- **AndroidX Core KTX** (`androidx.core:core-ktx:1.15.0`) — Copyright (C) The Android Open Source Project
+- **AndroidX Core KTX** (`androidx.core:core-ktx:1.15.0`) and transitive AndroidX/Guava `listenablefuture` artifacts — Copyright (C) The Android Open Source Project / Google LLC
 - **AndroidX Activity KTX** (`androidx.activity:activity-ktx:1.9.3`) — Copyright (C) The Android Open Source Project
 - **AndroidX AppCompat** (`androidx.appcompat:appcompat:1.7.0`) — Copyright (C) The Android Open Source Project
-- **KotlinX Coroutines Android** (`org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0`) — Copyright (C) JetBrains s.r.o. and Kotlin Programming Language contributors
-- **Apache Commons Compress** (`org.apache.commons:commons-compress:1.27.1`) — Copyright (C) The Apache Software Foundation
+- **Kotlin Standard Library & Coroutines** (`org.jetbrains.kotlin:kotlin-stdlib`, `org.jetbrains.kotlinx:kotlinx-coroutines-core`, `org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0`) — Copyright (C) JetBrains s.r.o. and Kotlin Programming Language contributors
+- **Apache Commons Compress & transitive Apache Commons libraries** (`org.apache.commons:commons-compress:1.27.1`, `commons-io:commons-io`, `commons-codec:commons-codec`, `org.apache.commons:commons-lang3`) — Copyright (C) The Apache Software Foundation
 
 *(Unit-test-only dependencies `junit:junit` [EPL-1.0] and `org.json:json` [Public Domain] are not packaged into the APK.)*
 

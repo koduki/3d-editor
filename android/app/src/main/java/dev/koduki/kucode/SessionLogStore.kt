@@ -14,6 +14,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Pure-JVM, crash-safe flight recorder storing all logs, stdout/stderr, WebView console/navigation
@@ -331,48 +334,74 @@ internal class SessionLogStore(
         }
     }
 
-    private val lock = Any()
+    private val lock = ReentrantLock()
     private val sessionsRootDir: File get() = File(diagnosticsRootDir, "sessions")
     private var active: ActiveSessionHandle? = null
 
     val latestAiReportFile: File get() = File(diagnosticsRootDir, "latest-ai-report.md")
     val previousAbnormalReportFile: File get() = File(diagnosticsRootDir, "previous-abnormal-ai-report.md")
 
-    fun currentSessionId(): String? = synchronized(lock) { active?.summary?.sessionId }
+    fun currentSessionId(): String? = lock.withLock { active?.summary?.sessionId }
 
-    fun currentSummary(): SessionSummary? = synchronized(lock) { active?.summary?.copy(isCurrentSession = true) }
+    fun currentSummary(): SessionSummary? = lock.withLock { active?.summary?.copy(isCurrentSession = true) }
 
     /**
      * Reconciles any sessions left in `RUNNING` state from prior OS process lifetimes using
      * Android's historical `ApplicationExitInfo` records (when available).
+     * Harvests OpenVSCode sub-logs for abnormally terminated sessions when [vscodeDataDir] is provided.
      * Returns the list of newly reconciled session summaries.
      */
     fun reconcileUnfinishedSessions(
         currentPid: Int,
         exitRecords: List<OsProcessExitRecord> = emptyList(),
-    ): List<SessionSummary> = synchronized(lock) {
+        vscodeDataDir: File? = null,
+    ): List<SessionSummary> = lock.withLock {
         ensureRootDirectories()
         val reconciled = mutableListOf<SessionSummary>()
         val dirs = sessionsRootDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }.orEmpty()
 
-        for (dir in dirs) {
-            if (active?.dir == dir) continue
+        val loaded = dirs.mapNotNull { dir ->
             val metaFile = File(dir, FILE_META)
-            if (!metaFile.isFile) continue
-            val rawSummary = runCatching {
+            if (!metaFile.isFile) return@mapNotNull null
+            val summary = runCatching {
                 SessionSummary.fromJsonObject(JSONObject(metaFile.readText(Charsets.UTF_8)))
-            }.getOrNull() ?: continue
+            }.getOrNull() ?: return@mapNotNull null
+            dir to summary
+        }
 
+        // Track consumed (pid, timestampMs) exit records so PID wraparound cannot double-attribute exits
+        val consumedExits = HashSet<Pair<Int, Long>>()
+
+        for (idx in loaded.indices) {
+            val (dir, rawSummary) = loaded[idx]
+            if (active?.dir == dir) continue
             if (rawSummary.status != SessionStatus.RUNNING) continue
             if (rawSummary.pid == currentPid && active != null) continue
+
+            val nextSamePidStartedAtMs = loaded
+                .drop(idx + 1)
+                .firstOrNull { (_, later) -> later.pid == rawSummary.pid && later.startedAtMs > rawSummary.startedAtMs }
+                ?.second
+                ?.startedAtMs
 
             // Recompute exact event statistics from flushed JSONL files on disk in case meta.json lagged
             val recoveredCounts = recomputeCountsFromDisk(dir, rawSummary)
 
-            // Match OS exit record by PID (picking closest timestamp >= startedAtMs if PID reused)
+            // Match OS exit record by PID within [startedAtMs - 5s, nextSamePidStartedAtMs]
+            // (kernel cannot reuse a PID before the prior process exits)
             val matchedExit = exitRecords
-                .filter { it.pid > 0 && it.pid == rawSummary.pid && it.timestampMs >= rawSummary.startedAtMs - 5_000L }
+                .filter { rec ->
+                    rec.pid > 0 &&
+                        rec.pid == rawSummary.pid &&
+                        (rec.pid to rec.timestampMs) !in consumedExits &&
+                        rec.timestampMs >= rawSummary.startedAtMs - 5_000L &&
+                        (nextSamePidStartedAtMs == null || rec.timestampMs <= nextSamePidStartedAtMs)
+                }
                 .minByOrNull { kotlin.math.abs(it.timestampMs - recoveredCounts.updatedAtMs) }
+
+            if (matchedExit != null) {
+                consumedExits.add(matchedExit.pid to matchedExit.timestampMs)
+            }
 
             val (finalStatus, category, exitSummary, endMs) = classifyReconciledExit(recoveredCounts, matchedExit)
 
@@ -403,6 +432,19 @@ internal class SessionLogStore(
                 )
             }
 
+            if (vscodeDataDir != null && !File(dir, FILE_VSCODE_SUBLOGS).isFile) {
+                runCatching {
+                    val sub = extractOpenVsCodeSubLogs(
+                        vscodeDataDir = vscodeDataDir,
+                        minTimestampMs = recoveredCounts.startedAtMs - 10_000L,
+                        maxTimestampMs = endMs + 10_000L,
+                    )
+                    if (sub.isNotBlank()) {
+                        writeTextAtomically(File(dir, FILE_VSCODE_SUBLOGS), sub, Charsets.UTF_8, worldReadable = true)
+                    }
+                }
+            }
+
             val updatedSummary = recoveredCounts.copy(
                 status = finalStatus,
                 exitCategory = category,
@@ -417,9 +459,12 @@ internal class SessionLogStore(
             writeSummaryAtomically(dir, updatedSummary)
             reconciled.add(updatedSummary)
 
-            if (finalStatus == SessionStatus.ENDED_ABNORMALLY) {
-                runCatching {
-                    val report = buildAiMarkdownReportInternal(dir, updatedSummary)
+            runCatching {
+                val report = buildAiMarkdownReportInternal(dir, updatedSummary)
+                if (active == null) {
+                    writeTextAtomically(latestAiReportFile, report, Charsets.UTF_8, worldReadable = true)
+                }
+                if (finalStatus == SessionStatus.ENDED_ABNORMALLY) {
                     writeTextAtomically(previousAbnormalReportFile, report, Charsets.UTF_8, worldReadable = true)
                 }
             }
@@ -431,7 +476,7 @@ internal class SessionLogStore(
     fun startSession(
         pid: Int,
         env: SessionEnvMetadata,
-    ): SessionSummary = synchronized(lock) {
+    ): SessionSummary = lock.withLock {
         active?.let { existing ->
             if (existing.summary.status == SessionStatus.RUNNING) {
                 return existing.summary.copy(isCurrentSession = true)
@@ -517,7 +562,7 @@ internal class SessionLogStore(
         level: EventLevel,
         source: String,
         message: String,
-    ) = synchronized(lock) {
+    ) = lock.withLock {
         val handle = active ?: return
         if (handle.summary.status != SessionStatus.RUNNING) return
         recordEventLocked(handle, level, source, message, forceMetaPersist = false)
@@ -534,7 +579,7 @@ internal class SessionLogStore(
         activeView: String? = null,
         windowFocus: Boolean? = null,
         incrementExternalUrl: Boolean = false,
-    ) = synchronized(lock) {
+    ) = lock.withLock {
         val handle = active ?: return
         if (handle.summary.status != SessionStatus.RUNNING) return
         val now = clockMs()
@@ -557,7 +602,7 @@ internal class SessionLogStore(
         writeSummaryAtomically(handle.dir, updated)
     }
 
-    fun recordMetric(snapshot: MetricSnapshot) = synchronized(lock) {
+    fun recordMetric(snapshot: MetricSnapshot) = lock.withLock {
         val handle = active ?: return
         if (handle.summary.status != SessionStatus.RUNNING) return
         if (handle.metricsCountWritten >= maxMetricsSnapshots) return
@@ -579,59 +624,118 @@ internal class SessionLogStore(
 
     /**
      * Harvests bounded tails of openvscode-server's internal file logs (`remoteagent.log`,
-     * `ptyhost.log`, `exthost.log`) into the session directory so Extension Host and PTY issues
-     * that never reach stdout are preserved for AI debugging.
+     * `ptyhost.log`, `remoteexthost.log`, `exthostN/exthost.log`) into the session directory so
+     * Extension Host and PTY issues that never reach stdout are preserved for AI debugging.
      */
-    fun harvestOpenVsCodeSubLogs(vscodeDataDir: File, targetSessionId: String? = null) = synchronized(lock) {
-        val dir = when {
-            targetSessionId != null -> resolveSafeSessionDir(targetSessionId) ?: return
-            active != null -> active!!.dir
-            else -> return
+    fun harvestOpenVsCodeSubLogs(vscodeDataDir: File, targetSessionId: String? = null) {
+        val (dir, startedAtMs) = lock.withLock {
+            when {
+                targetSessionId != null -> {
+                    val d = resolveSafeSessionDir(targetSessionId) ?: return
+                    val meta = runCatching {
+                        SessionSummary.fromJsonObject(JSONObject(File(d, FILE_META).readText(Charsets.UTF_8)))
+                    }.getOrNull()
+                    d to (meta?.startedAtMs ?: 0L)
+                }
+                active != null -> active!!.dir to active!!.summary.startedAtMs
+                else -> return
+            }
         }
-        val harvested = extractOpenVsCodeSubLogs(vscodeDataDir)
+        val harvested = extractOpenVsCodeSubLogs(
+            vscodeDataDir = vscodeDataDir,
+            minTimestampMs = if (startedAtMs > 0L) startedAtMs - 10_000L else 0L,
+        )
         if (harvested.isNotBlank()) {
-            writeTextAtomically(File(dir, FILE_VSCODE_SUBLOGS), harvested, Charsets.UTF_8, worldReadable = true)
+            runCatching {
+                writeTextAtomically(File(dir, FILE_VSCODE_SUBLOGS), harvested, Charsets.UTF_8, worldReadable = true)
+            }
         }
+    }
+
+    /**
+     * Refreshes `latest-ai-report.md` on disk for the active session so CLI tools reading
+     * `/var/log/kucode/latest-ai-report.md` directly see up-to-date state.
+     */
+    fun refreshLatestAiReport(vscodeDataDir: File? = null) {
+        if (currentSessionId() == null) return
+        renderSessionBundle("latest", "ai", vscodeDataDir)
     }
 
     /**
      * Records an uncaught JVM exception synchronously and marks the active session as
      * [SessionStatus.ENDED_ABNORMALLY] before process death.
+     * Uses bounded [ReentrantLock.tryLock] and skips heap-heavy report rendering on OOM.
      */
     fun recordUncaughtCrash(
         threadName: String,
         throwable: Throwable,
         finalMetric: MetricSnapshot? = null,
         vscodeDataDir: File? = null,
-    ) = synchronized(lock) {
-        val handle = active ?: return
-        if (finalMetric != null) {
-            runCatching { recordMetric(finalMetric) }
+    ) {
+        val acquired = try {
+            lock.tryLock(CRASH_LOCK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
         }
-        val stack = LogRedactor.redact(throwable.stackTraceToString())
-        val headline = "${throwable.javaClass.name}: ${LogRedactor.redact(throwable.message.orEmpty())}".trimEnd(':', ' ')
-        recordEventLocked(
-            handle = handle,
-            level = EventLevel.FATAL,
-            source = "crash.jvm",
-            rawMessage = "Uncaught exception on thread '$threadName': $headline",
-            forceMetaPersist = false,
-        )
-        appendTraceToDisk(handle.dir, "=== Uncaught JVM Exception (thread=$threadName) ===\n$stack")
-        if (vscodeDataDir != null) {
-            runCatching {
-                val sub = extractOpenVsCodeSubLogs(vscodeDataDir)
-                if (sub.isNotBlank()) {
-                    writeTextAtomically(File(handle.dir, FILE_VSCODE_SUBLOGS), sub, Charsets.UTF_8, worldReadable = true)
+        if (!acquired) return
+        try {
+            val handle = active ?: return
+            val isOom = throwable is OutOfMemoryError || throwable.cause is OutOfMemoryError
+            val headline = runCatching {
+                "${throwable.javaClass.name}: ${LogRedactor.redact(throwable.message.orEmpty())}".trimEnd(':', ' ')
+            }.getOrDefault(throwable.javaClass.name)
+
+            if (isOom) {
+                runCatching {
+                    appendTraceToDisk(
+                        handle.dir,
+                        "=== Uncaught JVM OutOfMemoryError (thread=$threadName) ===\n$headline",
+                    )
+                }
+                finalizeSessionLocked(
+                    handle = handle,
+                    status = SessionStatus.ENDED_ABNORMALLY,
+                    exitCategory = "CRASH_JVM_OOM",
+                    exitSummary = "Uncaught OOM on $threadName: $headline".take(240),
+                    skipMarkdownBuild = true,
+                )
+                return
+            }
+
+            if (finalMetric != null) {
+                runCatching { recordMetric(finalMetric) }
+            }
+            val stack = LogRedactor.redact(throwable.stackTraceToString())
+            recordEventLocked(
+                handle = handle,
+                level = EventLevel.FATAL,
+                source = "crash.jvm",
+                rawMessage = "Uncaught exception on thread '$threadName': $headline",
+                forceMetaPersist = false,
+            )
+            appendTraceToDisk(handle.dir, "=== Uncaught JVM Exception (thread=$threadName) ===\n$stack")
+            if (vscodeDataDir != null) {
+                runCatching {
+                    val sub = extractOpenVsCodeSubLogs(
+                        vscodeDataDir = vscodeDataDir,
+                        minTimestampMs = handle.summary.startedAtMs - 10_000L,
+                    )
+                    if (sub.isNotBlank()) {
+                        writeTextAtomically(File(handle.dir, FILE_VSCODE_SUBLOGS), sub, Charsets.UTF_8, worldReadable = true)
+                    }
                 }
             }
+            finalizeSessionLocked(
+                handle = handle,
+                status = SessionStatus.ENDED_ABNORMALLY,
+                exitCategory = "CRASH_JVM",
+                exitSummary = "Uncaught exception on $threadName: $headline".take(240),
+                skipMarkdownBuild = false,
+            )
+        } finally {
+            lock.unlock()
         }
-        finalizeSessionLocked(
-            handle = handle,
-            status = SessionStatus.ENDED_ABNORMALLY,
-            exitCategory = "CRASH_JVM",
-            exitSummary = "Uncaught exception on $threadName: $headline".take(240),
-        )
     }
 
     /**
@@ -643,7 +747,7 @@ internal class SessionLogStore(
         exitCategory: String = if (abnormal) "ABNORMAL_RUNTIME" else "CLEAN",
         finalMetric: MetricSnapshot? = null,
         vscodeDataDir: File? = null,
-    ) = synchronized(lock) {
+    ) = lock.withLock {
         val handle = active ?: return
         if (handle.summary.status != SessionStatus.RUNNING) return
         if (finalMetric != null) {
@@ -651,7 +755,10 @@ internal class SessionLogStore(
         }
         if (vscodeDataDir != null) {
             runCatching {
-                val sub = extractOpenVsCodeSubLogs(vscodeDataDir)
+                val sub = extractOpenVsCodeSubLogs(
+                    vscodeDataDir = vscodeDataDir,
+                    minTimestampMs = handle.summary.startedAtMs - 10_000L,
+                )
                 if (sub.isNotBlank()) {
                     writeTextAtomically(File(handle.dir, FILE_VSCODE_SUBLOGS), sub, Charsets.UTF_8, worldReadable = true)
                 }
@@ -669,10 +776,11 @@ internal class SessionLogStore(
             status = if (abnormal) SessionStatus.ENDED_ABNORMALLY else SessionStatus.ENDED_CLEANLY,
             exitCategory = exitCategory,
             exitSummary = LogRedactor.redact(reason).take(240),
+            skipMarkdownBuild = false,
         )
     }
 
-    fun listSessions(): List<SessionSummary> = synchronized(lock) {
+    fun listSessions(): List<SessionSummary> = lock.withLock {
         ensureRootDirectories()
         val activeId = active?.summary?.sessionId
         val result = mutableListOf<SessionSummary>()
@@ -716,7 +824,7 @@ internal class SessionLogStore(
     /**
      * Resolves special aliases (`latest`, `current`, `prev`, `prev-abnormal`) or an exact `sessionId`.
      */
-    fun resolveSessionSummary(selector: String): SessionSummary? = synchronized(lock) {
+    fun resolveSessionSummary(selector: String): SessionSummary? = lock.withLock {
         val clean = selector.trim()
         val sessions = listSessions()
         if (sessions.isEmpty()) return null
@@ -734,17 +842,25 @@ internal class SessionLogStore(
         selector: String = "latest",
         format: String = "ai",
         vscodeDataDir: File? = null,
-    ): String? = synchronized(lock) {
-        val target = resolveSessionSummary(selector) ?: return null
-        val dir = resolveSafeSessionDir(target.sessionId) ?: return null
+    ): String? {
+        val (target, dir) = lock.withLock {
+            val resolved = resolveSessionSummary(selector) ?: return null
+            val sessionDir = resolveSafeSessionDir(resolved.sessionId) ?: return null
+            if (resolved.isCurrentSession) {
+                active?.let { writeSummaryAtomically(it.dir, it.summary) }
+            }
+            resolved to sessionDir
+        }
         if (target.isCurrentSession && vscodeDataDir != null) {
             runCatching {
-                val sub = extractOpenVsCodeSubLogs(vscodeDataDir)
+                val sub = extractOpenVsCodeSubLogs(
+                    vscodeDataDir = vscodeDataDir,
+                    minTimestampMs = target.startedAtMs - 10_000L,
+                )
                 if (sub.isNotBlank()) {
                     writeTextAtomically(File(dir, FILE_VSCODE_SUBLOGS), sub, Charsets.UTF_8, worldReadable = true)
                 }
             }
-            active?.let { writeSummaryAtomically(it.dir, it.summary) }
         }
         return when (format.lowercase(Locale.US)) {
             "raw", "text", "timeline" -> buildRawTimelineReportInternal(dir, target)
@@ -763,7 +879,7 @@ internal class SessionLogStore(
         selector: String,
         exportDir: File,
         vscodeDataDir: File? = null,
-    ): File? = synchronized(lock) {
+    ): File? {
         val target = resolveSessionSummary(selector) ?: return null
         val markdown = renderSessionBundle(target.sessionId, format = "ai", vscodeDataDir = vscodeDataDir) ?: return null
         ensureDirectoryWithMode(exportDir, 0b111_101_101)
@@ -864,6 +980,7 @@ internal class SessionLogStore(
         status: SessionStatus,
         exitCategory: String,
         exitSummary: String,
+        skipMarkdownBuild: Boolean = false,
     ) {
         val now = clockMs()
         val finalSummary = handle.summary.copy(
@@ -877,11 +994,13 @@ internal class SessionLogStore(
         handle.summary = finalSummary
         handle.closeStreams()
         writeSummaryAtomically(handle.dir, finalSummary)
-        runCatching {
-            val md = buildAiMarkdownReportInternal(handle.dir, finalSummary)
-            writeTextAtomically(latestAiReportFile, md, Charsets.UTF_8, worldReadable = true)
-            if (status == SessionStatus.ENDED_ABNORMALLY) {
-                writeTextAtomically(previousAbnormalReportFile, md, Charsets.UTF_8, worldReadable = true)
+        if (!skipMarkdownBuild) {
+            runCatching {
+                val md = buildAiMarkdownReportInternal(handle.dir, finalSummary)
+                writeTextAtomically(latestAiReportFile, md, Charsets.UTF_8, worldReadable = true)
+                if (status == SessionStatus.ENDED_ABNORMALLY) {
+                    writeTextAtomically(previousAbnormalReportFile, md, Charsets.UTF_8, worldReadable = true)
+                }
             }
         }
         active = null
@@ -939,9 +1058,21 @@ internal class SessionLogStore(
                 "warnings=${summary.warnCount}, knownBenignFiltered=${summary.benignNoiseCount}`",
         )
         if (summary.benignNoiseCount > 0) {
+            val benignCategories = (headEvents + prevTailEvents + tailEvents)
+                .mapNotNull { it.benignNote }
+                .groupingBy { it }
+                .eachCount()
+                .entries
+                .sortedByDescending { it.value }
+                .take(6)
+                .joinToString(", ") { "`${it.key}` x${it.value}" }
+            val detail = if (benignCategories.isNotEmpty()) {
+                benignCategories
+            } else {
+                "`Android/Chromium/OSS OpenVSCode benign logs`"
+            }
             sb.appendLine(
-                "- Note for AI: Known benign Android/OSS OpenVSCode messages (`Unable to retrieve mac address`, " +
-                    "`vsda_bg.wasm` / `vsda.js` 404) occurred `${summary.benignNoiseCount}` time(s) and are harmless.",
+                "- Note for AI: Known benign messages ($detail) occurred `${summary.benignNoiseCount}` time(s) and are harmless.",
             )
         }
         if (alertEvents.isEmpty()) {
@@ -1014,7 +1145,7 @@ internal class SessionLogStore(
 
         // Section 5: OpenVSCode Internal Sub-Logs
         if (subLogs.isNotBlank()) {
-            sb.appendLine("## 5. OpenVSCode 内部ログ抜粋 (remoteagent / ptyhost / exthost)")
+            sb.appendLine("## 5. OpenVSCode 内部ログ抜粋 (remoteagent / ptyhost / remoteexthost)")
             sb.appendLine("```text")
             sb.appendLine(subLogs.trim())
             sb.appendLine("```")
@@ -1069,7 +1200,10 @@ internal class SessionLogStore(
         val metrics = readMetricsJsonl(File(dir, FILE_METRICS))
 
         val lastHeadSeq = headEvents.lastOrNull()?.seq ?: 0
-        val mergedEvents = headEvents + (prevTailEvents + tailEvents).filter { it.seq > lastHeadSeq }
+        val boundedTail = (prevTailEvents + tailEvents)
+            .filter { it.seq > lastHeadSeq }
+            .takeLast(MAX_REPORT_TAIL_EVENTS)
+        val mergedEvents = headEvents + boundedTail
 
         return JSONObject()
             .put("meta", summary.toJsonObject())
@@ -1078,7 +1212,7 @@ internal class SessionLogStore(
             .put("events", JSONArray().apply { mergedEvents.forEach { put(it.toJsonObject()) } })
             .put("exitTrace", readOptionalText(File(dir, FILE_EXIT_TRACE)))
             .put("vscodeSubLogs", readOptionalText(File(dir, FILE_VSCODE_SUBLOGS)))
-            .toString(2)
+            .toString()
     }
 
     private fun recomputeCountsFromDisk(dir: File, base: SessionSummary): SessionSummary {
@@ -1275,7 +1409,13 @@ internal class SessionLogStore(
         val combined = if (existing.isBlank()) {
             sanitized + "\n"
         } else {
-            (existing.trimEnd() + "\n\n" + sanitized).takeLast(MAX_TRACE_CHARS) + "\n"
+            // Preserve the top of the trace (exception class/message and main-thread ANR frames)
+            val merged = existing.trimEnd() + "\n\n" + sanitized
+            if (merged.length <= MAX_TRACE_CHARS) {
+                merged + "\n"
+            } else {
+                merged.take(MAX_TRACE_CHARS) + "\n...[trace truncated]\n"
+            }
         }
         runCatching {
             writeTextAtomically(traceFile, combined, Charsets.UTF_8, worldReadable = true)
@@ -1289,7 +1429,13 @@ internal class SessionLogStore(
             ?.sortedByDescending { it.name }
             .orEmpty()
 
-        val keepLimit = (maxStoredSessions - if (activeDirName != null) 1 else 0).coerceAtLeast(1)
+        val usable = runCatching { diagnosticsRootDir.usableSpace }.getOrDefault(Long.MAX_VALUE)
+        val effectiveMax = if (usable in 1L until LOW_DISK_THRESHOLD_BYTES) {
+            minOf(maxStoredSessions, LOW_DISK_MAX_SESSIONS)
+        } else {
+            maxStoredSessions
+        }
+        val keepLimit = (effectiveMax - if (activeDirName != null) 1 else 0).coerceAtLeast(1)
         if (dirs.size > keepLimit) {
             for (stale in dirs.drop(keepLimit)) {
                 runCatching { deleteTreeNoFollow(stale) }
@@ -1328,10 +1474,14 @@ internal class SessionLogStore(
         internal const val DEFAULT_MAX_TAIL_BYTES = 768L * 1024L
         internal const val DEFAULT_MAX_ALERT_EVENTS = 300
         internal const val DEFAULT_MAX_METRICS_SNAPSHOTS = 360
+        private const val LOW_DISK_THRESHOLD_BYTES = 256L * 1024L * 1024L
+        private const val LOW_DISK_MAX_SESSIONS = 3
+        private const val CRASH_LOCK_TIMEOUT_MS = 1_500L
         private const val MAX_REPORT_TAIL_EVENTS = 450
         private const val MAX_SINGLE_MESSAGE_CHARS = 4_096
         private const val MAX_TRACE_CHARS = 96 * 1024
         private const val MAX_SUBLOG_BYTES_PER_FILE = 8 * 1024
+        private const val MAX_EXTHOST_EXTRA_LOGS = 5
         private const val META_FLUSH_INTERVAL_MS = 2_000L
 
         private const val FILE_META = "meta.json"
@@ -1353,22 +1503,54 @@ internal class SessionLogStore(
             message.contains("vsda_bg.wasm", ignoreCase = true) ||
                 message.contains("node_modules/vsda/rust/web/vsda.js", ignoreCase = true) ->
                 "benign: proprietary vsda absent in OSS openvscode-server"
+            message.contains("WindowOnBackDispatcher", ignoreCase = true) ||
+                message.contains("OnBackInvokedCallback is not enabled", ignoreCase = true) ->
+                "benign: Android WindowOnBackDispatcher IME/back callback chatter"
+            message.contains("OpenGLRenderer", ignoreCase = true) &&
+                (message.contains("Unable to match the desired swap behavior", ignoreCase = true) ||
+                    message.contains("EGL_SWAP_BEHAVIOR", ignoreCase = true)) ->
+                "benign: Android OpenGLRenderer swap behavior notice"
+            message.contains("ResizeObserver loop", ignoreCase = true) ->
+                "benign: Chromium ResizeObserver layout notification"
+            message.contains("addon-ligatures", ignoreCase = true) ->
+                "benign: optional xterm addon-ligatures absent in OSS web build"
+            message.contains("[DEP0040]", ignoreCase = true) ||
+                (message.contains("punycode", ignoreCase = true) && message.contains("deprecated", ignoreCase = true)) ->
+                "benign: Node.js DEP0040 punycode deprecation notice"
             else -> null
         }
 
-        internal fun extractOpenVsCodeSubLogs(vscodeDataDir: File): String {
+        internal fun extractOpenVsCodeSubLogs(
+            vscodeDataDir: File,
+            minTimestampMs: Long = 0L,
+            maxTimestampMs: Long = Long.MAX_VALUE,
+        ): String {
             val candidates = listOf(
+                File(vscodeDataDir, "user/logs"),
                 File(vscodeDataDir, "data/logs"),
                 File(vscodeDataDir, "logs"),
             )
-            val logsBase = candidates.firstOrNull { it.isDirectory } ?: return ""
-            val latestRunDir = logsBase.listFiles()
-                ?.filter { it.isDirectory && !Files.isSymbolicLink(it.toPath()) }
-                ?.maxByOrNull { it.name }
-                ?: return ""
+            val allRunDirs = candidates
+                .filter { it.isDirectory && !Files.isSymbolicLink(it.toPath()) }
+                .flatMap { base ->
+                    base.listFiles()
+                        ?.filter { it.isDirectory && !Files.isSymbolicLink(it.toPath()) }
+                        .orEmpty()
+                }
+            if (allRunDirs.isEmpty()) return ""
+
+            val filteredRunDirs = if (minTimestampMs > 0L) {
+                allRunDirs.filter { dir ->
+                    val mtime = dir.lastModified()
+                    mtime == 0L || (mtime >= minTimestampMs && mtime <= maxTimestampMs)
+                }
+            } else {
+                allRunDirs
+            }
+            val latestRunDir = filteredRunDirs.maxByOrNull { it.name } ?: return ""
 
             val filesToCollect = mutableListOf<Pair<String, File>>()
-            for (rootLog in listOf("remoteagent.log", "ptyhost.log", "sharedprocess.log")) {
+            for (rootLog in listOf("remoteagent.log", "ptyhost.log", "remoteexthost.log", "remoteCLI.log", "sharedprocess.log")) {
                 val f = File(latestRunDir, rootLog)
                 if (f.isFile && !Files.isSymbolicLink(f.toPath())) {
                     filesToCollect.add(rootLog to f)
@@ -1378,9 +1560,13 @@ internal class SessionLogStore(
                 ?.filter { it.isDirectory && it.name.startsWith("exthost") && !Files.isSymbolicLink(it.toPath()) }
                 ?.sortedBy { it.name }
                 ?.forEach { extDir ->
-                    val extLog = File(extDir, "exthost.log")
-                    if (extLog.isFile && !Files.isSymbolicLink(extLog.toPath())) {
-                        filesToCollect.add("${extDir.name}/exthost.log" to extLog)
+                    val extLogs = extDir.listFiles()
+                        ?.filter { it.isFile && it.name.endsWith(".log") && !Files.isSymbolicLink(it.toPath()) && it.length() > 0L }
+                        ?.sortedWith(compareBy<File>({ if (it.name == "exthost.log") 0 else 1 }, { it.name }))
+                        ?.take(MAX_EXTHOST_EXTRA_LOGS)
+                        .orEmpty()
+                    for (extLog in extLogs) {
+                        filesToCollect.add("${extDir.name}/${extLog.name}" to extLog)
                     }
                 }
 

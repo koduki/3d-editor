@@ -17,6 +17,8 @@ class HardwareShortcutRouter {
         ctrl = event.isCtrlPressed,
         meta = event.isMetaPressed,
         alt = event.isAltPressed,
+        shift = event.isShiftPressed,
+        repeatCount = event.repeatCount,
     )
 
     fun isDiagnosticsToggleKey(
@@ -25,10 +27,14 @@ class HardwareShortcutRouter {
         ctrl: Boolean,
         meta: Boolean,
         alt: Boolean,
+        shift: Boolean = false,
+        repeatCount: Int = 0,
     ): Boolean {
         return action == KeyEvent.ACTION_DOWN &&
+            repeatCount == 0 &&
             (ctrl || meta) &&
             alt &&
+            !shift &&
             keyCode == KeyEvent.KEYCODE_D
     }
 }

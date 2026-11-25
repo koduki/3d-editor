@@ -1,6 +1,9 @@
 'use strict';
 const vscode = require('vscode');
 const http = require('http');
+const { AcpChatViewProvider } = require('./acp-webview');
+
+let acpProviderInstance = null;
 
 const OST_COLORS = {
   'editor.background': '#000000',
@@ -271,9 +274,10 @@ async function terminalPasteCommand() {
   }
 }
 
-async function openTextTabAndCopy(content, language, copiedMessage) {
+async function openTextTabAndCopy(content, language, copiedMessage, options) {
+  const preview = Boolean(options && options.preview);
   const doc = await vscode.workspace.openTextDocument({ content, language });
-  await vscode.window.showTextDocument(doc, { preview: false });
+  await vscode.window.showTextDocument(doc, { preview });
   let copied = false;
   try {
     await writeHostClipboard(content);
@@ -299,7 +303,8 @@ async function runDiagnosticsCommand() {
         await openTextTabAndCopy(
           report,
           'markdown',
-          '実機診断レポートを開き、クリップボードへコピーしました（そのまま貼り付けできます）'
+          '実機診断レポートを開き、クリップボードへコピーしました（そのまま貼り付けできます）',
+          { preview: true }
         );
       } catch (err) {
         vscode.window.showErrorMessage('実機チェックに失敗しました: ' + err.message);
@@ -457,8 +462,52 @@ async function requestStorageCommand() {
   }
 }
 
+async function openAcpChatCommand() {
+  try {
+    await vscode.commands.executeCommand('workbench.view.extension.kucode');
+  } catch (_) {
+    // Ignore when workbench view container command is unavailable
+  }
+  try {
+    await vscode.commands.executeCommand('kucode.acpChatView.focus');
+  } catch (_) {
+    // Ignore when webview view focus command is unavailable
+  }
+}
+
+async function sendSelectionToAcpCommand() {
+  await openAcpChatCommand();
+  if (acpProviderInstance) {
+    await acpProviderInstance.attachActiveSelection();
+  } else {
+    vscode.window.showInformationMessage('AI エージェント (ACP) パネルを初期化中です');
+  }
+}
+
+async function setupCopilotCliCommand() {
+  if (acpProviderInstance) {
+    await acpProviderInstance.openInTerminal('kucode-install-copilot && copilot login', 'KuCode: Copilot CLI Setup');
+    return;
+  }
+  if (typeof vscode.window.createTerminal === 'function') {
+    const term = vscode.window.createTerminal({ name: 'KuCode: Copilot CLI Setup' });
+    term.show(false);
+    term.sendText('kucode-install-copilot && copilot login', true);
+  }
+}
+
 async function openMenuCommand() {
   const items = [
+    {
+      label: '$(comment-discussion) AI エージェント (ACP) チャットを開く',
+      description: 'Copilot CLI / Gemini / Claude / Codex / OpenCode を OST 純黒チャットで利用',
+      action: openAcpChatCommand,
+    },
+    {
+      label: '$(sparkle) GitHub Copilot CLI (ACP) をインストール / ログイン',
+      description: '統合ターミナルで kucode-install-copilot && copilot login を実行',
+      action: setupCopilotCliCommand,
+    },
     {
       label: '$(copy) エディタをコピー (Ctrl+C)',
       description: '選択テキストまたは現在行を Android クリップボードへコピー',
@@ -536,6 +585,18 @@ async function openMenuCommand() {
 
 function createSidebarMenuProvider() {
   const entries = [
+    {
+      label: 'AI エージェント (ACP)',
+      description: 'Copilot / Gemini / Claude',
+      icon: 'comment-discussion',
+      command: 'kucode.openAcpChat',
+    },
+    {
+      label: 'Copilot CLI セットアップ',
+      description: 'インストール & ログイン',
+      icon: 'sparkle',
+      command: 'kucode.setupCopilotCli',
+    },
     {
       label: 'エディタをコピー',
       description: 'Ctrl+C',
@@ -631,7 +692,16 @@ function createSidebarMenuProvider() {
 }
 
 function activate(context) {
+  acpProviderInstance = new AcpChatViewProvider({
+    reportHostEvent,
+    writeHostClipboard,
+    extensionVersion: '0.9.0',
+  });
+
   context.subscriptions.push(
+    vscode.commands.registerCommand('kucode.openAcpChat', openAcpChatCommand),
+    vscode.commands.registerCommand('kucode.sendSelectionToAcp', sendSelectionToAcpCommand),
+    vscode.commands.registerCommand('kucode.setupCopilotCli', setupCopilotCliCommand),
     vscode.commands.registerCommand('kucode.openMenu', openMenuCommand),
     vscode.commands.registerCommand('kucode.editorCopy', editorCopyCommand),
     vscode.commands.registerCommand('kucode.editorCut', editorCutCommand),
@@ -646,8 +716,24 @@ function activate(context) {
     vscode.commands.registerCommand('kucode.selectOpticalTheme', selectOpticalThemeCommand),
     vscode.commands.registerCommand('kucode.openManager', openManagerCommand),
     vscode.commands.registerCommand('kucode.requestStorage', requestStorageCommand),
-    vscode.window.registerTreeDataProvider('kucode.menuView', createSidebarMenuProvider())
+    vscode.window.registerTreeDataProvider('kucode.menuView', createSidebarMenuProvider()),
+    {
+      dispose() {
+        if (acpProviderInstance) {
+          acpProviderInstance.dispose().catch(() => {});
+          acpProviderInstance = null;
+        }
+      },
+    }
   );
+
+  if (typeof vscode.window.registerWebviewViewProvider === 'function') {
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider('kucode.acpChatView', acpProviderInstance, {
+        webviewOptions: { retainContextWhenHidden: true },
+      })
+    );
+  }
 
   if (typeof vscode.window.onDidChangeWindowState === 'function') {
     context.subscriptions.push(
@@ -685,19 +771,26 @@ function activate(context) {
 
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusItem.text = '$(pulse) KuCode';
-  statusItem.tooltip = 'KuCode コピー/貼り付け・実機チェック・セッション診断履歴・表示サイズ・光学テーマ・管理画面を開く';
+  statusItem.tooltip = 'KuCode AI エージェント (ACP)・コピー/貼り付け・実機チェック・セッション診断履歴・表示サイズ・光学テーマ・管理画面を開く';
   statusItem.command = 'kucode.openMenu';
   statusItem.show();
   context.subscriptions.push(statusItem);
 }
 
-function deactivate() {}
+function deactivate() {
+  if (acpProviderInstance) {
+    const inst = acpProviderInstance;
+    acpProviderInstance = null;
+    return inst.dispose().catch(() => {});
+  }
+}
 
 module.exports = {
   activate,
   deactivate,
   OST_COLORS,
   VST_COLORS,
+  AcpChatViewProvider,
   callHost,
   reportHostEvent,
   writeHostClipboard,

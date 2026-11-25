@@ -143,6 +143,8 @@ PROOT_SRC="$WORK_DIR/proot-${PROOT_VERSION}"
 
 # NDK r27+ Clang treats implicit strcmp/memset declarations as errors
 sed -i '1i #include <string.h>' "$PROOT_SRC/src/extension/ashmem_memfd/ashmem_memfd.c"
+# Ensure unbundled loader ELF segments are 16KB page-aligned for Android 15+ devices
+sed -i 's/-z,noexecstack/-z,noexecstack,-z,max-page-size=16384,-z,common-page-size=16384/g' "$PROOT_SRC/src/GNUmakefile"
 
 echo "[proot] Compiling proot + unbundled loader for Android arm64-v8a..."
 (
@@ -159,7 +161,7 @@ echo "[proot] Compiling proot + unbundled loader for Android arm64-v8a..."
     PROOT_UNBUNDLE_LOADER="." \
     CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -DARG_MAX=131072 -DVERSION=\\\"${PROOT_VERSION}\\\" -I. -I${TALLOC_PREFIX}/include" \
     CFLAGS="-Wall -Wextra -O2 -fPIE -DPROOT_UNBUNDLE_LOADER=\\\".\\\"" \
-    LDFLAGS="-L${TALLOC_PREFIX}/lib -Wl,-Bstatic -ltalloc -Wl,-Bdynamic -Wl,-z,noexecstack -Wl,-z,max-page-size=16384" \
+    LDFLAGS="-L${TALLOC_PREFIX}/lib -Wl,-Bstatic -ltalloc -Wl,-Bdynamic -Wl,-z,noexecstack -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" \
     proot loader/loader
 )
 
@@ -170,7 +172,26 @@ cp "$PROOT_SRC/src/loader/loader" "$OUT_DIR/libproot-loader.so"
 "$STRIP" "$OUT_DIR/libproot-loader.so"
 chmod 755 "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"
 
-echo "[proot] Verifying built binaries..."
+echo "[proot] Verifying built binaries & 16KB ELF LOAD alignment..."
 file "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"
 "$READELF" -d "$OUT_DIR/libproot.so" | grep NEEDED || true
+for bin in "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"; do
+  "$READELF" -lW "$bin" | python3 -c '
+import sys
+bin_name = sys.argv[1]
+loads = 0
+for line in sys.stdin:
+    parts = line.split()
+    if parts and parts[0] == "LOAD":
+        loads += 1
+        offset = int(parts[1], 16)
+        vaddr = int(parts[2], 16)
+        align = int(parts[-1], 16)
+        if align < 0x4000 or (offset - vaddr) % 0x4000 != 0:
+            raise SystemExit(f"ERROR: {bin_name} LOAD segment not 16KB aligned: offset={hex(offset)} vaddr={hex(vaddr)} align={hex(align)}")
+if loads == 0:
+    raise SystemExit(f"ERROR: {bin_name} has no LOAD segments")
+print(f"[proot] Verified 16KB LOAD alignment ({loads} segments): {bin_name}")
+' "$bin"
+done
 ls -lh "$OUT_DIR/libproot.so" "$OUT_DIR/libproot-loader.so"

@@ -276,4 +276,88 @@ class SessionLogStoreTest {
         assertNotNull(glError)
         assertEquals(SessionLogStore.EventLevel.ERROR, glError!!.first)
     }
+
+    @Test
+    fun filtersXrealBenignNoiseHarvestsUserLogsHandlesOomAndPreventsPidReuseDoubleAttribution() {
+        val dir = Files.createTempDirectory("kucode-session-v090").toFile()
+        var nowMs = 1_760_001_000_000L
+        try {
+            val diagDir = File(dir, "diagnostics")
+            val store = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val s1 = store.startSession(pid = 7777, env = sampleEnv())
+
+            // 1. All 5 XREAL Puck benign noise patterns must be filtered out of error/warn counts
+            store.recordEvent(SessionLogStore.EventLevel.WARN, "logcat", "W/WindowOnBackDispatcher: sendCancelIfRunning: isInProgress=false")
+            store.recordEvent(SessionLogStore.EventLevel.ERROR, "logcat", "E/OpenGLRenderer: Unable to match the desired swap behavior.")
+            store.recordEvent(SessionLogStore.EventLevel.ERROR, "webview.console.editor", "ResizeObserver loop completed with undelivered notifications.")
+            store.recordEvent(SessionLogStore.EventLevel.WARN, "webview.console.editor", "Failed to load addon-ligatures")
+            store.recordEvent(SessionLogStore.EventLevel.ERROR, "webview.console.editor", "[DEP0040] DeprecationWarning: The punycode module is deprecated.")
+
+            // 2. Harvest OpenVSCode sub-logs from real `--user-data-dir` path `user/logs/<timestamp>/`
+            val vscodeData = File(dir, "vscode-data")
+            val userRunLogs = File(vscodeData, "user/logs/20261124T050000")
+            File(userRunLogs, "exthost1").mkdirs()
+            File(userRunLogs, "remoteagent.log").writeText("[remoteagent] listening on 18765\n")
+            File(userRunLogs, "remoteexthost.log").writeText("[remoteexthost] loaded kucode-tools\n")
+            File(userRunLogs, "exthost1/exthost.log").writeText("[exthost1] acp ready\n")
+            store.harvestOpenVsCodeSubLogs(vscodeData)
+
+            val summary1 = store.resolveSessionSummary(s1.sessionId)!!
+            assertEquals(0, summary1.errorCount)
+            assertEquals(0, summary1.warnCount)
+            assertEquals(5, summary1.benignNoiseCount)
+
+            val ai1 = store.renderSessionBundle(s1.sessionId, "ai")!!
+            assertTrue(ai1.contains("[remoteagent] listening on 18765"))
+            assertTrue(ai1.contains("[remoteexthost] loaded kucode-tools"))
+            assertTrue(ai1.contains("[exthost1] acp ready"))
+            assertTrue(ai1.contains("knownBenignFiltered=5"))
+
+            // 3. OOM uncaught crash takes fast path (`CRASH_JVM_OOM`) without crashing
+            store.recordUncaughtCrash("WorkerThread", OutOfMemoryError("Java heap space"))
+            val afterOom = store.resolveSessionSummary(s1.sessionId)!!
+            assertEquals(SessionLogStore.SessionStatus.ENDED_ABNORMALLY, afterOom.status)
+            assertEquals("CRASH_JVM_OOM", afterOom.exitCategory)
+
+            // 4. PID reuse: two unfinished sessions with the SAME pid must NOT both claim one OsProcessExitRecord
+            nowMs += 10_000L
+            val storeA = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val stale1 = storeA.startSession(pid = 8888, env = sampleEnv())
+            nowMs += 20_000L
+            val storeB = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val stale2 = storeB.startSession(pid = 8888, env = sampleEnv())
+
+            nowMs += 5_000L
+            val storeC = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val largeTrace = "HEAD_THREAD_MAIN\n" + ("  at frame.line(File.kt:1)\n".repeat(4000)) + "TAIL_END"
+            val reconciled = storeC.reconcileUnfinishedSessions(
+                currentPid = 9999,
+                exitRecords = listOf(
+                    SessionLogStore.OsProcessExitRecord(
+                        pid = 8888,
+                        timestampMs = nowMs - 1_000L,
+                        reasonCode = 6,
+                        reasonName = "REASON_ANR",
+                        status = 0,
+                        importance = 100,
+                        importanceName = "FOREGROUND",
+                        pssMb = 300,
+                        rssMb = 400,
+                        description = "ANR on second session",
+                        traceSnippet = largeTrace,
+                    ),
+                ),
+            )
+            assertEquals(2, reconciled.size)
+            val byId = reconciled.associateBy { it.sessionId }
+            assertEquals("OS_RECLAIMED_IDLE", byId.getValue(stale1.sessionId).exitCategory)
+            assertEquals("ANR", byId.getValue(stale2.sessionId).exitCategory)
+
+            // 5. Large ANR trace must preserve the HEAD (`HEAD_THREAD_MAIN`), not only the tail
+            val anrReport = storeC.renderSessionBundle(stale2.sessionId, "ai")!!
+            assertTrue("ANR trace head must be preserved", anrReport.contains("HEAD_THREAD_MAIN"))
+        } finally {
+            deleteTreeNoFollow(dir)
+        }
+    }
 }

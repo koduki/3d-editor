@@ -18,8 +18,9 @@ import androidx.core.app.NotificationCompat
  *
  * Uses `START_NOT_STICKY` so a process kill does not resurrect a ghost service
  * with a misleading "running" notification when no server process exists.
- * Implements Android 15 (API 35) `onTimeout` for `dataSync` FGS so exceeding
- * the OS 6-hour daily quota degrades gracefully instead of crashing the app.
+ * Uses `specialUse` foreground service type (avoiding Android 15's 6h/24h `dataSync`
+ * quota) and guards `startForeground` / `onTimeout` so OEM/OS restrictions degrade
+ * cleanly instead of crashing the app.
  */
 class ServerKeepAliveService : Service() {
 
@@ -57,16 +58,25 @@ class ServerKeepAliveService : Service() {
                 telemetry.ensureSessionActive("keepalive_service_start")
                 ensureNotificationChannel()
                 val notification = buildNotification()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            notification,
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                        )
+                    } else {
+                        startForeground(NOTIFICATION_ID, notification)
+                    }
+                } catch (e: Exception) {
+                    telemetry.warn(
+                        "android.service",
+                        "KeepAliveService startForeground failed (${e.javaClass.simpleName}: ${e.message}); stopping keep-alive gracefully",
                     )
-                } else {
-                    startForeground(NOTIFICATION_ID, notification)
+                    stopSelf()
+                    return START_NOT_STICKY
                 }
-                telemetry.info("android.service", "KeepAliveService running in foreground (type=dataSync)")
+                telemetry.info("android.service", "KeepAliveService running in foreground (type=specialUse)")
                 PosixRuntimeManager.getInstance(this).startIfNeeded()
                 return START_NOT_STICKY
             }
@@ -81,16 +91,14 @@ class ServerKeepAliveService : Service() {
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
-        // Android 15 enforces a 6h/24h quota on dataSync foreground services;
-        // stop the service cleanly rather than letting the system throw RemoteServiceException.
         val telemetry = SessionTelemetryManager.getInstance(this)
         telemetry.warn(
             "android.service",
-            "Android 15 dataSync foreground service 6h quota timeout reached (startId=$startId, fgsType=$fgsType); degrading cleanly",
+            "Foreground service timeout reached (startId=$startId, fgsType=$fgsType); degrading cleanly",
         )
         telemetry.captureMetricSnapshotAsync("fgs_timeout", includePss = true)
         stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf(startId)
+        stopSelf()
     }
 
     private fun ensureNotificationChannel() {
@@ -126,7 +134,7 @@ class ServerKeepAliveService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(R.drawable.ic_stat_kucode)
             .setContentTitle(getString(R.string.keepalive_notification_title))
             .setContentText(getString(R.string.keepalive_notification_text))
             .setOngoing(true)
