@@ -103,6 +103,10 @@ class RuntimeInstallerTest {
             } catch (_: java.io.IOException) { }
             assertEquals("keep", sentinel.readText())
             assertEquals("v1", paths.openvscodeVersionMarker.readText())
+            assertFalse("Failed server extraction must clean staging dir", paths.openvscodeStagingDir.exists())
+            assertFalse("No Debian backup exists before reset", initial.hasDebianBackup(paths))
+            initial.archiveDebianForReset(paths)
+            assertTrue("Debian backup should be detected after reset", initial.hasDebianBackup(paths))
         } finally {
             deleteTreeNoFollow(base)
         }
@@ -139,11 +143,14 @@ class RuntimeInstallerTest {
             assertEquals(userJsonc, userSettings.readText())
 
             // 4. Strict JSON missing defaults gets merged atomically without overwriting custom keys
-            paths.machineSettingsFile.writeText("""{"editor.fontSize": 24, "custom.key": "keep"}""")
+            paths.machineSettingsFile.writeText("""{"editor.fontSize": 24, "custom.key": "keep", "security.workspace.trust.enabled": false}""")
             installer.ensureMachineVsCodeSettings(paths)
-            val merged = JSONObject(paths.machineSettingsFile.readText())
+            val rawMigrated = paths.machineSettingsFile.readText()
+            assertTrue("Migrated JSON should stay multi-line formatted", rawMigrated.contains("\n") && rawMigrated.endsWith("\n"))
+            val merged = JSONObject(rawMigrated)
             assertEquals(24, merged.getInt("editor.fontSize"))
             assertEquals("keep", merged.getString("custom.key"))
+            assertEquals(true, merged.getBoolean("security.workspace.trust.enabled"))
             assertEquals("off", merged.getString("terminal.integrated.gpuAcceleration"))
             assertEquals(true, merged.getBoolean("chat.disableAIFeatures"))
             assertEquals(userJsonc, userSettings.readText())

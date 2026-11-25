@@ -13,16 +13,18 @@ git -C "$root" rev-parse HEAD || true
 sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 [[ -n "$sdk" && -f "$sdk/platforms/android-37/android.jar" ]] || { echo "FAIL: API 37 SDK not found"; exit 1; }
 export ANDROID_HOME="$sdk"
-tools="$sdk/build-tools/36.0.0"
+tools="$sdk/build-tools/${KUCODE_BUILD_TOOLS:-36.0.0}"
 aapt="${KUCODE_AAPT2:-$tools/aapt2}"
 gradle="${KUCODE_GRADLE:-gradle}"
-for cmd in java python3 file; do command -v "$cmd" >/dev/null; done
+for cmd in java python3 "$gradle"; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "FAIL: required command not found: $cmd"; exit 1; }
+done
 java -version
 "$gradle" --version
 if command -v android >/dev/null; then android --version || true; fi
 for bin in "$aapt" "$tools/zipalign"; do
   [[ -x "$bin" ]] || { echo "FAIL: missing $bin"; exit 1; }
-  file -L "$bin"
+  if command -v file >/dev/null 2>&1; then file -L "$bin"; fi
   python3 - "$bin" <<'PY'
 import sys, struct
 with open(sys.argv[1], 'rb') as f:

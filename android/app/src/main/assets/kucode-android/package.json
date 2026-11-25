@@ -18,6 +18,17 @@
     }
   },
   "contributes": {
+    "taskDefinitions": [
+      {
+        "type": "kucodeAndroid",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "Gradle task name to execute through kucode build"
+          }
+        }
+      }
+    ],
     "commands": [
       {
         "command": "kucodeAndroid.doctor",
@@ -26,6 +37,14 @@
       {
         "command": "kucodeAndroid.installSdk",
         "title": "KuCode Android: Install SDK Packages"
+      },
+      {
+        "command": "kucodeAndroid.test",
+        "title": "KuCode Android: Run Unit Tests"
+      },
+      {
+        "command": "kucodeAndroid.gradleTask",
+        "title": "KuCode Android: Run Gradle Task"
       },
       {
         "command": "kucodeAndroid.buildRun",
@@ -38,6 +57,10 @@
       {
         "command": "kucodeAndroid.launch",
         "title": "KuCode Android: Launch App"
+      },
+      {
+        "command": "kucodeAndroid.diagnostics",
+        "title": "KuCode Android: Show Diagnostics"
       }
     ],
     "menus": {
@@ -51,6 +74,14 @@
           "when": "kucodeAndroid.project"
         },
         {
+          "command": "kucodeAndroid.test",
+          "when": "kucodeAndroid.project"
+        },
+        {
+          "command": "kucodeAndroid.gradleTask",
+          "when": "kucodeAndroid.project"
+        },
+        {
           "command": "kucodeAndroid.buildRun",
           "when": "kucodeAndroid.project"
         },
@@ -60,6 +91,10 @@
         },
         {
           "command": "kucodeAndroid.launch",
+          "when": "kucodeAndroid.project"
+        },
+        {
+          "command": "kucodeAndroid.diagnostics",
           "when": "kucodeAndroid.project"
         }
       ]

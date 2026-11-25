@@ -26,11 +26,19 @@ function request(method, route, body) {
       });
       res.on('error', reject);
       res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let result;
         try {
-          const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (result.version !== 1) throw new Error('Unsupported Android host bridge version');
-          resolve(result);
-        } catch (e) { reject(e); }
+          result = JSON.parse(raw);
+        } catch (_) {
+          reject(new Error('Host API HTTP ' + res.statusCode + ': ' + raw.trim().slice(0, 200)));
+          return;
+        }
+        if (!result || typeof result !== 'object' || result.version !== 1) {
+          reject(new Error('Unsupported Android host bridge version'));
+          return;
+        }
+        resolve(result);
       });
     });
     req.on('timeout', () => req.destroy(new Error('Host request timed out')));
@@ -77,6 +85,18 @@ function androidBuildTools() {
   } catch (_) { return {}; }
 }
 
+function androidPlatforms() {
+  const sdk = process.env.ANDROID_HOME;
+  if (!sdk || !path.isAbsolute(sdk)) return [];
+  try {
+    return fs.readdirSync(path.join(sdk, 'platforms'), {withFileTypes: true})
+      .filter(entry => entry.isDirectory() && /^android-[0-9A-Za-z_.-]+$/.test(entry.name))
+      .map(entry => entry.name)
+      .sort()
+      .slice(0, 32);
+  } catch (_) { return []; }
+}
+
 // Use the existing Flight Recorder event route; never include command arguments or secrets.
 async function event(level, message) {
   const port = Number(process.env.KUCODE_ADMIN_PORT);
@@ -102,7 +122,10 @@ async function build(args) {
   delete env.KUCODE_ADMIN_PORT;
   const result = await new Promise(resolve => {
     const child = spawn(args[1], args.slice(2), {stdio: 'inherit', env, shell: false});
-    child.on('error', () => resolve({code: 127, signal: null}));
+    child.on('error', err => {
+      console.error('kucode build: failed to start ' + args[1] + ': ' + err.message);
+      resolve({code: 127, signal: null});
+    });
     child.on('exit', (code, signal) => resolve({code: code ?? 1, signal}));
   });
   const elapsedMs = Number((process.hrtime.bigint() - start) / 1000000n);
@@ -113,10 +136,11 @@ async function build(args) {
 async function main(args) {
   const [group, command, value, extra] = args;
   if (group === 'sdk' && command === 'doctor') {
-    const names = ['java', 'javac', 'gradle', 'android', 'sdkmanager', 'mise', 'node', 'npm', 'python3', 'uv', 'go', 'ruby', 'cargo', 'gcc', 'clang', 'cmake'];
+    const names = ['java', 'javac', 'kotlinc', 'gradle', 'android', 'sdkmanager', 'mise', 'node', 'npm', 'tsc', 'python3', 'uv', 'go', 'ruby', 'bundle', 'cargo', 'gcc', 'g++', 'clang', 'cmake', 'git'];
     const tools = Object.fromEntries(names.map(name => [name, findTool(name)]));
     const buildTools = androidBuildTools();
-    const result = {version: 1, architecture: process.arch, buildTools, home: process.env.HOME, androidHome: process.env.ANDROID_HOME, javaHome: process.env.JAVA_HOME || 'unknown', tools};
+    const platforms = androidPlatforms();
+    const result = {version: 1, architecture: process.arch, buildTools, platforms, home: process.env.HOME, androidHome: process.env.ANDROID_HOME, javaHome: process.env.JAVA_HOME || 'unknown', tools};
     return {result, exit: process.arch === 'arm64' && [...Object.values(tools), ...Object.values(buildTools).flatMap(Object.values)].every(x => !x || x.abi !== 'non-aarch64-elf') ? 0 : 1};
   }
   if (group !== 'android') throw new Error('Usage: kucode sdk doctor | kucode android capabilities|install <apk> [package]|launch <package>|operation-status <id>|cancel <id>');
@@ -139,6 +163,10 @@ async function main(args) {
       result = await request('POST', base + 'launch', {packageName: value}); break;
     default: throw new Error('Unknown android command');
   }
+  if (command === 'cancel') {
+    const cancelFailed = ['failed', 'interrupted'].includes(result.state);
+    return {result, exit: cancelFailed ? 1 : 0};
+  }
   const failed = ['failed', 'interrupted', 'timed_out', 'cancelled'].includes(result.state);
   const pending = ['staging', 'submitting', 'submitted', 'awaiting_user'].includes(result.state);
   return {result, exit: failed ? 1 : command === 'operation-status' && pending ? 10 : 0};
@@ -152,4 +180,4 @@ if (require.main === module) {
     console.log(JSON.stringify({version: 1, state: 'failed', message: error.message})); process.exitCode = 1;
   });
 }
-module.exports = {findTool, main};
+module.exports = {findTool, main, build};

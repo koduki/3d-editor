@@ -199,6 +199,7 @@ object PosixRuntimeConfig {
             "LC_ALL" to "C.UTF-8",
             "PATH" to "$GUEST_HOME/.local/bin:$GUEST_HOME/.local/share/mise/shims:$GUEST_HOME/.cargo/bin:$GUEST_SDK/cmdline-tools/latest/bin:$GUEST_SDK/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "ANDROID_HOME" to GUEST_SDK,
+            "ANDROID_SDK_ROOT" to GUEST_SDK,
             "XDG_CACHE_HOME" to "$GUEST_HOME/.cache",
             "XDG_CONFIG_HOME" to "$GUEST_HOME/.config",
             "XDG_DATA_HOME" to "$GUEST_HOME/.local/share",
@@ -841,6 +842,7 @@ object PosixRuntimeConfig {
     fun buildProfileDEnvScript(): String = """
         # Common persistent SDK paths; no project-local scripts are executed.
         export ANDROID_HOME="${'$'}{ANDROID_HOME:-${'$'}HOME/Android/Sdk}"
+        export ANDROID_SDK_ROOT="${'$'}{ANDROID_SDK_ROOT:-${'$'}ANDROID_HOME}"
         export XDG_CACHE_HOME="${'$'}{XDG_CACHE_HOME:-${'$'}HOME/.cache}"
         export XDG_CONFIG_HOME="${'$'}{XDG_CONFIG_HOME:-${'$'}HOME/.config}"
         export XDG_DATA_HOME="${'$'}{XDG_DATA_HOME:-${'$'}HOME/.local/share}"
@@ -850,6 +852,21 @@ object PosixRuntimeConfig {
             *) export PATH="${'$'}kucode_dir:${'$'}PATH" ;;
           esac
         done
+        if [ -z "${'$'}{JAVA_HOME:-}" ]; then
+          if [ -f /usr/lib/jvm/default-java/release ] && [ -x /usr/lib/jvm/default-java/bin/java ]; then
+            export JAVA_HOME="/usr/lib/jvm/default-java"
+          else
+            kucode_java="${'$'}(command -v javac 2>/dev/null || command -v java 2>/dev/null || true)"
+            if [ -n "${'$'}kucode_java" ] && command -v readlink >/dev/null 2>&1; then
+              kucode_real="${'$'}(readlink -f "${'$'}kucode_java" 2>/dev/null || true)"
+              kucode_jdk="${'$'}(dirname "${'$'}(dirname "${'$'}kucode_real")" 2>/dev/null || true)"
+              if [ -n "${'$'}kucode_jdk" ] && [ -f "${'$'}kucode_jdk/release" ] && [ -x "${'$'}kucode_jdk/bin/java" ]; then
+                export JAVA_HOME="${'$'}kucode_jdk"
+              fi
+            fi
+            unset kucode_java kucode_real kucode_jdk
+          fi
+        fi
         unset kucode_dir
     """.trimIndent() + "\n"
 

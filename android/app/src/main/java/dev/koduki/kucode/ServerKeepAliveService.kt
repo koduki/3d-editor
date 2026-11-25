@@ -133,9 +133,10 @@ class ServerKeepAliveService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+        val variantTitle = "${getString(R.string.app_name_variant)} 起動中"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_kucode)
-            .setContentTitle(getString(R.string.keepalive_notification_title))
+            .setContentTitle(variantTitle)
             .setContentText(getString(R.string.keepalive_notification_text))
             .setOngoing(true)
             .setSilent(true)

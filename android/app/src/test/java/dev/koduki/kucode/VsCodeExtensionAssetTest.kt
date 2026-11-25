@@ -63,6 +63,13 @@ class VsCodeExtensionAssetTest {
             assertTrue(contributes.getJSONObject("viewsContainers").has("activitybar"))
             assertTrue(contributes.getJSONObject("views").has("kucode"))
 
+            val capabilities = pkgJson.getJSONObject("capabilities")
+            assertEquals("limited", capabilities.getJSONObject("untrustedWorkspaces").getString("supported"))
+            val acpProps = contributes.getJSONObject("configuration").getJSONObject("properties")
+            assertEquals("application", acpProps.getJSONObject("kucode.acp.agents").getString("scope"))
+            assertEquals("application", acpProps.getJSONObject("kucode.acp.permissionMode").getString("scope"))
+            assertEquals("application", acpProps.getJSONObject("kucode.acp.defaultAgent").getString("scope"))
+
             val js = extDir.resolve("extension.js").readText()
             assertTrue(js.contains("KUCODE_ADMIN_PORT"))
             assertTrue(js.contains("KUCODE_ADMIN_TOKEN"))
@@ -72,6 +79,36 @@ class VsCodeExtensionAssetTest {
             assertTrue(js.contains("OST_COLORS"))
             assertTrue(js.contains("VST_COLORS"))
             assertTrue(extDir.listFiles()!!.none { it.name.startsWith(".pending-") })
+        } finally {
+            deleteTreeNoFollow(dir)
+        }
+    }
+
+    @Test
+    fun installAndroidInto_installsStandaloneExtensionAndPreservesOnFailure() {
+        val dir = Files.createTempDirectory("kucode-android-ext-test").toFile()
+        val assetRoot = java.io.File("src/main/assets")
+        try {
+            val extDir = VsCodeExtensionAsset.installAndroidInto(dir) { assetPath ->
+                java.io.File(assetRoot, assetPath).inputStream()
+            }
+            assertEquals("kucode-android", extDir.name)
+            assertTrue(extDir.resolve("package.json").isFile)
+            assertTrue(extDir.resolve("extension.js").isFile)
+            val pkgJson = JSONObject(extDir.resolve("package.json").readText())
+            assertEquals("kucode-android", pkgJson.getString("name"))
+            assertEquals(false, pkgJson.getJSONObject("capabilities").getJSONObject("untrustedWorkspaces").getBoolean("supported"))
+            assertTrue(pkgJson.getJSONObject("contributes").has("taskDefinitions"))
+
+            val original = extDir.resolve("extension.js").readBytes()
+            try {
+                VsCodeExtensionAsset.installAndroidInto(dir) { name ->
+                    if (name.endsWith("extension.js")) throw java.io.IOException("simulated read failure")
+                    java.io.ByteArrayInputStream("partial".toByteArray())
+                }
+                throw AssertionError("expected failure")
+            } catch (_: java.io.IOException) {}
+            assertTrue(original.contentEquals(extDir.resolve("extension.js").readBytes()))
         } finally {
             deleteTreeNoFollow(dir)
         }

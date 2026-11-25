@@ -543,6 +543,49 @@ class LocalDiagnosticsServerTest {
         }
     }
 
+    @Test
+    fun androidBridgeRoutesRequireAuthRejectBrowserOriginAndReturnJson() {
+        val server = LocalDiagnosticsServer(
+            onRunDiagnostics = { "" },
+            onGetLogs = { "" },
+            onCopyToClipboard = { false },
+            onOpenBootPage = {},
+            onRequestStoragePermission = {},
+            onRestartServer = {},
+            onAndroidRequest = { method, path, _ ->
+                if (method == "GET" && path == "/api/v1/android/capabilities") {
+                    200 to """{"version":1,"canInstall":true,"notifications":true}"""
+                } else {
+                    404 to """{"version":1,"state":"failed"}"""
+                }
+            },
+        )
+        val port = server.start()
+        try {
+            // Unauthenticated -> 403
+            assertEquals(403, sendRawHttpStatus(port, "GET /api/v1/android/capabilities HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n"))
+            // Browser Origin -> 403 even with token
+            assertEquals(
+                403,
+                sendRawHttpStatus(
+                    port,
+                    "GET /api/v1/android/capabilities HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nOrigin: http://evil.example\r\nX-KuCode-Token: ${server.authToken}\r\n\r\n",
+                ),
+            )
+            // Authenticated loopback -> 200 JSON
+            val conn = (URL("http://127.0.0.1:$port/api/v1/android/capabilities").openConnection() as HttpURLConnection).apply {
+                setRequestProperty("X-KuCode-Token", server.authToken)
+            }
+            assertEquals(200, conn.responseCode)
+            assertTrue(conn.contentType.startsWith("application/json"))
+            val body = conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            assertTrue(body.contains("\"version\":1"))
+            conn.disconnect()
+        } finally {
+            server.stop()
+        }
+    }
+
     private fun sendRawHttpStatus(port: Int, rawRequest: String): Int {
         Socket("127.0.0.1", port).use { socket ->
             socket.soTimeout = 3_000

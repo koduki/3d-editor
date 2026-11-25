@@ -15,6 +15,8 @@ internal class RuntimeStatusStore(
     initialWorkspacePath: String = "",
     initialProotReady: Boolean = false,
     private val maxLogLines: Int = DEFAULT_MAX_LOG_LINES,
+    private val appName: String = "KuCode",
+    private val packageName: String = "dev.koduki.kucode",
 ) {
     data class RuntimeState(
         val state: PosixRuntimeManager.State = PosixRuntimeManager.State.IDLE,
@@ -111,6 +113,8 @@ internal class RuntimeStatusStore(
             hasAllFilesAccess = hasAllFilesAccess,
             workspacePath = state.workspacePath,
             prootReady = state.prootReady,
+            appName = appName,
+            packageName = packageName,
         )
     }
 

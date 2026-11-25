@@ -13,6 +13,12 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "コピー/貼り付け・光学テーマ・診断は未信頼ワークスペースでも利用できますが、ACP AI エージェントの実行はワークスペースの信頼後に有効化されます。"
+    }
+  },
   "main": "./extension.js",
   "contributes": {
     "commands": [
@@ -222,6 +228,8 @@
       "properties": {
         "kucode.acp.defaultAgent": {
           "type": "string",
+          "scope": "application",
+          "restricted": true,
           "default": "antigravity",
           "enum": [
             "antigravity",
@@ -235,6 +243,8 @@
         },
         "kucode.acp.permissionMode": {
           "type": "string",
+          "scope": "application",
+          "restricted": true,
           "default": "ask",
           "enum": [
             "ask",
@@ -244,6 +254,8 @@
         },
         "kucode.acp.agents": {
           "type": "object",
+          "scope": "application",
+          "restricted": true,
           "default": {},
           "description": "カスタム ACP エージェント定義マップ（キー: ID, 値: { label, command, args, env, installCommand, loginCommand }）"
         }

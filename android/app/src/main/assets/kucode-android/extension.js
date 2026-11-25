@@ -16,9 +16,17 @@ function androidProject(root) {
     });
 }
 
-function findAndroidRoots(root, depth = 2) {
+const SAFE_GRADLE_TASKS = [
+  'assembleDebug',
+  'testDebugUnitTest',
+  'testDebugMediumUnitTest',
+  'lintDebug',
+  'clean',
+];
+
+function findAndroidRoots(root, depth = 3) {
   const roots = [];
-  let budget = 128;
+  let budget = 256;
   function walk(dir, remaining) {
     if (--budget < 0) return;
     if (androidProject(dir)) { roots.push(dir); return; }
@@ -37,15 +45,33 @@ function findAndroidRoots(root, depth = 2) {
   return roots;
 }
 
-function cli(args) {
+function gradleArgs(tasks, envVars = process.env) {
+  const args = ['--no-daemon', '--max-workers=2'];
+  const aapt2 = envVars && envVars.KUCODE_AAPT2;
+  if (typeof aapt2 === 'string' && path.isAbsolute(aapt2) && !aapt2.includes('\0')) {
+    args.push('-Pandroid.aapt2FromMavenOverride=' + aapt2);
+  }
+  return [...args, ...tasks];
+}
+
+function cli(args, exec = execFile) {
   return new Promise((resolve, reject) => {
-    execFile('/usr/local/bin/kucode', args, {timeout: 15000, maxBuffer: 256 * 1024}, (err, stdout) => {
+    exec('/usr/local/bin/kucode', args, {timeout: 15000, maxBuffer: 256 * 1024}, (err, stdout) => {
       try {
         const result = JSON.parse(stdout);
-        if (result.version !== 1) throw new Error('Unsupported host bridge API');
+        if (!result || result.version !== 1) throw new Error('Unsupported host bridge API');
         if (err && err.code !== 10 && args[0] !== 'sdk') throw new Error(result.message || 'KuCode CLI failed');
         resolve(result);
       } catch (e) { reject(e); }
+    });
+  });
+}
+
+function execText(binary, args) {
+  return new Promise((resolve, reject) => {
+    execFile(binary, args, {timeout: 15000, maxBuffer: 512 * 1024}, (err, stdout, stderr) => {
+      if (err) reject(new Error((stderr || stdout || err.message || 'Command failed').trim()));
+      else resolve(stdout);
     });
   });
 }
@@ -58,6 +84,20 @@ async function chooseRoot() {
   if (projects.length === 1) return projects[0];
   const picked = await vscode.window.showQuickPick(projects.map(project => ({label: project.root, project})), {placeHolder: 'Choose an Android project'});
   return picked && picked.project;
+}
+
+function createGradleTask(project, gradleTask, id) {
+  return new vscode.Task(
+    {type: 'kucodeAndroid', task: gradleTask, ...(id ? {id} : {})},
+    project.folder,
+    'Gradle ' + gradleTask,
+    'KuCode Android',
+    new vscode.ProcessExecution(
+      '/usr/local/bin/kucode',
+      ['build', '--', path.join(project.root, 'gradlew'), ...gradleArgs([gradleTask])],
+      {cwd: project.root},
+    ),
+  );
 }
 
 async function task(project, executable, args, label) {
@@ -100,11 +140,52 @@ async function installApk(project) {
   });
 }
 
+async function launchWithRetry(pkg, runCli = cli, {maxAttempts = 15, delayMs = 2000} = {}) {
+  return vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: 'Launching ' + pkg + ' — return focus to KuCode if Android installer is still open',
+    cancellable: true,
+  }, async (progress, token) => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts && !token.isCancellationRequested; attempt++) {
+      progress.report({message: `attempt ${attempt}/${maxAttempts}`});
+      try {
+        return await runCli(['android', 'launch', pkg]);
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxAttempts && !token.isCancellationRequested) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      }
+    }
+    if (token.isCancellationRequested) return null;
+    throw lastError || new Error('Failed to launch ' + pkg);
+  });
+}
+
 function activate(context) {
   const refresh = () => vscode.commands.executeCommand('setContext', 'kucodeAndroid.project',
     vscode.workspace.isTrusted && (vscode.workspace.workspaceFolders || []).some(f => findAndroidRoots(f.uri.fsPath).length > 0));
   refresh();
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(refresh), vscode.workspace.onDidGrantWorkspaceTrust(refresh));
+  if (typeof vscode.workspace.createFileSystemWatcher === 'function') {
+    const watcher = vscode.workspace.createFileSystemWatcher('**/settings.{gradle,gradle.kts}');
+    context.subscriptions.push(watcher, watcher.onDidCreate(refresh), watcher.onDidDelete(refresh));
+  }
+  if (vscode.tasks && typeof vscode.tasks.registerTaskProvider === 'function') {
+    context.subscriptions.push(vscode.tasks.registerTaskProvider('kucodeAndroid', {
+      provideTasks() {
+        if (!vscode.workspace.isTrusted) return [];
+        const projects = (vscode.workspace.workspaceFolders || []).flatMap(folder =>
+          findAndroidRoots(folder.uri.fsPath).map(root => ({folder, root})));
+        return projects.flatMap(project =>
+          ['assembleDebug', 'testDebugUnitTest'].map(name => createGradleTask(project, name)));
+      },
+      resolveTask(t) {
+        return t;
+      },
+    }));
+  }
   const register = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand('kucodeAndroid.' + id, async () => {
     try {
       const folder = await chooseRoot();
@@ -118,6 +199,18 @@ function activate(context) {
     output.appendLine(JSON.stringify(await cli(['android', 'capabilities']), null, 2));
     output.show();
   });
+  register('diagnostics', async () => {
+    output.appendLine('=== KuCode Android Diagnostics ===');
+    output.appendLine(JSON.stringify(await cli(['sdk', 'doctor']), null, 2));
+    output.appendLine(JSON.stringify(await cli(['android', 'capabilities']), null, 2));
+    try {
+      output.appendLine('=== Recent Host Session Summary ===');
+      output.appendLine(await execText('/usr/local/bin/kucode-logs', ['list']));
+    } catch (err) {
+      output.appendLine('(kucode-logs unavailable: ' + err.message + ')');
+    }
+    output.show();
+  });
   register('installSdk', async folder => {
     const sdk = process.env.ANDROID_HOME;
     if (!sdk) throw new Error('ANDROID_HOME is not configured. Run SDK Doctor.');
@@ -128,9 +221,17 @@ function activate(context) {
     }
     const selection = await vscode.window.showInputBox({prompt: 'Review and enter sdkmanager package IDs separated by commas', value: 'platforms;android-37,build-tools;36.0.0'});
     if (!selection) return;
-    const packages = selection.split(',').map(x => x.trim());
-    if (!packages.every(x => /^[A-Za-z0-9_.;-]+$/.test(x) && !x.startsWith('-'))) throw new Error('Invalid SDK package ID');
+    const packages = selection.split(',').map(x => x.trim()).filter(Boolean);
+    if (!packages.length || !packages.every(x => /^[A-Za-z0-9_.;-]+$/.test(x) && !x.startsWith('-'))) throw new Error('Invalid SDK package ID');
     await task(folder, manager, ['--install', ...packages], 'SDK package install');
+  });
+  register('test', async folder => {
+    await task(folder, path.join(folder.root, 'gradlew'), gradleArgs(['testDebugUnitTest']), 'Gradle testDebugUnitTest');
+  });
+  register('gradleTask', async folder => {
+    const picked = await vscode.window.showQuickPick(SAFE_GRADLE_TASKS, {placeHolder: 'Choose a Gradle task'});
+    if (!picked) return;
+    await task(folder, path.join(folder.root, 'gradlew'), gradleArgs([picked]), 'Gradle ' + picked);
   });
   register('install', async folder => {
     const pkg = await installApk(folder);
@@ -141,9 +242,9 @@ function activate(context) {
     if (pkg) await cli(['android', 'launch', pkg]);
   });
   register('buildRun', async folder => {
-    if (!await task(folder, path.join(folder.root, 'gradlew'), ['assembleDebug'], 'Gradle assembleDebug')) return;
+    if (!await task(folder, path.join(folder.root, 'gradlew'), gradleArgs(['assembleDebug']), 'Gradle assembleDebug')) return;
     const pkg = await installApk(folder);
-    if (pkg) await cli(['android', 'launch', pkg]);
+    if (pkg) await launchWithRetry(pkg);
   });
 }
-module.exports = {activate, deactivate() {}, androidProject, findAndroidRoots};
+module.exports = {activate, deactivate() {}, androidProject, findAndroidRoots, gradleArgs, cli, launchWithRetry};

@@ -24,6 +24,11 @@ internal class RuntimeInstaller(
     },
     private val installHostCli: (File) -> Unit = { dir ->
         val cli = File(dir, "kucode")
+        if (Files.isSymbolicLink(cli.toPath()) ||
+            Files.isDirectory(cli.toPath(), LinkOption.NOFOLLOW_LINKS)
+        ) {
+            deleteTreeNoFollow(cli)
+        }
         writeBytesAtomically(cli, openAsset("kucode-cli.cjs").use { it.readBytes() }, worldReadable = true)
         TarGzExtractor.DefaultPosixFsOps.chmod(cli, 0b111_101_101)
     },
@@ -83,15 +88,19 @@ internal class RuntimeInstaller(
             onProgress("初回セットアップ: Debian minimal rootfs を展開中...", 10)
             deleteTreeNoFollow(paths.stagingDir)
             Files.createDirectory(paths.stagingDir.toPath())
-            openAsset(PosixRuntimeConfig.ASSET_ROOTFS).use { stream ->
-                val stats = TarGzExtractor.extract(stream, paths.stagingDir, stripComponents = 0) { entries, current ->
-                    onProgress("Debian rootfs 展開中 ($entries)... $current", 10 + (entries / 250).coerceAtMost(35))
+            try {
+                openAsset(PosixRuntimeConfig.ASSET_ROOTFS).use { stream ->
+                    val stats = TarGzExtractor.extract(stream, paths.stagingDir, stripComponents = 0) { entries, current ->
+                        onProgress("Debian rootfs 展開中 ($entries)... $current", 10 + (entries / 250).coerceAtMost(35))
+                    }
+                    onLog("[runtime] Debian rootfs extracted: $stats")
                 }
-                onLog("[runtime] Debian rootfs extracted: $stats")
+                require(File(paths.stagingDir, "bin/bash").isFile) { "Debian seed has no bash" }
+                writeTextAtomically(File(paths.stagingDir, paths.versionMarker.name), expectedVersion, Charsets.US_ASCII, worldReadable = true)
+                moveDirectoryAtomically(paths.stagingDir, paths.rootfsDir)
+            } finally {
+                deleteTreeNoFollow(paths.stagingDir)
             }
-            require(File(paths.stagingDir, "bin/bash").isFile) { "Debian seed has no bash" }
-            writeTextAtomically(File(paths.stagingDir, paths.versionMarker.name), expectedVersion, Charsets.US_ASCII, worldReadable = true)
-            moveDirectoryAtomically(paths.stagingDir, paths.rootfsDir)
         } else {
             require(Files.isDirectory(paths.rootfsDir.toPath(), LinkOption.NOFOLLOW_LINKS) &&
                 File(paths.rootfsDir, "bin/bash").isFile) {
@@ -118,17 +127,21 @@ internal class RuntimeInstaller(
         onProgress("openvscode-server を展開中...", 50)
         deleteTreeNoFollow(paths.openvscodeStagingDir)
         Files.createDirectory(paths.openvscodeStagingDir.toPath())
-        openAsset(PosixRuntimeConfig.ASSET_OPENVSCODE).use { stream ->
-            val stats = TarGzExtractor.extract(stream, paths.openvscodeStagingDir, stripComponents = 1) { entries, current ->
-                onProgress("openvscode-server 展開中 ($entries)... $current", 50 + (entries / 200).coerceAtMost(35))
+        try {
+            openAsset(PosixRuntimeConfig.ASSET_OPENVSCODE).use { stream ->
+                val stats = TarGzExtractor.extract(stream, paths.openvscodeStagingDir, stripComponents = 1) { entries, current ->
+                    onProgress("openvscode-server 展開中 ($entries)... $current", 50 + (entries / 200).coerceAtMost(35))
+                }
+                onLog("[runtime] OpenVSCode extracted: $stats")
             }
-            onLog("[runtime] OpenVSCode extracted: $stats")
+            require(File(paths.openvscodeStagingDir, "bin/openvscode-server").isFile) { "Invalid managed OpenVSCode archive" }
+            if (exists(paths.openvscodeDir)) {
+                moveDirectoryAtomically(paths.openvscodeDir, paths.backupOpenvscodeDir)
+            }
+            moveDirectoryAtomically(paths.openvscodeStagingDir, paths.openvscodeDir)
+        } finally {
+            deleteTreeNoFollow(paths.openvscodeStagingDir)
         }
-        require(File(paths.openvscodeStagingDir, "bin/openvscode-server").isFile) { "Invalid managed OpenVSCode archive" }
-        if (exists(paths.openvscodeDir)) {
-            moveDirectoryAtomically(paths.openvscodeDir, paths.backupOpenvscodeDir)
-        }
-        moveDirectoryAtomically(paths.openvscodeStagingDir, paths.openvscodeDir)
         onProgress("展開完了。サーバーを起動します...", 88)
         return ExtractOutcome.STAGED_NEW_INSTALL
     }
@@ -167,12 +180,18 @@ internal class RuntimeInstaller(
         return archive
     }
 
-    fun restoreLatestDebianBackup(paths: PosixRuntimeConfig.Paths): File? {
-        val selected = paths.runtimeRoot.listFiles()?.filter {
+    fun hasDebianBackup(paths: PosixRuntimeConfig.Paths): Boolean =
+        findLatestDebianBackup(paths) != null
+
+    private fun findLatestDebianBackup(paths: PosixRuntimeConfig.Paths): File? =
+        paths.runtimeRoot.listFiles()?.filter {
             it.name.startsWith("rootfs-backup-") &&
                 Files.isDirectory(it.toPath(), LinkOption.NOFOLLOW_LINKS) &&
                 File(it, "bin/bash").isFile
-        }?.maxByOrNull { it.lastModified() } ?: return null
+        }?.maxByOrNull { it.lastModified() }
+
+    fun restoreLatestDebianBackup(paths: PosixRuntimeConfig.Paths): File? {
+        val selected = findLatestDebianBackup(paths) ?: return null
         // Archive the current tree as well. Recovery never removes either OS.
         archiveDebianForReset(paths)
         moveDirectoryAtomically(selected, paths.rootfsDir)
@@ -362,10 +381,14 @@ internal class RuntimeInstaller(
         val migrated = existing?.let { text ->
             if (text.isNotBlank() && PosixRuntimeConfig.mergeDefaultVsCodeSettings(text) != null) {
                 val obj = org.json.JSONObject(text)
-                if (!obj.optBoolean("security.workspace.trust.enabled", true))
-                    obj.put("security.workspace.trust.enabled", true).toString()
-                else text
-            } else text
+                if (!obj.optBoolean("security.workspace.trust.enabled", true)) {
+                    obj.put("security.workspace.trust.enabled", true).toString(2) + "\n"
+                } else {
+                    text
+                }
+            } else {
+                text
+            }
         }
         val merged = PosixRuntimeConfig.mergeDefaultVsCodeSettings(migrated)
         if (merged == null) {

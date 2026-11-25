@@ -180,7 +180,7 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="title">KuCode</div>
+        <div class="title"><span id="appTitle">KuCode</span> <span id="variantBadge" class="badge" style="display:none; vertical-align:middle;"></span></div>
         <div class="hint">空間に、書く。 — Debian minimal + 内蔵 openvscode-server（Ctrl+Alt+D でこの画面とエディタを切替）</div>
       </div>
       <span id="stateBadge" class="badge">起動中</span>
@@ -447,6 +447,21 @@
 
     function renderStatus(status) {
       if (!status) return;
+      if (status.appName) {
+        const appTitleEl = document.getElementById('appTitle');
+        if (appTitleEl) appTitleEl.textContent = status.appName;
+        document.title = status.appName;
+      }
+      if (status.packageName) {
+        const variantEl = document.getElementById('variantBadge');
+        if (variantEl) {
+          const isDev = status.packageName.endsWith('.debug');
+          variantEl.style.display = 'inline-block';
+          variantEl.textContent = isDev ? 'DEV (' + status.packageName + ')' : 'STABLE (' + status.packageName + ')';
+          variantEl.style.borderColor = isDev ? '#a5b4fc' : '#34d399';
+          variantEl.style.color = isDev ? '#a5b4fc' : '#34d399';
+        }
+      }
       stateBadge.textContent = status.state;
       stateBadge.className = 'badge' + (status.state === 'READY' ? ' ready' : status.state === 'ERROR' ? ' error' : '');
       statusMessage.textContent = status.message || status.state;

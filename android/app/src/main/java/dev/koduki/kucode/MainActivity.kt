@@ -314,9 +314,19 @@ class MainActivity : AppCompatActivity() {
                         val bytes = contentResolver.openInputStream(uri)?.use { it.readNBytes(1024 * 1024 + 1) }
                             ?: error("Cannot read shared document")
                         require(bytes.size <= 1024 * 1024) { "Diagnostic exceeds 1 MiB" }
-                        val dest = java.io.File(runtimeManager.getPaths().workspaceDir, "diagnostics-import")
-                        dest.mkdirs()
-                        val target = java.io.File(dest, "import-${java.util.UUID.randomUUID()}.md")
+                        val workspace = runtimeManager.getPaths().workspaceDir.canonicalFile
+                        val dest = java.io.File(workspace, "diagnostics-import")
+                        require(!java.nio.file.Files.isSymbolicLink(dest.toPath())) {
+                            "diagnostics-import must be a regular directory"
+                        }
+                        if (!dest.exists()) {
+                            dest.mkdirs()
+                        }
+                        val canonicalDest = dest.canonicalFile
+                        require(canonicalDest.isDirectory && canonicalDest.toPath().startsWith(workspace.toPath())) {
+                            "Invalid diagnostics-import destination"
+                        }
+                        val target = java.io.File(canonicalDest, "import-${java.util.UUID.randomUUID()}.md")
                         writeTextAtomically(target, LogRedactor.redact(bytes.toString(Charsets.UTF_8)))
                         "Imported: /workspace/diagnostics-import/${target.name}"
                     }.getOrElse { "Import failed: ${it.message}" }

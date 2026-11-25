@@ -75,10 +75,19 @@ const DEFAULT_AGENT_PRESETS = {
   },
 };
 
-function buildAugmentedPath(rawPath, homeDir) {
-  const home = homeDir || process.env.HOME || '/root';
-  const required = [
+function buildAugmentedPath(rawPath, homeDir, envVars) {
+  const env = envVars || process.env;
+  const home = homeDir || env.HOME || '/root';
+  const xdgData = env.XDG_DATA_HOME || path.join(home, '.local', 'share');
+  const androidHome = env.ANDROID_HOME || path.join(home, 'Android', 'Sdk');
+  const userDirs = [
     path.join(home, '.local', 'bin'),
+    path.join(xdgData, 'mise', 'shims'),
+    path.join(home, '.cargo', 'bin'),
+    path.join(androidHome, 'cmdline-tools', 'latest', 'bin'),
+    path.join(androidHome, 'platform-tools'),
+  ];
+  const systemDirs = [
     '/usr/local/sbin',
     '/usr/local/bin',
     '/usr/sbin',
@@ -86,12 +95,12 @@ function buildAugmentedPath(rawPath, homeDir) {
     '/sbin',
     '/bin',
   ];
-  const existing = String(rawPath || process.env.PATH || '')
+  const existing = String(rawPath || env.PATH || '')
     .split(path.delimiter)
     .map((p) => p.trim())
     .filter((p) => p.length > 0 && path.isAbsolute(p));
   const merged = [];
-  for (const dir of [...required, ...existing]) {
+  for (const dir of [...userDirs, ...existing, ...systemDirs]) {
     if (!merged.includes(dir)) merged.push(dir);
   }
   return merged.join(path.delimiter);
