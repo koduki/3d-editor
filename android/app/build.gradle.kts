@@ -19,8 +19,8 @@ android {
         applicationId = "dev.koduki.kucode"
         minSdk = 34
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.9.1"
+        versionCode = 11
+        versionName = "0.10.0"
         resValue("string", "kucode_build_sha", buildSha.get())
 
         ndk {

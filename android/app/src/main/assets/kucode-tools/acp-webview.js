@@ -66,7 +66,7 @@ class AcpChatViewProvider {
   constructor(options) {
     this.reportHostEvent = (options && options.reportHostEvent) || (() => {});
     this.writeHostClipboard = (options && options.writeHostClipboard) || null;
-    this.extensionVersion = (options && options.extensionVersion) || '0.9.1';
+    this.extensionVersion = (options && options.extensionVersion) || '0.10.0';
     this.webviewView = null;
     this.client = null;
     this.activeAgentId = 'antigravity';
