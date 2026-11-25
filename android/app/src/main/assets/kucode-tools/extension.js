@@ -718,7 +718,7 @@ function activate(context) {
   acpProviderInstance = new AcpChatViewProvider({
     reportHostEvent,
     writeHostClipboard,
-    extensionVersion: '0.9.1',
+    extensionVersion: '0.10.0',
   });
 
   context.subscriptions.push(
