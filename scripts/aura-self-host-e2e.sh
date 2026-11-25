@@ -15,8 +15,13 @@ test -f "$root/runtime-assets.lock.json" || { echo "NOT RUN: reviewed asset lock
 kucode sdk doctor | tee "$out/sdk-doctor.json"
 python3 "$root/scripts/runtime-assets.py" fetch --lock "$root/runtime-assets.lock.json"
 cp "$root/runtime-assets.lock.json" "$out/"
+python3 -m unittest discover -s "$root/tests" -p test_runtime_assets.py -v
 (cd "$root"; node --test tests/*.test.cjs)
-(cd "$root/android"; kucode build -- ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --max-workers=2)
+gradle_args=(:app:testDebugUnitTest :app:testDebugMediumUnitTest :app:assembleDebug --no-daemon --max-workers=2)
+if [[ -n "${KUCODE_AAPT2:-}" ]]; then
+  gradle_args+=("-Pandroid.aapt2FromMavenOverride=${KUCODE_AAPT2}")
+fi
+(cd "$root/android"; kucode build -- ./gradlew "${gradle_args[@]}")
 apk="$root/android/app/build/outputs/apk/debug/app-debug.apk"
 sha256sum "$apk" > "$out/apk.sha256"
 op="$(kucode android install "$apk" dev.koduki.kucode.debug)"

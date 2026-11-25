@@ -126,9 +126,9 @@ class KuCodeDocumentsProvider : DocumentsProvider() {
         val wsBase = workspaceBaseDir()
         val diagBase = diagnosticsBaseDir()
         val result = MatrixCursor(projection ?: defaultRootProjection)
-        val appName = context?.getString(R.string.app_name) ?: "KuCode"
+        val appName = context?.getString(R.string.app_name_variant) ?: "KuCode"
         val wsSummary = context?.getString(R.string.documents_root_summary) ?: "POSIX /workspace"
-        val diagTitle = context?.getString(R.string.diagnostics_root_title) ?: "KuCode Logs"
+        val diagTitle = "$appName Logs"
         val diagSummary = context?.getString(R.string.diagnostics_root_summary) ?: "Session AI Diagnostics"
 
         // Primary root MUST remain first row so DiagnosticsRunner probes /workspace as expected

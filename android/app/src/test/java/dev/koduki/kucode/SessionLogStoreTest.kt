@@ -78,6 +78,7 @@ class SessionLogStoreTest {
                     availMemMb = 7500,
                     totalMemMb = 15519,
                     pssMb = 182,
+                    hostCpuTimeMs = 4321,
                     jvmHeapUsedMb = 24,
                     jvmHeapMaxMb = 256,
                     nativeHeapMb = 44,
@@ -92,6 +93,13 @@ class SessionLogStoreTest {
                     serverAlive = true,
                     activeView = "EDITOR",
                     windowFocus = true,
+                ),
+            )
+            store.recordMetric(
+                SessionLogStore.MetricSnapshot(
+                    timestampMs = nowMs + 100,
+                    trigger = "cpu_unknown_check",
+                    hostCpuTimeMs = -1L,
                 ),
             )
 
@@ -120,13 +128,17 @@ class SessionLogStoreTest {
             assertTrue(aiReport.contains("# KuCode AI セッション診断バンドル"))
             assertTrue(aiReport.contains("knownBenignFiltered=2"))
             assertTrue(aiReport.contains("WIFI(ok,dns=1)"))
+            assertTrue(aiReport.contains("| 4321 |"))
+            assertTrue(aiReport.contains("| unknown |"))
             assertTrue(aiReport.contains("[ptyhost] spawned /bin/bash"))
             assertTrue(aiReport.contains("[exthost] kucode-tools activated cleanly"))
             assertFalse("Query token must be redacted", aiReport.contains("my_secret_token_12345"))
 
             val jsonBundle = JSONObject(store.renderSessionBundle(fin.sessionId, "json")!!)
             assertEquals(fin.sessionId, jsonBundle.getJSONObject("meta").getString("sessionId"))
-            assertEquals(1, jsonBundle.getJSONArray("metrics").length())
+            assertEquals(2, jsonBundle.getJSONArray("metrics").length())
+            assertEquals(4321L, jsonBundle.getJSONArray("metrics").getJSONObject(0).getLong("hostCpuTimeMs"))
+            assertEquals(-1L, jsonBundle.getJSONArray("metrics").getJSONObject(1).getLong("hostCpuTimeMs"))
 
             val exported = store.exportSessionBundleToDirectory("latest", File(dir, "exports"))
             assertNotNull(exported)

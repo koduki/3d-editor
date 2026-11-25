@@ -135,8 +135,8 @@ class BootHostBridge(
                 // Limit retained export files; file names contain no user input.
                 dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(3)?.forEach { it.delete() }
                 val file = java.io.File.createTempFile("diagnostic-", ".md", dir)
-                val bytes = LogRedactor.redact(report).toByteArray(Charsets.UTF_8)
-                file.writeBytes(bytes.copyOfRange(0, bytes.size.coerceAtMost(1024 * 1024)))
+                val redacted = LogRedactor.redact(report)
+                file.writeBytes(truncateUtf8Bytes(redacted, MAX_DIAGNOSTIC_SHARE_BYTES))
                 onShareDiagnostic(file)
             } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
                 throw cancel
@@ -193,6 +193,19 @@ class BootHostBridge(
     }
 
     companion object {
+        internal const val MAX_DIAGNOSTIC_SHARE_BYTES = 1024 * 1024
+
+        internal fun truncateUtf8Bytes(text: String, maxBytes: Int): ByteArray {
+            val bytes = text.toByteArray(Charsets.UTF_8)
+            if (bytes.size <= maxBytes) return bytes
+            var end = maxBytes
+            // Step back across UTF-8 continuation bytes (10xxxxxx) and any incomplete lead byte
+            while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) {
+                end--
+            }
+            return bytes.copyOfRange(0, end)
+        }
+
         private val ALLOWED_LICENSE_FILES = setOf(
             "THIRD_PARTY_NOTICES.md",
             "LICENSE",

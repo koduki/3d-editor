@@ -23,9 +23,23 @@ function getWorkspaceRoot() {
   return '/workspace';
 }
 
+function getApplicationSetting(cfg, key, fallback) {
+  if (cfg && typeof cfg.inspect === 'function') {
+    const inspected = cfg.inspect(key);
+    if (inspected && typeof inspected === 'object') {
+      if (inspected.globalValue !== undefined) return inspected.globalValue;
+      if (inspected.globalRemoteValue !== undefined) return inspected.globalRemoteValue;
+      if (inspected.defaultValue !== undefined) return inspected.defaultValue;
+      return fallback;
+    }
+  }
+  const value = cfg && typeof cfg.get === 'function' ? cfg.get(key) : undefined;
+  return value !== undefined ? value : fallback;
+}
+
 function getConfiguredAgents() {
   const cfg = vscode.workspace.getConfiguration('kucode');
-  const custom = cfg.get('acp.agents') || {};
+  const custom = getApplicationSetting(cfg, 'acp.agents', {}) || {};
   const merged = {};
   for (const [id, preset] of Object.entries(DEFAULT_AGENT_PRESETS)) {
     merged[id] = { ...preset };
@@ -69,8 +83,8 @@ class AcpChatViewProvider {
   resolveWebviewView(webviewView) {
     this.webviewView = webviewView;
     const cfg = vscode.workspace.getConfiguration('kucode');
-    this.activeAgentId = cfg.get('acp.defaultAgent') || 'antigravity';
-    this.permissionMode = cfg.get('acp.permissionMode') || 'ask';
+    this.activeAgentId = getApplicationSetting(cfg, 'acp.defaultAgent', 'antigravity') || 'antigravity';
+    this.permissionMode = getApplicationSetting(cfg, 'acp.permissionMode', 'ask') || 'ask';
 
     webviewView.webview.options = {
       enableScripts: true,

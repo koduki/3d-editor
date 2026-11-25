@@ -13,6 +13,8 @@ class RuntimeStatusStoreTest {
         val store = RuntimeStatusStore(
             initialWorkspacePath = "/data/workspace",
             initialProotReady = true,
+            appName = "KuCode Dev",
+            packageName = "dev.koduki.kucode.debug",
         )
         val observed = CopyOnWriteArrayList<PosixRuntimeManager.StatusSnapshot>()
         store.setListener { observed.add(it) }
@@ -20,6 +22,9 @@ class RuntimeStatusStoreTest {
         val initial = store.snapshot(hasAllFilesAccess = false)
         assertEquals(PosixRuntimeManager.State.IDLE, initial.state)
         assertEquals("", initial.serverUrl)
+        assertEquals("KuCode Dev", initial.appName)
+        assertEquals("dev.koduki.kucode.debug", initial.packageName)
+        assertTrue(initial.toJsonString().contains("dev.koduki.kucode.debug"))
         assertNull(store.editorLaunchUrl())
 
         store.update(hasAllFilesAccess = false) {

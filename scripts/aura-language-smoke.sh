@@ -14,11 +14,17 @@ if [[ "$(uname -m)" != aarch64 && "$(uname -m)" != arm64 ]]; then
 fi
 failed=0
 run() {
-  local name="$1" tool="$2" start="$SECONDS"
+  local name="$1" tools_csv="$2" start="$SECONDS"
   shift 2
-  if ! command -v "$tool" >/dev/null; then
-    printf '%s\tNOT RUN\t0\n' "$name" >> "$report"; failed=1; return
-  fi
+  local IFS=',' tool
+  for tool in $tools_csv; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      printf '%s\tNOT RUN\t0\n' "$name" >> "$report"
+      printf 'missing required tool: %s\n' "$tool" > "$out/$name.log"
+      failed=1
+      return
+    fi
+  done
   if (cd "$work"; timeout 180 "$@") >"$out/$name.log" 2>&1; then
     printf '%s\tPASS\t%s\n' "$name" "$((SECONDS-start))" >> "$report"
   else
@@ -77,14 +83,14 @@ printf 'cmake_minimum_required(VERSION 3.16)\nproject(smoke C CXX)\nadd_executab
 printf 'int main(void){return 6*7!=42;}\n' > "$work/cmake/check.c"
 printf 'int main(){return 6*7!=42;}\n' > "$work/cmake/check.cpp"
 
-run java javac bash -c 'java -version && javac Main.java && java Main'
-run kotlin kotlinc bash -c 'kotlinc -version && kotlinc Main.kt -include-runtime -d check.jar && java -jar check.jar'
-run javascript node bash -c 'node --version && npm --version && node check.js'
-run typescript tsc bash -c 'tsc --version && tsc types.ts && node types.js'
-run python python3 bash -c 'python3 --version && python3 -m venv venv && venv/bin/python check.py'
+run java java,javac bash -c 'java -version && javac Main.java && java Main'
+run kotlin java,kotlinc bash -c 'kotlinc -version && kotlinc Main.kt -include-runtime -d check.jar && java -jar check.jar'
+run javascript node,npm bash -c 'node --version && npm --version && node check.js'
+run typescript node,tsc bash -c 'tsc --version && tsc types.ts && node types.js'
+run python python3 bash -c 'python3 --version && (command -v uv >/dev/null 2>&1 && uv --version || echo "uv: not installed") && python3 -m venv venv && venv/bin/python check.py'
 run go go bash -c 'go version && GO111MODULE=off go test -v'
-run ruby ruby bash -c 'ruby --version && bundle --version && ruby check.rb'
+run ruby ruby,bundle bash -c 'ruby --version && bundle --version && ruby check.rb'
 run rust cargo bash -c 'cargo --version && cd rust && cargo test --offline'
-run cpp cmake bash -c 'cmake --version && cmake -S cmake -B build && cmake --build build && ./build/c-check && ./build/cxx-check'
+run cpp cmake,cc,c++ bash -c 'cmake --version && cc --version && c++ --version && cmake -S cmake -B build && cmake --build build && ./build/c-check && ./build/cxx-check'
 cat "$report"
 exit "$failed"

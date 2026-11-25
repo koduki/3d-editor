@@ -113,7 +113,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload standalone runtime assets for release
-        if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && steps.runtime_source.outputs.bootstrap == 'true')
+        if: steps.runtime_source.outputs.bootstrap == 'true' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
         uses: actions/upload-artifact@v4
         with:
           name: kucode-runtime-assets
@@ -148,7 +148,7 @@ jobs:
           smoke_dir="$RUNNER_TEMP/openvscode-smoke"
           rm -rf "$smoke_dir"
           mkdir -p "$smoke_dir/user/Machine" "$smoke_dir/extensions" "$smoke_dir/workspace"
-          printf '{"chat.disableAIFeatures":true}\n' > "$smoke_dir/user/Machine/settings.json"
+          printf '{"chat.disableAIFeatures":true,"security.workspace.trust.enabled":true}\n' > "$smoke_dir/user/Machine/settings.json"
           printf 'kucode-ci-smoke-token\n' > "$smoke_dir/token"
           "$server/bin/openvscode-server" \
             --host 127.0.0.1 \
@@ -156,7 +156,6 @@ jobs:
             --connection-token-file "$smoke_dir/token" \
             --accept-server-license-terms \
             --telemetry-level off \
-            --disable-workspace-trust \
             --without-browser-env-var \
             --default-folder "$smoke_dir/workspace" \
             --server-data-dir "$smoke_dir" \
@@ -193,34 +192,31 @@ jobs:
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           RELEASE_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
           ls -lh "$APK" "$RELEASE_APK"
-          unzip -p "$APK" assets/runtime-probes.cjs | cmp - android/app/src/main/assets/runtime-probes.cjs
-          unzip -p "$APK" assets/kucode-cli.cjs | cmp - android/app/src/main/assets/kucode-cli.cjs
-          unzip -p "$APK" assets/kucode-android/extension.js | cmp - android/app/src/main/assets/kucode-android/extension.js
-          unzip -p "$APK" assets/kucode-android/package.json | cmp - android/app/src/main/assets/kucode-android/package.json
-          unzip -p "$APK" assets/kucode-tools/extension.js | cmp - android/app/src/main/assets/kucode-tools/extension.js
-          unzip -p "$APK" assets/kucode-tools/acp-client.js | cmp - android/app/src/main/assets/kucode-tools/acp-client.js
-          unzip -p "$APK" assets/kucode-tools/acp-webview.js | cmp - android/app/src/main/assets/kucode-tools/acp-webview.js
-          unzip -p "$APK" assets/kucode-tools/package.json | cmp - android/app/src/main/assets/kucode-tools/package.json
-          unzip -p "$APK" assets/kucode-tools/icon.svg | cmp - android/app/src/main/assets/kucode-tools/icon.svg
-          unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tgz|openvscode-server-linux-arm64\.tgz|boot\.html|assets/kucode-tools/|assets/licenses/"
-          unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot.so"
-          unzip -l "$APK" | grep -q "lib/arm64-v8a/libproot-loader.so"
-          unzip -l "$APK" | grep -q "assets/runtime/debian-arm64-rootfs.tgz"
-          unzip -l "$APK" | grep -q "assets/runtime/openvscode-server-linux-arm64.tgz"
-          unzip -l "$APK" | grep -q "assets/kucode-tools/extension.js"
-          unzip -l "$APK" | grep -q "assets/kucode-tools/acp-client.js"
-          unzip -l "$APK" | grep -q "assets/kucode-tools/acp-webview.js"
-          unzip -l "$APK" | grep -q "assets/kucode-tools/package.json"
-          unzip -l "$APK" | grep -q "assets/kucode-tools/icon.svg"
-          unzip -l "$APK" | grep -q "assets/licenses/LICENSE"
-          unzip -l "$APK" | grep -q "assets/licenses/THIRD_PARTY_NOTICES.md"
-          unzip -l "$APK" | grep -q "assets/licenses/MIT-OpenVSCode.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/Apache-2.0.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/GPL-2.0.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/GPL-3.0.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/LGPL-2.1.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/LGPL-3.0.txt"
-          unzip -l "$APK" | grep -q "assets/licenses/debian-manifest.txt"
+          for target_apk in "$APK" "$RELEASE_APK"; do
+            unzip -p "$target_apk" assets/runtime-probes.cjs | cmp - android/app/src/main/assets/runtime-probes.cjs
+            unzip -p "$target_apk" assets/kucode-cli.cjs | cmp - android/app/src/main/assets/kucode-cli.cjs
+            unzip -p "$target_apk" assets/kucode-android/extension.js | cmp - android/app/src/main/assets/kucode-android/extension.js
+            unzip -p "$target_apk" assets/kucode-android/package.json | cmp - android/app/src/main/assets/kucode-android/package.json
+            unzip -p "$target_apk" assets/kucode-tools/extension.js | cmp - android/app/src/main/assets/kucode-tools/extension.js
+            unzip -p "$target_apk" assets/kucode-tools/acp-client.js | cmp - android/app/src/main/assets/kucode-tools/acp-client.js
+            unzip -p "$target_apk" assets/kucode-tools/acp-webview.js | cmp - android/app/src/main/assets/kucode-tools/acp-webview.js
+            unzip -p "$target_apk" assets/kucode-tools/package.json | cmp - android/app/src/main/assets/kucode-tools/package.json
+            unzip -p "$target_apk" assets/kucode-tools/icon.svg | cmp - android/app/src/main/assets/kucode-tools/icon.svg
+            unzip -l "$target_apk" | grep -q "lib/arm64-v8a/libproot.so"
+            unzip -l "$target_apk" | grep -q "lib/arm64-v8a/libproot-loader.so"
+            unzip -l "$target_apk" | grep -q "assets/runtime/debian-arm64-rootfs.tgz"
+            unzip -l "$target_apk" | grep -q "assets/runtime/openvscode-server-linux-arm64.tgz"
+            unzip -l "$target_apk" | grep -q "assets/licenses/LICENSE"
+            unzip -l "$target_apk" | grep -q "assets/licenses/THIRD_PARTY_NOTICES.md"
+            unzip -l "$target_apk" | grep -q "assets/licenses/MIT-OpenVSCode.txt"
+            unzip -l "$target_apk" | grep -q "assets/licenses/Apache-2.0.txt"
+            unzip -l "$target_apk" | grep -q "assets/licenses/GPL-2.0.txt"
+            unzip -l "$target_apk" | grep -q "assets/licenses/GPL-3.0.txt"
+            unzip -l "$target_apk" | grep -q "assets/licenses/LGPL-2.1.txt"
+            unzip -l "$target_apk" | grep -q "assets/licenses/LGPL-3.0.txt"
+            unzip -l "$target_apk" | grep -q "assets/licenses/debian-manifest.txt"
+          done
+          unzip -l "$APK" | grep -E "libproot\.so|libproot-loader\.so|debian-arm64-rootfs\.tgz|openvscode-server-linux-arm64\.tgz|boot\.html|assets/kucode-tools/|assets/kucode-android/|assets/licenses/"
 
           # Verify 16KB ELF LOAD segment alignment for all bundled native libraries
           READELF="$(find "$ANDROID_HOME/ndk" -name llvm-readelf \( -type f -o -type l \) 2>/dev/null | sort -V | tail -n 1)"
@@ -374,6 +370,7 @@ jobs:
           path: release-files
 
       - name: Download standalone runtime assets
+        if: needs.android-apk.outputs.bootstrap_runtime == 'true'
         uses: actions/download-artifact@v4
         with:
           name: kucode-runtime-assets
@@ -406,6 +403,7 @@ jobs:
           done
 
       - name: Publish pinned runtime assets (never clobber)
+        if: needs.android-apk.outputs.bootstrap_runtime == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

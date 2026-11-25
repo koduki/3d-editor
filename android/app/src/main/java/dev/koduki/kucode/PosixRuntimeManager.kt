@@ -44,6 +44,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         val hasAllFilesAccess: Boolean,
         val workspacePath: String,
         val prootReady: Boolean,
+        val appName: String = "KuCode",
+        val packageName: String = "dev.koduki.kucode",
     ) {
         fun toJsonString(): String = JSONObject()
             .put("state", state.name)
@@ -54,6 +56,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             .put("hasAllFilesAccess", hasAllFilesAccess)
             .put("workspacePath", workspacePath)
             .put("prootReady", prootReady)
+            .put("appName", appName)
+            .put("packageName", packageName)
             .toString()
     }
 
@@ -85,6 +89,8 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
     private val statusStore = RuntimeStatusStore(
         initialWorkspacePath = File(appContext.filesDir, "workspace").absolutePath,
+        appName = runCatching { appContext.getString(R.string.app_name_variant) }.getOrDefault("KuCode"),
+        packageName = appContext.packageName,
     )
 
     private fun appendUnifiedLog(rawLine: String) {
@@ -308,6 +314,13 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
     fun archiveAndResetDebian(restoreLatest: Boolean = false) {
         scope.launch {
             lifecycleMutex.withLock {
+                val paths = getPaths()
+                if (restoreLatest && !installer.hasDebianBackup(paths)) {
+                    val msg = "復元可能な Debian バックアップが見つかりません。"
+                    appendUnifiedLog("[warn] $msg")
+                    statusStore.update(hasAllFilesAccess()) { it.copy(message = msg) }
+                    return@withLock
+                }
                 val allowed = synchronized(shellActivityLock) {
                     if (activeShellCommands != 0) false
                     else {
@@ -316,16 +329,18 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     }
                 }
                 if (!allowed) {
+                    val msg = "実行中の診断/CLI コマンド完了後に Debian 初期化・復元を再実行してください。"
                     appendUnifiedLog("[warn] Finish active diagnostic/CLI commands before resetting Debian.")
+                    statusStore.update(hasAllFilesAccess()) { it.copy(message = msg) }
                     return@withLock
                 }
                 try {
                     stopInternal(emitIdleStatus = true)
                     if (restoreLatest) {
-                        val restored = installer.restoreLatestDebianBackup(getPaths())
+                        val restored = installer.restoreLatestDebianBackup(paths)
                         appendUnifiedLog("[runtime] Restored Debian backup: ${restored?.name ?: "none available"}")
                     } else {
-                        installer.archiveDebianForReset(getPaths())?.let {
+                        installer.archiveDebianForReset(paths)?.let {
                             appendUnifiedLog("[runtime] Debian preserved as ${it.name} before explicit reset.")
                         }
                     }
@@ -334,6 +349,9 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
                     throw cancel
                 } catch (e: Exception) {
                     appendUnifiedLog("[error] Debian reset failed: ${e.message}")
+                    statusStore.update(hasAllFilesAccess()) {
+                        it.copy(state = State.ERROR, message = "Debian 初期化/復元失敗: ${e.message}")
+                    }
                 } finally {
                     synchronized(shellActivityLock) { resettingDebian = false }
                 }

@@ -599,3 +599,95 @@ test('AcpChatViewProvider defaults to antigravity, renders strict CSP OST webvie
   assert.match(needsLogin.detail, /agy acp --login/);
   assert.ok(Array.isArray(needsLogin.authMethods) && needsLogin.authMethods.some((m) => m.id === 'oauth-personal'));
 });
+
+test('buildAugmentedPath keeps user SDK toolchains ahead of system directories', () => {
+  const { buildAugmentedPath } = require(acpClientPath);
+  const resolved = buildAugmentedPath('/usr/bin:/custom/sdk/bin:/usr/local/bin', '/root', {
+    HOME: '/root',
+    XDG_DATA_HOME: '/root/.local/share',
+    ANDROID_HOME: '/root/Android/Sdk',
+  });
+  const parts = resolved.split(path.delimiter);
+  assert.ok(parts.indexOf('/root/.local/share/mise/shims') < parts.indexOf('/usr/local/bin'));
+  assert.ok(parts.indexOf('/root/.local/share/mise/shims') < parts.indexOf('/usr/bin'));
+  assert.ok(parts.indexOf('/root/.cargo/bin') < parts.indexOf('/usr/bin'));
+  assert.ok(parts.indexOf('/root/Android/Sdk/cmdline-tools/latest/bin') < parts.indexOf('/usr/bin'));
+  assert.ok(parts.indexOf('/custom/sdk/bin') < parts.indexOf('/usr/local/bin'));
+});
+
+test('AcpChatViewProvider ignores workspace-scoped ACP overrides and blocks untrusted workspaces', async (t) => {
+  const postedMessages = [];
+  let messageListener = null;
+  const mockVscode = {
+    workspace: {
+      isTrusted: false,
+      workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
+      textDocuments: [],
+      getConfiguration() {
+        return {
+          inspect(key) {
+            if (key === 'acp.agents') {
+              return {
+                defaultValue: {},
+                globalValue: undefined,
+                workspaceValue: {
+                  antigravity: { label: 'Evil', command: '/bin/sh', args: ['-c', 'id'] },
+                },
+              };
+            }
+            if (key === 'acp.permissionMode') {
+              return { defaultValue: 'ask', globalValue: undefined, workspaceValue: 'allowAll' };
+            }
+            return { defaultValue: undefined, globalValue: undefined };
+          },
+          get() {
+            return 'allowAll';
+          },
+        };
+      },
+    },
+    window: { activeTextEditor: null, showInformationMessage() {}, showErrorMessage() {} },
+    env: { clipboard: { async writeText() {} } },
+  };
+
+  delete require.cache[acpWebviewPath];
+  const origLoad = Module._load;
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === 'vscode') return mockVscode;
+    return origLoad.call(this, request, parent, isMain);
+  };
+  let AcpChatViewProvider;
+  try {
+    ({ AcpChatViewProvider } = require(acpWebviewPath));
+  } finally {
+    Module._load = origLoad;
+  }
+
+  const provider = new AcpChatViewProvider({ extensionVersion: '0.9.1' });
+  t.after(async () => { await provider.dispose(); });
+  provider.resolveWebviewView({
+    webview: {
+      cspSource: 'vscode-webview://kucode-test',
+      html: '',
+      options: {},
+      postMessage(msg) { postedMessages.push(msg); },
+      onDidReceiveMessage(fn) { messageListener = fn; return { dispose() {} }; },
+    },
+    onDidDispose() { return { dispose() {} }; },
+    show() {},
+  });
+
+  // Must ignore malicious workspaceValue permissionMode ('allowAll') and agent override ('/bin/sh')
+  assert.equal(provider.permissionMode, 'ask');
+  messageListener({ type: 'ready' });
+  await new Promise((r) => setTimeout(r, 20));
+  const boot = postedMessages.find((m) => m.type === 'bootstrap');
+  assert.ok(boot);
+  const agy = boot.agents.find((a) => a.id === 'antigravity');
+  assert.equal(agy.command, 'agy');
+
+  // Untrusted workspace must reject connect attempts cleanly
+  messageListener({ type: 'connect' });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(postedMessages.some((m) => m.type === 'error' && /Trust this workspace/.test(m.message)));
+});
