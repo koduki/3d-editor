@@ -911,4 +911,84 @@ class OtlpOutboxExporterTest {
             deleteTreeNoFollow(dir)
         }
     }
+
+    @Test
+    fun concurrentEnqueuesPreserveFinalizedSnapshotAndDoNotBlockSettingsReads() {
+        val dir = Files.createTempDirectory("kucode-otlp-concurrent-enqueue").toFile()
+        var nowMs = 1_760_007_000_000L
+        val firstEnqueuePaused = CountDownLatch(1)
+        val releaseFirstEnqueue = CountDownLatch(1)
+        val pauseFirstClock = AtomicBoolean(true)
+        val t1Executor = Executors.newSingleThreadExecutor()
+        val t2Executor = Executors.newSingleThreadExecutor()
+        val readerExecutor = Executors.newSingleThreadExecutor()
+        try {
+            val diagDir = File(dir, "diagnostics")
+            val outboxDir = File(dir, "otlp-outbox")
+            val store = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val configStore = OtlpConfigStore(InMemoryStorage(), ReversibleTestCipher())
+            configStore.saveConfig(
+                enabled = true,
+                endpointUrl = "https://otlp.example.com",
+                granularity = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+                unmeteredOnly = false,
+                authHeaderName = "Authorization",
+                authHeaderValue = "",
+                clearAuthHeader = true,
+            )
+
+            val session = store.startSession(pid = 9001, env = sampleEnv())
+            nowMs += 500L
+
+            val exporter = OtlpOutboxExporter(
+                sessionLogStore = store,
+                outboxDir = outboxDir,
+                configStore = configStore,
+                httpClient = object : OtlpHttpClient {
+                    override fun postJson(url: String, headers: Map<String, String>, jsonBody: String): OtlpHttpResponse =
+                        OtlpHttpResponse(statusCode = 200, body = "{}")
+                },
+                clockMs = {
+                    if (pauseFirstClock.compareAndSet(true, false)) {
+                        firstEnqueuePaused.countDown()
+                        releaseFirstEnqueue.await(5, TimeUnit.SECONDS)
+                    }
+                    nowMs
+                },
+            )
+
+            // Thread 1 serializes the RUNNING snapshot and pauses right before outboxStore.put()
+            val firstFuture = t1Executor.submit(Callable { exporter.enqueueSession(session.sessionId) })
+            assertTrue("First enqueue should pause before outbox put", firstEnqueuePaused.await(5, TimeUnit.SECONDS))
+
+            // While enqueueLock is held by Thread 1, settings reads must remain non-blocking
+            val publicConfig = readerExecutor.submit(Callable { exporter.getPublicConfigJson() }).get(2, TimeUnit.SECONDS)
+            assertTrue(publicConfig.getBoolean("enabled"))
+            assertEquals(0, readerExecutor.submit(Callable { exporter.pendingCount() }).get(2, TimeUnit.SECONDS))
+
+            // Thread 2 finalizes the session and concurrently attempts to enqueue the finalized snapshot
+            nowMs += 500L
+            store.endSession("clean-exit")
+            val secondFuture = t2Executor.submit(Callable { exporter.enqueueSession(session.sessionId) })
+
+            // Release Thread 1; enqueueLock guarantees Thread 1 writes before Thread 2 serializes & publishes
+            releaseFirstEnqueue.countDown()
+            assertTrue(firstFuture.get(5, TimeUnit.SECONDS))
+            assertTrue(secondFuture.get(5, TimeUnit.SECONDS))
+
+            val latest = OtlpOutboxStore(outboxDir).get(session.sessionId)
+            assertNotNull(latest)
+            assertTrue(
+                "Finalized ENDED_CLEANLY snapshot must not be overwritten by earlier RUNNING enqueue",
+                latest!!.tracesJson.contains("ENDED_CLEANLY"),
+            )
+            assertFalse(latest.tracesJson.contains("\"RUNNING\""))
+        } finally {
+            releaseFirstEnqueue.countDown()
+            t1Executor.shutdownNow()
+            t2Executor.shutdownNow()
+            readerExecutor.shutdownNow()
+            deleteTreeNoFollow(dir)
+        }
+    }
 }

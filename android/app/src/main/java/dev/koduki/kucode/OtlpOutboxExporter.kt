@@ -569,10 +569,16 @@ class OtlpOutboxExporter(
             .put("lastError", lastError ?: JSONObject.NULL)
     }
 
-    // Lock ordering invariant: flushLock -> storeLock (NEVER storeLock -> flushLock).
-    // flushLock serializes flushOutbox() executions; storeLock guards short outboxStore file operations only
-    // and MUST NEVER be held across httpClient.postJson(...) calls.
+    // Lock ordering invariants (strict DAG, never cyclic):
+    // - flushLock -> storeLock (NEVER storeLock -> flushLock)
+    // - enqueueLock -> storeLock (NEVER storeLock -> enqueueLock, NEVER nested with flushLock)
+    // flushLock serializes flushOutbox() executions; enqueueLock serializes snapshot creation through
+    // outbox publication so concurrent enqueues cannot overwrite a newer finalized snapshot with an
+    // older running snapshot; storeLock guards short outboxStore file operations only and MUST NEVER
+    // be held across httpClient.postJson(...) calls or session serialization, keeping settings reads
+    // independent of both network I/O and serialization.
     private val flushLock = Any()
+    private val enqueueLock = Any()
     private val storeLock = Any()
     private val outboxStore = OtlpOutboxStore(outboxDir = outboxDir, maxQueuedSessions = maxOutboxSessions)
 
@@ -615,39 +621,41 @@ class OtlpOutboxExporter(
         granularity: String? = null,
         vscodeDataDir: File? = null,
     ): Boolean {
-        val cfg = configStore.loadConfig()
-        if (!cfg.enabled) return false
-        val resolved = sessionLogStore.resolveSessionSummary(sessionId) ?: return false
-        val effectiveGranularity = if (granularity != null && OtlpJsonSerializer.isValidGranularity(granularity)) {
-            granularity
-        } else {
-            cfg.granularity
-        }
-        val payloads = OtlpJsonSerializer.serializeSession(
-            store = sessionLogStore,
-            selector = resolved.sessionId,
-            granularity = effectiveGranularity,
-            vscodeDataDir = vscodeDataDir,
-        ) ?: return false
+        synchronized(enqueueLock) {
+            val cfg = configStore.loadConfig()
+            if (!cfg.enabled) return false
+            val resolved = sessionLogStore.resolveSessionSummary(sessionId) ?: return false
+            val effectiveGranularity = if (granularity != null && OtlpJsonSerializer.isValidGranularity(granularity)) {
+                granularity
+            } else {
+                cfg.granularity
+            }
+            val payloads = OtlpJsonSerializer.serializeSession(
+                store = sessionLogStore,
+                selector = resolved.sessionId,
+                granularity = effectiveGranularity,
+                vscodeDataDir = vscodeDataDir,
+            ) ?: return false
 
-        val item = OtlpOutboxStore.OutboxItem(
-            sessionId = resolved.sessionId,
-            enqueuedAtMs = clockMs(),
-            attempts = 0,
-            nextAttemptAtMs = 0L,
-            lastError = null,
-            tracesSent = false,
-            metricsSent = payloads.metricsJson == null,
-            logsSent = payloads.logsJson == null,
-            tracesJson = payloads.tracesJson.toString(),
-            metricsJson = payloads.metricsJson?.toString(),
-            logsJson = payloads.logsJson?.toString(),
-            revision = UUID.randomUUID().toString(),
-        )
-        synchronized(storeLock) {
-            outboxStore.put(item)
+            val item = OtlpOutboxStore.OutboxItem(
+                sessionId = resolved.sessionId,
+                enqueuedAtMs = clockMs(),
+                attempts = 0,
+                nextAttemptAtMs = 0L,
+                lastError = null,
+                tracesSent = false,
+                metricsSent = payloads.metricsJson == null,
+                logsSent = payloads.logsJson == null,
+                tracesJson = payloads.tracesJson.toString(),
+                metricsJson = payloads.metricsJson?.toString(),
+                logsJson = payloads.logsJson?.toString(),
+                revision = UUID.randomUUID().toString(),
+            )
+            synchronized(storeLock) {
+                outboxStore.put(item)
+            }
+            return true
         }
-        return true
     }
 
     private data class ExportGate(
