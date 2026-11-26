@@ -154,16 +154,19 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
             } finally {
                 initialReconcileLatch.countDown()
             }
-            if (reconciledSessions.isNotEmpty() || otlpOutboxExporter.pendingCount() > 0) {
+            if (reconciledSessions.isNotEmpty() || otlpOutboxExporter.pendingCount() > 0 || otlpOutboxExporter.hasPendingCrashSessions()) {
                 scope.launch {
                     runCatching {
                         if (otlpConfigStore.loadConfig().enabled) {
+                            otlpOutboxExporter.drainPendingCrashSessions(vscodeDataDir = vscodeDataDir)
                             for (summary in reconciledSessions) {
                                 otlpOutboxExporter.enqueueSession(summary.sessionId, vscodeDataDir = vscodeDataDir)
                             }
                             if (otlpOutboxExporter.pendingCount() > 0) {
                                 otlpOutboxExporter.flushOutbox(ignoreBackoff = false)
                             }
+                        } else if (otlpOutboxExporter.hasPendingCrashSessions()) {
+                            otlpOutboxExporter.drainPendingCrashSessions(vscodeDataDir = vscodeDataDir)
                         }
                     }
                 }
@@ -603,6 +606,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
             try {
                 if (handlingCrash.compareAndSet(false, true)) {
                     stopLogcatCollector()
+                    val crashedSessionId = store.currentSessionId()
                     val isOom = throwable is OutOfMemoryError || throwable.cause is OutOfMemoryError
                     val emergencyMetric = if (isOom) {
                         null
@@ -615,6 +619,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
                         finalMetric = emergencyMetric,
                         vscodeDataDir = if (isOom) null else vscodeDataDir,
                     )
+                    otlpOutboxExporter.markPendingCrashSessionIfEnabled(crashedSessionId)
                 }
             } catch (_: Throwable) {
                 // Never suppress chaining to Android's default crash handler

@@ -266,4 +266,168 @@ class OtlpOutboxExporterTest {
             deleteTreeNoFollow(dir)
         }
     }
+
+    @Test
+    fun finalizedJvmCrashSessionMarkedDuringCrashIsEnqueuedAndExportedOnNextBoot() {
+        val dir = Files.createTempDirectory("kucode-otlp-crash-nextboot").toFile()
+        var nowMs = 1_760_000_700_000L
+        val sentRequests = mutableListOf<Pair<String, String>>()
+        try {
+            val diagDir = File(dir, "diagnostics")
+            val outboxDir = File(dir, "otlp-outbox")
+            val storage = InMemoryStorage()
+            val cipher = ReversibleTestCipher()
+            val configStore1 = OtlpConfigStore(storage, cipher)
+            configStore1.saveConfig(
+                enabled = true,
+                endpointUrl = "https://otlp.example.com",
+                granularity = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+                unmeteredOnly = false,
+                authHeaderName = "Authorization",
+                authHeaderValue = "",
+                clearAuthHeader = true,
+            )
+
+            // Process 1: active session crashes with OOM (finalized as ENDED_ABNORMALLY before death)
+            val store1 = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val exporter1 = OtlpOutboxExporter(
+                sessionLogStore = store1,
+                outboxDir = outboxDir,
+                configStore = configStore1,
+                clockMs = { nowMs },
+            )
+            assertTrue(exporter1.isEnabledCached())
+
+            store1.startSession(pid = 3001, env = sampleEnv())
+            nowMs += 200L
+            store1.startSpan(name = "proot.command", startMs = nowMs)
+            val crashedId = store1.currentSessionId()
+            nowMs += 300L
+            store1.recordUncaughtCrash("main", OutOfMemoryError("simulated oom"))
+            exporter1.markPendingCrashSessionIfEnabled(crashedId)
+
+            // Marker file is non-.json, so outbox pendingCount() is still 0 until next boot drains it
+            assertTrue(exporter1.hasPendingCrashSessions())
+            assertEquals(0, exporter1.pendingCount())
+            assertFalse(File(diagDir, "otlp-outbox").exists())
+
+            // Process 2 (next boot): reconcileUnfinishedSessions skips ENDED_ABNORMALLY sessions
+            nowMs += 5_000L
+            val store2 = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val reconciled = store2.reconcileUnfinishedSessions(currentPid = 3002)
+            assertTrue("Already-finalized JVM crash must be skipped by reconcileUnfinishedSessions", reconciled.isEmpty())
+
+            val fakeClient = object : OtlpHttpClient {
+                override fun postJson(url: String, headers: Map<String, String>, jsonBody: String): OtlpHttpResponse {
+                    sentRequests.add(url to jsonBody)
+                    return OtlpHttpResponse(statusCode = 200, body = "{}")
+                }
+            }
+            val configStore2 = OtlpConfigStore(storage, cipher)
+            val exporter2 = OtlpOutboxExporter(
+                sessionLogStore = store2,
+                outboxDir = outboxDir,
+                configStore = configStore2,
+                httpClient = fakeClient,
+                clockMs = { nowMs },
+            )
+
+            assertTrue(exporter2.hasPendingCrashSessions())
+            assertEquals(1, exporter2.drainPendingCrashSessions())
+            assertFalse(exporter2.hasPendingCrashSessions())
+            assertEquals(1, exporter2.pendingCount())
+
+            val flushResult = exporter2.flushOutbox()
+            assertTrue(flushResult.ok)
+            assertTrue(flushResult.enabled)
+            assertEquals(1, flushResult.flushed)
+            assertEquals(0, flushResult.remaining)
+            assertFalse(exporter2.hasPendingCrashSessions())
+            assertEquals(0, exporter2.pendingCount())
+
+            val tracesBody = sentRequests.firstOrNull { it.first == "https://otlp.example.com/v1/traces" }?.second.orEmpty()
+            val logsBody = sentRequests.firstOrNull { it.first == "https://otlp.example.com/v1/logs" }?.second.orEmpty()
+            assertTrue("Expected /v1/traces payload with crashed session ID", tracesBody.contains(crashedId!!))
+            assertTrue("Expected /v1/traces payload with ERROR status code 2", tracesBody.contains("\"code\":2"))
+            assertTrue("Expected /v1/traces payload with proot.command span", tracesBody.contains("proot.command"))
+            assertTrue("Expected /v1/logs payload with crash trace", logsBody.contains("OutOfMemoryError"))
+            assertTrue("Expected /v1/logs payload with simulated oom message", logsBody.contains("simulated oom"))
+        } finally {
+            deleteTreeNoFollow(dir)
+        }
+    }
+
+    @Test
+    fun pendingCrashSessionMarkerIsClearedWithoutSendingWhenConsentWithdrawnBeforeNextBoot() {
+        val dir = Files.createTempDirectory("kucode-otlp-crash-consent-off").toFile()
+        var nowMs = 1_760_000_800_000L
+        val sentRequests = mutableListOf<String>()
+        try {
+            val diagDir = File(dir, "diagnostics")
+            val outboxDir = File(dir, "otlp-outbox")
+            val storage = InMemoryStorage()
+            val cipher = ReversibleTestCipher()
+            val configStore1 = OtlpConfigStore(storage, cipher)
+            configStore1.saveConfig(
+                enabled = true,
+                endpointUrl = "https://otlp.example.com",
+                granularity = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+                unmeteredOnly = false,
+                authHeaderName = "Authorization",
+                authHeaderValue = "",
+                clearAuthHeader = true,
+            )
+
+            val store1 = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val exporter1 = OtlpOutboxExporter(
+                sessionLogStore = store1,
+                outboxDir = outboxDir,
+                configStore = configStore1,
+                clockMs = { nowMs },
+            )
+            store1.startSession(pid = 4001, env = sampleEnv())
+            val crashedId = store1.currentSessionId()
+            nowMs += 200L
+            store1.recordUncaughtCrash("Worker-1", IllegalStateException("fatal worker failure"))
+            exporter1.markPendingCrashSessionIfEnabled(crashedId)
+            assertTrue(exporter1.hasPendingCrashSessions())
+
+            // Consent withdrawn before next-boot drain
+            val configStore2 = OtlpConfigStore(storage, cipher)
+            configStore2.saveConfig(
+                enabled = false,
+                endpointUrl = "https://otlp.example.com",
+                granularity = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+                unmeteredOnly = false,
+                authHeaderName = "Authorization",
+                authHeaderValue = "",
+                clearAuthHeader = false,
+            )
+
+            val fakeClient = object : OtlpHttpClient {
+                override fun postJson(url: String, headers: Map<String, String>, jsonBody: String): OtlpHttpResponse {
+                    sentRequests.add(url)
+                    return OtlpHttpResponse(statusCode = 200, body = "{}")
+                }
+            }
+            val store2 = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val exporter2 = OtlpOutboxExporter(
+                sessionLogStore = store2,
+                outboxDir = outboxDir,
+                configStore = configStore2,
+                httpClient = fakeClient,
+                clockMs = { nowMs },
+            )
+
+            assertEquals(0, exporter2.drainPendingCrashSessions())
+            assertFalse(exporter2.hasPendingCrashSessions())
+            assertEquals(0, exporter2.pendingCount())
+            val flushRes = exporter2.flushOutbox()
+            assertFalse(flushRes.enabled)
+            assertEquals("disabled", flushRes.skippedReason)
+            assertTrue(sentRequests.isEmpty())
+        } finally {
+            deleteTreeNoFollow(dir)
+        }
+    }
 }

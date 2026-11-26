@@ -2,6 +2,7 @@ package dev.koduki.kucode
 
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URI
@@ -137,8 +138,14 @@ class OtlpConfigStore(
 
     private val lock = Any()
 
+    @Volatile
+    private var cachedEnabled: Boolean = runCatching { storage.getBoolean(KEY_ENABLED, false) }.getOrDefault(false)
+
+    fun isEnabledCached(): Boolean = cachedEnabled
+
     fun loadConfig(): OtlpConfig = synchronized(lock) {
         val enabled = storage.getBoolean(KEY_ENABLED, false)
+        cachedEnabled = enabled
         val endpointUrl = storage.getString(KEY_ENDPOINT_URL).orEmpty()
         val rawGranularity = storage.getString(KEY_GRANULARITY)
         val granularity = if (OtlpJsonSerializer.isValidGranularity(rawGranularity)) {
@@ -206,6 +213,7 @@ class OtlpConfigStore(
         }
 
         storage.putBoolean(KEY_ENABLED, enabled)
+        cachedEnabled = enabled
         storage.putString(KEY_ENDPOINT_URL, validatedUrl.normalizedBaseUrl)
         storage.putString(KEY_GRANULARITY, granularity)
         storage.putBoolean(KEY_UNMETERED_ONLY, unmeteredOnly)
@@ -433,6 +441,49 @@ class OtlpOutboxStore(
         return outboxDir.listFiles { f -> f.isFile && f.name.endsWith(".json") }?.size ?: 0
     }
 
+    fun markPendingCrashSession(sessionId: String) {
+        val clean = sessionId.trim()
+        if (!SAFE_ID_REGEX.matches(clean)) return
+        if (Files.isSymbolicLink(outboxDir.toPath())) return
+        outboxDir.mkdirs()
+        val file = pendingCrashFile
+        if (Files.isSymbolicLink(file.toPath())) return
+        FileOutputStream(file, true).use { fos ->
+            fos.write((clean + "\n").toByteArray(Charsets.UTF_8))
+            fos.flush()
+        }
+    }
+
+    fun hasPendingCrashSessions(): Boolean {
+        val file = pendingCrashFile
+        return file.isFile && !Files.isSymbolicLink(file.toPath()) && file.length() > 0L
+    }
+
+    fun readPendingCrashSessions(): List<String> {
+        val file = pendingCrashFile
+        if (!file.isFile || Files.isSymbolicLink(file.toPath())) return emptyList()
+        val unique = LinkedHashSet<String>()
+        runCatching {
+            file.useLines(Charsets.UTF_8) { lines ->
+                for (line in lines) {
+                    val clean = line.trim()
+                    if (SAFE_ID_REGEX.matches(clean)) {
+                        unique.add(clean)
+                    }
+                }
+            }
+        }
+        val cap = maxQueuedSessions.coerceAtLeast(1)
+        val list = unique.toList()
+        return if (list.size > cap) list.takeLast(cap) else list
+    }
+
+    fun clearPendingCrashSessions() {
+        runCatching { Files.deleteIfExists(pendingCrashFile.toPath()) }
+    }
+
+    private val pendingCrashFile: File get() = File(outboxDir, FILE_PENDING_CRASH_IDS)
+
     private fun pruneIfNeeded() {
         val cap = maxQueuedSessions.coerceAtLeast(1)
         val items = list()
@@ -449,6 +500,7 @@ class OtlpOutboxStore(
     }
 
     companion object {
+        private const val FILE_PENDING_CRASH_IDS = "pending-crash.ids"
         private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9._-]+$")
     }
 }
@@ -499,6 +551,34 @@ class OtlpOutboxExporter(
     fun hasSession(selector: String): Boolean = sessionLogStore.resolveSessionSummary(selector) != null
 
     fun getPublicConfigJson(): JSONObject = configStore.getPublicConfigJson(outboxPendingCount = pendingCount())
+
+    fun isEnabledCached(): Boolean = configStore.isEnabledCached()
+
+    fun markPendingCrashSessionIfEnabled(sessionId: String?) {
+        if (!sessionId.isNullOrBlank() && configStore.isEnabledCached()) {
+            runCatching { outboxStore.markPendingCrashSession(sessionId) }
+        }
+    }
+
+    fun hasPendingCrashSessions(): Boolean = synchronized(lock) { outboxStore.hasPendingCrashSessions() }
+
+    fun drainPendingCrashSessions(vscodeDataDir: File? = null): Int = synchronized(lock) {
+        val ids = outboxStore.readPendingCrashSessions()
+        if (ids.isEmpty()) return 0
+        val cfg = configStore.loadConfig()
+        if (!cfg.enabled) {
+            outboxStore.clearPendingCrashSessions()
+            return 0
+        }
+        var enqueued = 0
+        for (id in ids) {
+            if (enqueueSession(id, vscodeDataDir = vscodeDataDir)) {
+                enqueued++
+            }
+        }
+        outboxStore.clearPendingCrashSessions()
+        enqueued
+    }
 
     fun enqueueSession(
         sessionId: String,
