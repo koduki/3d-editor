@@ -17,13 +17,15 @@
 - Supply-chain & legal compliance: `runtime-assets.lock.json`, `scripts/build-proot-android.sh`, `scripts/fetch-runtime-assets.sh`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `LICENSES/**`, `android/gradle/wrapper/gradle-wrapper.properties`
 - Security & build contracts: `android/app/proguard-rules.pro`, `android/app/src/main/res/xml/network_security_config.xml`
 - Approved feature contracts (locked automatically after `/ship` S2 approval): `spec.md`, `docs/adr/**`, `docs/specs/**/spec.md`
+- Clean-room spec-derived oracle tests (authored in separate agent process during `S3a_ORACLE_TEST_GEN`, hard-locked during implementation): `tests/oracle/**`, `*.oracle.test.cjs`, `*OracleTest.kt`, `*_oracle.py`
 - Never delete, `.skip`, `@Ignore`, or weaken existing tests, and never add suppression comments (`eslint-disable`, `@ts-ignore`, `# noqa`, new `@Suppress`) to pass checks.
 
 ## 3. Fast Local Verification Commands
 1. Non-ignorable guards: `node scripts/guards/run-all-guards.mjs`
-2. Syntax checks: `bash -n scripts/*.sh && node --check android/app/src/main/assets/kucode-cli.cjs android/app/src/main/assets/runtime-probes.cjs android/app/src/main/assets/kucode-android/extension.js android/app/src/main/assets/kucode-tools/extension.js android/app/src/main/assets/kucode-tools/acp-client.js android/app/src/main/assets/kucode-tools/acp-webview.js`
-3. Python & Node tests: `python3 -m unittest discover -s tests -p test_runtime_assets.py -v && node --test tests/*.test.cjs`
-4. Android JVM tests (when Android SDK is present): `cd android && ./gradlew :app:testDebugUnitTest :app:testDebugMediumUnitTest :app:testReleaseUnitTest`
+2. Clean-room oracle suites: `node scripts/guards/run-oracle-tests.mjs`
+3. Syntax checks: `bash -n scripts/*.sh && node --check android/app/src/main/assets/kucode-cli.cjs android/app/src/main/assets/runtime-probes.cjs android/app/src/main/assets/kucode-android/extension.js android/app/src/main/assets/kucode-tools/extension.js android/app/src/main/assets/kucode-tools/acp-client.js android/app/src/main/assets/kucode-tools/acp-webview.js`
+4. Python & Node tests: `python3 -m unittest discover -s tests -p test_runtime_assets.py -v && node --test tests/*.test.cjs`
+5. Android JVM tests (when Android SDK is present): `cd android && ./gradlew :app:testDebugUnitTest :app:testDebugMediumUnitTest :app:testReleaseUnitTest`
 
 ## 4. Truthfulness Invariant
 - CI and host JVM/Node tests do **NOT** prove XREAL AURA real-device compatibility (`spec.md` §5.5). Always record unexecuted physical-device checks as `NOT RUN`.

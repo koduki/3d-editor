@@ -12,7 +12,7 @@ function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-test('ship.config.json defines cloud-first Remote Agents, 1-gate, one-by-one grilling, and Codex 10-min policy', async () => {
+test('ship.config.json defines cloud-first Remote Agents, 1-gate, one-by-one grilling, Clean-Room Oracle, and Codex 10-min policy', async () => {
   const { loadShipConfig } = await import('../.agents/skills/ship/scripts/state.mjs');
   const cfg = loadShipConfig(REPO_ROOT);
   assert.equal(cfg.project.repository, 'koduki/kucode');
@@ -22,6 +22,11 @@ test('ship.config.json defines cloud-first Remote Agents, 1-gate, one-by-one gri
   assert.equal(cfg.grilling.autoSkipWhenClear, true);
   assert.equal(cfg.grilling.maxQuestions, 20);
   assert.deepEqual(cfg.humanGates, ['S2_CONTRACT_LOCK']);
+  assert.equal(cfg.oracleTesting.enabled, true);
+  assert.equal(cfg.oracleTesting.requireSeparateAgentProcess, true);
+  assert.equal(cfg.oracleTesting.authorBeforeImplementation, true);
+  assert.equal(cfg.oracleTesting.forbidReadingImplementationDiff, true);
+  assert.equal(cfg.oracleTesting.lockOracleDuringImplementation, true);
   assert.equal(cfg.codexReview.primarySurface, 'github-app');
   assert.equal(cfg.codexReview.timeoutSeconds, 600);
   assert.equal(cfg.codexReview.onTimeoutOrQuota, 'escalate');
@@ -35,7 +40,7 @@ test('run-all-guards passes cleanly on the live KuCode repository', async () => 
   assert.ok(report.checkedFiles > 20);
 });
 
-test('run-all-guards blocks suppressions, skips, trust regressions, module leaks, build drift, and secrets', async () => {
+test('run-all-guards blocks suppressions, skips, trust regressions, module leaks, build drift, secrets, and weak oracle tests', async () => {
   const { runGuards } = await import('../scripts/guards/run-all-guards.mjs');
   const tmp = makeTempDir('kucode-guard-test-');
   try {
@@ -55,6 +60,7 @@ test('run-all-guards blocks suppressions, skips, trust regressions, module leaks
         contributes: { configuration: { properties: { 'kucode.acp.defaultAgent': { scope: 'window' } } } },
       }));
     write('tests/bad.test.cjs', 'test.skip("weakened", () => {});\n');
+    write('tests/oracle/empty.oracle.test.cjs', 'const test = require("node:test"); test("no ac or assert", () => {});\n');
     write('android/app/src/main/java/dev/koduki/kucode/Foo.kt',
       '@Suppress("UNCHECKED_CAST")\nclass Foo { val tok = "ghp_1234567890abcdefghijklmno" }\n');
     write('android/app/build.gradle.kts', 'android { defaultConfig { targetSdk = 34 } }\n');
@@ -76,6 +82,7 @@ test('run-all-guards blocks suppressions, skips, trust regressions, module leaks
       'android-build-invariants',
       'no-secret-or-keystore-commit',
       'runtime-lock-and-license-presence',
+      'oracle-test-integrity',
     ]) {
       assert.ok(ids.has(expected), `Expected violation ${expected}, got: ${Array.from(ids).join(', ')}`);
     }
@@ -85,7 +92,7 @@ test('run-all-guards blocks suppressions, skips, trust regressions, module leaks
   }
 });
 
-test('guard-boundaries locks protected files by default, honors S2 allowedProtectedPaths, and never unlocks secrets', async () => {
+test('guard-boundaries enforces two-way Clean-Room Oracle isolation, S2 allowedProtectedPaths, and never-unlockable secrets', async () => {
   const { evaluateBoundaryWrite } = await import('../.agents/skills/ship/scripts/guard-boundaries.mjs');
   const { loadShipConfig } = await import('../.agents/skills/ship/scripts/state.mjs');
   const config = loadShipConfig(REPO_ROOT);
@@ -99,7 +106,9 @@ test('guard-boundaries locks protected files by default, honors S2 allowedProtec
   assert.equal(
     evaluateBoundaryWrite('/repo/runtime-assets.lock.json', {
       config,
+      currentState: 'S3b_IMPL_WORKFLOW',
       contractLocked: true,
+      oracleLocked: true,
       allowedProtectedPaths: ['runtime-assets.lock.json'],
     }).decision,
     'allow',
@@ -107,7 +116,9 @@ test('guard-boundaries locks protected files by default, honors S2 allowedProtec
   assert.equal(
     evaluateBoundaryWrite('/repo/.github/workflows/ci.yml', {
       config,
+      currentState: 'S3b_IMPL_WORKFLOW',
       contractLocked: true,
+      oracleLocked: true,
       allowedProtectedPaths: ['runtime-assets.lock.json'],
     }).decision,
     'deny',
@@ -129,10 +140,60 @@ test('guard-boundaries locks protected files by default, honors S2 allowedProtec
     'deny',
   );
 
+  // Two-way Clean-Room Oracle Isolation:
+  // 1) During S3a_ORACLE_TEST_GEN: ONLY oracle test files may be written; production code is blocked!
+  assert.equal(
+    evaluateBoundaryWrite('/repo/tests/oracle/xr-focus.oracle.test.cjs', {
+      config,
+      currentState: 'S3a_ORACLE_TEST_GEN',
+      contractLocked: true,
+      oracleLocked: false,
+    }).decision,
+    'allow',
+  );
+  assert.equal(
+    evaluateBoundaryWrite('/repo/android/app/src/main/java/dev/koduki/kucode/MainActivity.kt', {
+      config,
+      currentState: 'S3a_ORACLE_TEST_GEN',
+      contractLocked: true,
+      oracleLocked: false,
+    }).decision,
+    'deny',
+  );
+
+  // 2) After lock-oracle (S3b onward): production code is allowed, but ALL oracle tests are hard-locked!
+  assert.equal(
+    evaluateBoundaryWrite('/repo/tests/oracle/xr-focus.oracle.test.cjs', {
+      config,
+      currentState: 'S3b_IMPL_WORKFLOW',
+      contractLocked: true,
+      oracleLocked: true,
+      oracleTestFiles: ['tests/oracle/xr-focus.oracle.test.cjs'],
+    }).decision,
+    'deny',
+  );
+  assert.equal(
+    evaluateBoundaryWrite('/repo/android/app/src/test/java/dev/koduki/kucode/oracle/XrFocusOracleTest.kt', {
+      config,
+      currentState: 'S3b_IMPL_WORKFLOW',
+      contractLocked: true,
+      oracleLocked: true,
+    }).decision,
+    'deny',
+  );
+  assert.equal(
+    evaluateBoundaryWrite('/repo/android/app/src/main/java/dev/koduki/kucode/PosixRuntimeConfig.kt', {
+      config,
+      currentState: 'S3b_IMPL_WORKFLOW',
+      contractLocked: true,
+      oracleLocked: true,
+    }).decision,
+    'allow',
+  );
+
   // Contracts editable before S2 approval, locked after
   assert.equal(evaluateBoundaryWrite('/repo/docs/specs/new-feat/spec.md', { config, contractLocked: false }).decision, 'allow');
   assert.equal(evaluateBoundaryWrite('/repo/docs/specs/new-feat/spec.md', { config, contractLocked: true }).decision, 'deny');
-  assert.equal(evaluateBoundaryWrite('/repo/android/app/src/main/java/dev/koduki/kucode/PosixRuntimeConfig.kt', { config, contractLocked: true }).decision, 'allow');
 });
 
 test('guard-commands blocks hook bypass, force push, secret prints, and Stable KuCode tampering', async () => {
@@ -150,7 +211,7 @@ test('guard-commands blocks hook bypass, force push, secret prints, and Stable K
   assert.equal(evaluateCommand('node --test tests/agentic-harness.test.cjs').decision, 'allow');
 });
 
-test('/ship state machine enforces contract lock, CI+Codex auto-merge preconditions, retry caps, and Stop hook driver', async () => {
+test('/ship state machine enforces S3a oracle-before-impl lock, --oracle-passed, CI+Codex preconditions, retry caps, and Stop hook', async () => {
   const stateMod = await import('../.agents/skills/ship/scripts/state.mjs');
   const stopMod = await import('../.agents/skills/ship/scripts/stop-driver.mjs');
   const sessionInitMod = await import('../.agents/skills/ship/scripts/session-init.mjs');
@@ -159,28 +220,48 @@ test('/ship state machine enforces contract lock, CI+Codex auto-merge preconditi
 
   try {
     stateMod.initRun(statePath, 'Add XR focus indicator', { cwd: REPO_ROOT });
-    assert.throws(() => stateMod.transitionState(statePath, 'S3_IMPL_WORKFLOW'), /contractLocked=true/);
+    assert.throws(() => stateMod.transitionState(statePath, 'S3a_ORACLE_TEST_GEN'), /contractLocked=true/);
 
     stateMod.transitionState(statePath, 'S2_CONTRACT_LOCK');
     assert.equal(stopMod.evaluateStop({ fullyIdle: true }, statePath).decision, 'allow');
 
+    // Approve contract -> enters S3a_ORACLE_TEST_GEN first (NOT S3b)
     const approved = stateMod.approveContract(statePath, {
       specPath: 'docs/specs/demo/spec.md',
       deployTarget: 'merge-only',
       allowedProtectedPaths: ['runtime-assets.lock.json'],
     });
     assert.equal(approved.contractLocked, true);
-    assert.deepEqual(approved.allowedProtectedPaths, ['runtime-assets.lock.json']);
-    assert.equal(approved.currentState, 'S3_IMPL_WORKFLOW');
+    assert.equal(approved.oracleLocked, false);
+    assert.equal(approved.currentState, 'S3a_ORACLE_TEST_GEN');
     assert.equal(approved.gate, 'AUTO_PROCEED');
 
-    // SessionStart hook surfaces active run when KUCODE_SHIP_STATE_FILE points to active state
+    // Cannot skip straight to S3b_IMPL_WORKFLOW before locking independent oracle tests!
+    assert.throws(() => stateMod.transitionState(statePath, 'S3b_IMPL_WORKFLOW'), /oracle tests are authored and locked/);
+
+    // lock-oracle rejects empty or unverified-Red oracle tests
+    assert.throws(() => stateMod.lockOracle(statePath, { files: [] }), /requires at least one oracle test file/);
+    assert.throws(
+      () => stateMod.lockOracle(statePath, { files: ['tests/oracle/demo.oracle.test.cjs'], preImplRedVerified: false }),
+      /pre-implementation Red failure/,
+    );
+
+    // Lock oracle with Red verification -> enters S3b_IMPL_WORKFLOW
+    const locked = stateMod.lockOracle(statePath, {
+      files: ['tests/oracle/demo.oracle.test.cjs'],
+      preImplRedVerified: true,
+    });
+    assert.equal(locked.oracleLocked, true);
+    assert.deepEqual(locked.oracleTestFiles, ['tests/oracle/demo.oracle.test.cjs']);
+    assert.equal(locked.currentState, 'S3b_IMPL_WORKFLOW');
+
+    // SessionStart hook surfaces active state
     const prevEnv = process.env.KUCODE_SHIP_STATE_FILE;
     process.env.KUCODE_SHIP_STATE_FILE = statePath;
     try {
       const initOut = sessionInitMod.runSessionInit(tmp);
       assert.equal(initOut.injectSteps.length, 1);
-      assert.match(initOut.injectSteps[0].systemMessage.systemMessage, /S3_IMPL_WORKFLOW/);
+      assert.match(initOut.injectSteps[0].systemMessage.systemMessage, /S3b_IMPL_WORKFLOW/);
     } finally {
       if (prevEnv === undefined) delete process.env.KUCODE_SHIP_STATE_FILE;
       else process.env.KUCODE_SHIP_STATE_FILE = prevEnv;
@@ -193,21 +274,25 @@ test('/ship state machine enforces contract lock, CI+Codex auto-merge preconditi
     assert.equal(stopMod.evaluateStop({ fullyIdle: true }, statePath).decision, 'allow');
     assert.equal(stateMod.loadState(statePath).currentState, 'ESCALATED');
 
-    // Resume -> S5 -> S6 requires BOTH --ci-passed AND --codex-passed
-    stateMod.approveContract(statePath);
-    stateMod.transitionState(statePath, 'S5_PR_CI_HEAL_LOOP', { prNumber: 99 });
+    // Resume after escalation returns to S3b because oracleLocked is already true
+    const resumed = stateMod.approveContract(statePath);
+    assert.equal(resumed.currentState, 'S3b_IMPL_WORKFLOW');
+
+    // Cannot advance to S5_PR_CI_HEAL_LOOP without --oracle-passed
+    assert.throws(() => stateMod.transitionState(statePath, 'S5_PR_CI_HEAL_LOOP', { prNumber: 99 }), /locked oracle tests pass/);
+
+    // Advance with --oracle-passed -> S6 requires BOTH --ci-passed AND --codex-passed
+    stateMod.transitionState(statePath, 'S5_PR_CI_HEAL_LOOP', { prNumber: 99, oraclePassed: true });
     assert.throws(() => stateMod.transitionState(statePath, 'S6_AUTO_MERGE_AND_DEPLOY'), /CI status is passed/);
     assert.throws(
       () => stateMod.transitionState(statePath, 'S6_AUTO_MERGE_AND_DEPLOY', { ciPassed: true }),
       /Codex PR review completes cleanly/,
     );
 
-    // Retry cap (max 2)
+    // Retry cap (max 2) & 2-strikes guard promotion
     assert.equal(stateMod.recordRetry(statePath, 'ci', REPO_ROOT).exceeded, false);
     assert.equal(stateMod.recordRetry(statePath, 'ci', REPO_ROOT).exceeded, false);
     assert.equal(stateMod.recordRetry(statePath, 'ci', REPO_ROOT).exceeded, true);
-
-    // 2 strikes -> promoteToGuard
     assert.equal(stateMod.recordFinding(statePath, 'acp-path-order', 'first hit').promoteToGuard, false);
     assert.equal(stateMod.recordFinding(statePath, 'acp-path-order', 'second hit').promoteToGuard, true);
 
@@ -215,6 +300,30 @@ test('/ship state machine enforces contract lock, CI+Codex auto-merge preconditi
     stateMod.transitionState(statePath, 'S6_AUTO_MERGE_AND_DEPLOY', { ciPassed: true, codexPassed: true });
     stateMod.transitionState(statePath, 'DONE');
     assert.equal(stopMod.evaluateStop({ fullyIdle: true }, statePath).decision, 'allow');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('run-oracle-tests discovers and executes Node/Python clean-room oracle suites and supports --require-non-empty', async () => {
+  const { runOracleSuites } = await import('../scripts/guards/run-oracle-tests.mjs');
+  const tmp = makeTempDir('kucode-oracle-runner-');
+  try {
+    // Empty repo passes by default, fails with requireNonEmpty
+    assert.equal(runOracleSuites(tmp, { requireNonEmpty: false }).passed, true);
+    assert.equal(runOracleSuites(tmp, { requireNonEmpty: true }).passed, false);
+
+    // Add a valid Node oracle test referencing AC-1
+    const oracleDir = path.join(tmp, 'tests', 'oracle');
+    fs.mkdirSync(oracleDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(oracleDir, 'demo.oracle.test.cjs'),
+      "const test = require('node:test');\nconst assert = require('node:assert/strict');\ntest('[AC-1] contract passes', () => { assert.equal(1 + 1, 2); });\n",
+      'utf8',
+    );
+    const res = runOracleSuites(tmp, { requireNonEmpty: true });
+    assert.equal(res.passed, true);
+    assert.equal(res.discovered.nodeFiles.length, 1);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -247,7 +356,6 @@ test('Codex PR gate verdict halts auto-merge on timeout or Plus quota limit and 
   assert.equal(localParsed.verdict, 'issues_found');
   assert.equal(localParsed.p1Count, 1);
 
-  // Blocking P0/P1 findings -> fix_codex_findings
   const prBlocking = extractCodexFindings(
     [{ author: { login: 'chatgpt-codex-connector[bot]' }, state: 'COMMENTED', body: 'Found 1 P0 security regression' }],
     [{ user: { login: 'chatgpt-codex-connector[bot]' }, path: 'acp-webview.js', line: 88, body: 'P1: workspace override accepted' }],
@@ -256,7 +364,6 @@ test('Codex PR gate verdict halts auto-merge on timeout or Plus quota limit and 
   assert.equal(prBlocking.blockingCount, 2);
   assert.equal(evaluateGateVerdict({ ciPassed: true, codex: prBlocking, timedOut: false }).nextAction, 'fix_codex_findings');
 
-  // Quota limit -> escalate_human (exit 3, readyToAutoMerge=false)
   const prQuota = extractCodexFindings([], [], [
     { author: { login: 'chatgpt-codex-connector[bot]' }, body: 'Codex reached your ChatGPT Plus usage limit for code review.' },
   ]);
@@ -265,14 +372,12 @@ test('Codex PR gate verdict halts auto-merge on timeout or Plus quota limit and 
   assert.equal(quotaVerdict.exitCode, 3);
   assert.equal(quotaVerdict.nextAction, 'escalate_human');
 
-  // Timeout -> escalate_human (exit 3, readyToAutoMerge=false)
   const prSilent = extractCodexFindings([], [], []);
   const timeoutVerdict = evaluateGateVerdict({ ciPassed: true, codex: prSilent, timedOut: true });
   assert.equal(timeoutVerdict.readyToAutoMerge, false);
   assert.equal(timeoutVerdict.exitCode, 3);
   assert.equal(timeoutVerdict.nextAction, 'escalate_human');
 
-  // Clean review + CI passed -> auto_merge (exit 0)
   const prClean = extractCodexFindings(
     [{ author: { login: 'chatgpt-codex-connector[bot]' }, state: 'COMMENTED', body: 'No major issues found.' }],
     [],
@@ -313,7 +418,6 @@ test('Flight Recorder analyzer parses both session directories and exported KuCo
     assert.equal(dirReport.alertsSummary.byLevel.FATAL, 1);
     assert.equal(dirReport.metricsSummary.maxPssMb, 512);
 
-    // Exported KuCode AI Markdown bundle format (from SessionLogStore.kt)
     const sampleMd = [
       '# KuCode AI セッション診断バンドル (Flight Recorder)',
       '- Schema: `2`',

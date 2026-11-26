@@ -3,6 +3,12 @@
  * Generic deterministic state machine CLI & library for /ship.
  * Reads project policies from `.agents/ship.config.json` and persists per-branch
  * checkpoints under `.ship/runs/<branch-slug>.json`.
+ *
+ * Enforces Clean-Room Spec-Derived Oracle Testing:
+ *   S2_CONTRACT_LOCK (human approval) -> S3a_ORACLE_TEST_GEN (separate agent process,
+ *   spec-only, pre-impl Red) -> lock-oracle -> S3b_IMPL_WORKFLOW (oracle files locked
+ *   by PreToolUse hook) -> S5_PR_CI_HEAL_LOOP (requires oraclePassed) -> S6_AUTO_MERGE_AND_DEPLOY
+ *   (requires ciPassed + codexPassed).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -13,7 +19,8 @@ export const VALID_STATES = [
   "S0_RECON",
   "S1_AUTO_GRILL",
   "S2_CONTRACT_LOCK",
-  "S3_IMPL_WORKFLOW",
+  "S3a_ORACLE_TEST_GEN",
+  "S3b_IMPL_WORKFLOW",
   "S4_LOCAL_CODEX_REVIEW",
   "S5_PR_CI_HEAL_LOOP",
   "S6_AUTO_MERGE_AND_DEPLOY",
@@ -68,7 +75,7 @@ export function saveState(statePath, state) {
   return state;
 }
 
-function normalizeProtectedPaths(list) {
+function normalizePathList(list) {
   return Array.from(
     new Set(
       (list || [])
@@ -82,7 +89,7 @@ export function initRun(statePath, goal, options = {}) {
   const cfg = loadShipConfig(options.cwd || process.cwd());
   const now = new Date().toISOString();
   const state = {
-    schema: 2,
+    schema: 3,
     goal,
     lane: options.lane || "standard",
     deployTarget: options.deployTarget || cfg?.delivery?.defaultTarget || "merge-only",
@@ -90,6 +97,11 @@ export function initRun(statePath, goal, options = {}) {
     gate: "AUTO_PROCEED",
     contractLocked: false,
     allowedProtectedPaths: [],
+    oracleLocked: false,
+    oracleTestFiles: [],
+    oraclePreImplRedVerified: false,
+    oracleStatus: "pending",
+    oracleExemptReason: null,
     specPath: options.specPath || "",
     acceptancePath: options.acceptancePath || "",
     prNumber: null,
@@ -117,12 +129,44 @@ export function approveContract(statePath, updates = {}) {
   if (updates.acceptancePath) state.acceptancePath = updates.acceptancePath;
   if (updates.deployTarget) state.deployTarget = updates.deployTarget;
   if (Array.isArray(updates.allowedProtectedPaths)) {
-    state.allowedProtectedPaths = normalizeProtectedPaths(updates.allowedProtectedPaths);
+    state.allowedProtectedPaths = normalizePathList(updates.allowedProtectedPaths);
   }
-  state.currentState = "S3_IMPL_WORKFLOW";
+  // Always enter S3a_ORACLE_TEST_GEN first unless oracle was already locked before an escalation.
+  state.currentState = state.oracleLocked ? "S3b_IMPL_WORKFLOW" : "S3a_ORACLE_TEST_GEN";
   state.gate = "AUTO_PROCEED";
   state.stallsInState = 0;
   state.escalationReason = null;
+  return saveState(statePath, state);
+}
+
+export function lockOracle(statePath, options = {}) {
+  const state = loadState(statePath);
+  if (!state) throw new Error("No active /ship state found.");
+  if (!state.contractLocked) {
+    throw new Error("Precondition failed: cannot lock oracle tests before contract approval (S2_CONTRACT_LOCK).");
+  }
+  if (state.currentState !== "S3a_ORACLE_TEST_GEN" && state.currentState !== "ESCALATED") {
+    throw new Error(`Oracle tests can only be locked from S3a_ORACLE_TEST_GEN or ESCALATED (current: ${state.currentState}).`);
+  }
+
+  const files = normalizePathList(options.files || []);
+  const exemptReason = options.exemptReason ? String(options.exemptReason).trim() : null;
+
+  if (files.length === 0 && !exemptReason) {
+    throw new Error("Precondition failed: lock-oracle requires at least one oracle test file (--files) or an explicit docs/chore exemption (--exempt-reason).");
+  }
+  if (files.length > 0 && options.preImplRedVerified !== true && !options.allowExistingGreen) {
+    throw new Error("Precondition failed: verify pre-implementation Red failure on new oracle tests (--red-verified) or pass --allow-existing-green for regression-only characterization tests.");
+  }
+
+  state.oracleLocked = true;
+  state.oracleTestFiles = files;
+  state.oraclePreImplRedVerified = Boolean(options.preImplRedVerified);
+  state.oracleExemptReason = exemptReason;
+  state.oracleStatus = exemptReason ? "exempt" : "pending";
+  state.currentState = "S3b_IMPL_WORKFLOW";
+  state.gate = "AUTO_PROCEED";
+  state.stallsInState = 0;
   return saveState(statePath, state);
 }
 
@@ -134,7 +178,8 @@ export function transitionState(statePath, nextState, options = {}) {
   }
 
   const postContractStates = new Set([
-    "S3_IMPL_WORKFLOW",
+    "S3a_ORACLE_TEST_GEN",
+    "S3b_IMPL_WORKFLOW",
     "S4_LOCAL_CODEX_REVIEW",
     "S5_PR_CI_HEAL_LOOP",
     "S6_AUTO_MERGE_AND_DEPLOY",
@@ -146,13 +191,39 @@ export function transitionState(statePath, nextState, options = {}) {
     throw new Error(`Precondition failed: cannot transition to ${nextState} before contractLocked=true (approve S2_CONTRACT_LOCK first).`);
   }
 
+  const postOracleLockStates = new Set([
+    "S3b_IMPL_WORKFLOW",
+    "S4_LOCAL_CODEX_REVIEW",
+    "S5_PR_CI_HEAL_LOOP",
+    "S6_AUTO_MERGE_AND_DEPLOY",
+    "S7_POST_DEPLOY_VERIFY",
+    "S8_HARNESS_LEARN",
+    "DONE",
+  ]);
+  if (postOracleLockStates.has(nextState) && !state.oracleLocked) {
+    throw new Error(`Precondition failed: cannot transition to ${nextState} before independent oracle tests are authored and locked (run S3a_ORACLE_TEST_GEN and state.mjs lock-oracle first).`);
+  }
+
   if (options.prNumber != null) state.prNumber = Number(options.prNumber);
+  if (options.oraclePassed) state.oracleStatus = "passed";
   if (options.ciPassed) state.ciStatus = "passed";
   if (options.codexPassed) state.codexStatus = "passed";
   if (options.lane) state.lane = options.lane;
   if (options.deployTarget) state.deployTarget = options.deployTarget;
   if (options.specPath) state.specPath = options.specPath;
   if (options.acceptancePath) state.acceptancePath = options.acceptancePath;
+
+  const postOraclePassStates = new Set([
+    "S4_LOCAL_CODEX_REVIEW",
+    "S5_PR_CI_HEAL_LOOP",
+    "S6_AUTO_MERGE_AND_DEPLOY",
+    "S7_POST_DEPLOY_VERIFY",
+    "S8_HARNESS_LEARN",
+    "DONE",
+  ]);
+  if (postOraclePassStates.has(nextState) && state.oracleStatus !== "passed" && state.oracleStatus !== "exempt") {
+    throw new Error(`Precondition failed: cannot transition to ${nextState} until locked oracle tests pass (--oracle-passed).`);
+  }
 
   if (nextState === "S6_AUTO_MERGE_AND_DEPLOY") {
     if (state.ciStatus !== "passed") {
@@ -277,9 +348,22 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         console.log(JSON.stringify(state, null, 2));
         break;
       }
+      case "lock-oracle": {
+        const filesRaw = parseFlag(rest, "--files");
+        const files = filesRaw ? filesRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
+        const state = lockOracle(statePath, {
+          files,
+          preImplRedVerified: rest.includes("--red-verified"),
+          allowExistingGreen: rest.includes("--allow-existing-green"),
+          exemptReason: parseFlag(rest, "--exempt-reason"),
+        });
+        console.log(JSON.stringify(state, null, 2));
+        break;
+      }
       case "transition": {
         const nextState = rest[0];
         const state = transitionState(statePath, nextState, {
+          oraclePassed: rest.includes("--oracle-passed"),
           ciPassed: rest.includes("--ci-passed"),
           codexPassed: rest.includes("--codex-passed"),
           prNumber: parseFlag(rest, "--pr"),
@@ -317,7 +401,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         break;
       }
       default:
-        console.error("Usage: state.mjs <status|init|set-gate|record-grill|approve-contract|transition|record-retry|record-finding|escalate|reset>");
+        console.error("Usage: state.mjs <status|init|set-gate|record-grill|approve-contract|lock-oracle|transition|record-retry|record-finding|escalate|reset>");
         process.exit(1);
     }
   } catch (err) {

@@ -132,6 +132,7 @@ jobs:
           tar -xzf "$archive" -C "$server" --strip-components=1
           rm -f "$archive"
           "$server/node" scripts/guards/run-all-guards.mjs
+          "$server/node" scripts/guards/run-oracle-tests.mjs
           "$server/node" --check android/app/src/main/assets/runtime-probes.cjs
           bash -n scripts/probe-android-arm64.sh scripts/aura-language-smoke.sh scripts/aura-self-host-e2e.sh
           "$server/node" --check android/app/src/main/assets/kucode-cli.cjs

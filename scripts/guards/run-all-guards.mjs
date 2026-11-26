@@ -224,6 +224,31 @@ export function runGuards(repoRoot, options = {}) {
         }
       }
     });
+
+    // Guard 10: clean-room oracle test integrity (must reference acceptance criteria AC-* and contain real assertions)
+    const isOracleFile =
+      /(^|\/)tests\/oracle\/.+\.(?:oracle\.test\.cjs|py)$/.test(rel) ||
+      /OracleTest\.kt$/.test(rel);
+    if (isOracleFile) {
+      if (!/\bAC-\d+\b/.test(content)) {
+        addViolation(
+          "oracle-test-integrity",
+          rel,
+          1,
+          "Oracle test file does not reference any acceptance criterion ID (e.g., AC-1)",
+          "Map each oracle test case explicitly to a spec acceptance criterion ID (AC-1, AC-2, ...) from docs/specs/<slug>/acceptance.json.",
+        );
+      }
+      if (!/\b(assert|assertEquals|assertTrue|assertFalse|assertNotNull|assertThrows|self\.assert)\b/.test(content)) {
+        addViolation(
+          "oracle-test-integrity",
+          rel,
+          1,
+          "Oracle test file contains no assertions",
+          "Add behavioral contract assertions derived strictly from the specification so the oracle cannot trivially pass.",
+        );
+      }
+    }
   }
 
   // --- Structural repository-wide invariants (always checked unless changedOnly excludes relevant files) ---

@@ -7,6 +7,9 @@
  *   unlockable ONLY for exact paths explicitly approved in S2 (`state.allowedProtectedPaths`).
  * - `contractPatterns` (spec.md, docs/adr, docs/specs/<slug>/spec.md): locked automatically
  *   after `state.contractLocked === true` unless explicitly in `allowedProtectedPaths`.
+ * - `oraclePatterns` & `state.oracleTestFiles`: editable ONLY during `S3a_ORACLE_TEST_GEN`
+ *   by the clean-room oracle author, then hard-locked once `state.oracleLocked === true`
+ *   so coding agents can never weaken or adapt oracle tests to match implementation bugs.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -39,14 +42,21 @@ const DEFAULT_CONTRACT = [
   /(^|\/)docs\/specs\/[^/]+\/spec\.md$/,
 ];
 
+const DEFAULT_ORACLE = [
+  /(^|\/)tests\/oracle\//,
+  /\.oracle\.test\.cjs$/,
+  /OracleTest\.kt$/,
+  /_oracle\.py$/,
+];
+
 function compilePatterns(list, fallback) {
   if (!Array.isArray(list) || list.length === 0) return fallback;
   return list.map((p) => new RegExp(p));
 }
 
-function matchesApprovedPath(normalizedTarget, allowedPaths = []) {
-  for (const allowed of allowedPaths) {
-    const clean = String(allowed || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+function matchesPathList(normalizedTarget, pathList = []) {
+  for (const item of pathList) {
+    const clean = String(item || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
     if (!clean) continue;
     if (normalizedTarget === clean || normalizedTarget.endsWith(`/${clean}`)) {
       return true;
@@ -58,7 +68,10 @@ function matchesApprovedPath(normalizedTarget, allowedPaths = []) {
 export function evaluateBoundaryWrite(targetPath, options = {}) {
   const normalized = String(targetPath || "").replace(/\\/g, "/");
   const {
+    currentState = "",
     contractLocked = false,
+    oracleLocked = false,
+    oracleTestFiles = [],
     allowedProtectedPaths = [],
     config = {},
     overrideEnv = process.env.KUCODE_ALLOW_BOUNDARY_EDIT === "1",
@@ -76,7 +89,7 @@ export function evaluateBoundaryWrite(targetPath, options = {}) {
     };
   }
 
-  if (overrideEnv || matchesApprovedPath(normalized, allowedProtectedPaths)) {
+  if (overrideEnv || matchesPathList(normalized, allowedProtectedPaths)) {
     return { decision: "allow" };
   }
 
@@ -85,6 +98,26 @@ export function evaluateBoundaryWrite(targetPath, options = {}) {
     return {
       decision: "deny",
       reason: `Protected boundary cannot be modified without explicit S2 contract approval (allowedProtectedPaths): ${normalized}. Escalate to the human.`,
+    };
+  }
+
+  const oraclePatterns = compilePatterns(config?.boundaries?.oraclePatterns, DEFAULT_ORACLE);
+  const isOracleTarget =
+    oraclePatterns.some((re) => re.test(normalized)) || matchesPathList(normalized, oracleTestFiles);
+
+  // During S3a_ORACLE_TEST_GEN, ONLY oracle test files (and fixtures under tests/oracle) may be written — never production code!
+  if (currentState === "S3a_ORACLE_TEST_GEN" && !isOracleTarget) {
+    return {
+      decision: "deny",
+      reason: `During S3a_ORACLE_TEST_GEN, only clean-room oracle tests may be written; production/non-oracle edits are blocked: ${normalized}.`,
+    };
+  }
+
+  // Once oracle tests are locked (S3b onward), coding agents cannot alter oracle tests to match implementation bugs!
+  if (oracleLocked && isOracleTarget) {
+    return {
+      decision: "deny",
+      reason: `Oracle test is locked after S3a_ORACLE_TEST_GEN (${normalized}). Fix the implementation to satisfy the spec oracle, or escalate to the human if the spec itself is ambiguous.`,
     };
   }
 
@@ -107,7 +140,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const config = loadShipConfig(cwd);
   const state = loadState(resolveStatePath(cwd));
   const result = evaluateBoundaryWrite(target, {
+    currentState: state?.currentState || "",
     contractLocked: Boolean(state?.contractLocked),
+    oracleLocked: Boolean(state?.oracleLocked),
+    oracleTestFiles: state?.oracleTestFiles || [],
     allowedProtectedPaths: state?.allowedProtectedPaths || [],
     config,
   });

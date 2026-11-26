@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "project": {
     "name": "KuCode",
     "repository": "koduki/kucode",
@@ -15,6 +15,7 @@
     },
     "models": {
       "orchestrator": "inherit",
+      "oracleAuthor": "inherit",
       "implementer": "inherit",
       "verifier": "flash",
       "researcher": "flash"
@@ -34,6 +35,20 @@
   "humanGates": [
     "S2_CONTRACT_LOCK"
   ],
+  "oracleTesting": {
+    "enabled": true,
+    "requireSeparateAgentProcess": true,
+    "authorBeforeImplementation": true,
+    "forbidReadingImplementationDiff": true,
+    "minimumLevel": "e2e-and-contract",
+    "requirePreImplRedCheck": true,
+    "lockOracleDuringImplementation": true,
+    "locations": {
+      "node": "tests/oracle/<slug>.oracle.test.cjs",
+      "python": "tests/oracle/test_<slug>_oracle.py",
+      "kotlin": "android/app/src/test/java/dev/koduki/kucode/oracle/<Name>OracleTest.kt"
+    }
+  },
   "codexReview": {
     "primarySurface": "github-app",
     "optionalLocalCli": true,
@@ -76,10 +91,17 @@
       "(^|/)spec\\.md$",
       "(^|/)docs/adr/",
       "(^|/)docs/specs/[^/]+/spec\\.md$"
+    ],
+    "oraclePatterns": [
+      "(^|/)tests/oracle/",
+      "\\.oracle\\.test\\.cjs$",
+      "OracleTest\\.kt$",
+      "_oracle\\.py$"
     ]
   },
   "verification": {
     "guards": "node scripts/guards/run-all-guards.mjs",
+    "oracle": "node scripts/guards/run-oracle-tests.mjs",
     "syntax": [
       "bash -n scripts/*.sh .githooks/pre-commit",
       "node --check android/app/src/main/assets/kucode-cli.cjs android/app/src/main/assets/runtime-probes.cjs android/app/src/main/assets/kucode-android/extension.js android/app/src/main/assets/kucode-tools/extension.js android/app/src/main/assets/kucode-tools/acp-client.js android/app/src/main/assets/kucode-tools/acp-webview.js"
