@@ -7,6 +7,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.Callable
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Pure-JVM regression tests for [OtlpOutboxExporter] consent recheck and mid-flush config changes.
@@ -427,6 +433,138 @@ class OtlpOutboxExporterTest {
             assertEquals("disabled", flushRes.skippedReason)
             assertTrue(sentRequests.isEmpty())
         } finally {
+            deleteTreeNoFollow(dir)
+        }
+    }
+
+    @Test
+    fun settingsReadsAndConsentUpdateDoNotBlockWhileFlushHttpIsInFlight() {
+        val dir = Files.createTempDirectory("kucode-otlp-nonblocking-settings").toFile()
+        var nowMs = 1_760_000_900_000L
+        val sentUrls = CopyOnWriteArrayList<String>()
+        val postStarted = CountDownLatch(1)
+        val releasePost = CountDownLatch(1)
+        val firstPost = AtomicBoolean(true)
+        val flushExecutor = Executors.newSingleThreadExecutor()
+        val readerExecutor = Executors.newSingleThreadExecutor()
+        try {
+            val diagDir = File(dir, "diagnostics")
+            val outboxDir = File(dir, "otlp-outbox")
+            val store = SessionLogStore(diagnosticsRootDir = diagDir, clockMs = { nowMs })
+            val configStore = OtlpConfigStore(InMemoryStorage(), ReversibleTestCipher())
+            configStore.saveConfig(
+                enabled = true,
+                endpointUrl = "https://otlp.example.com",
+                granularity = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+                unmeteredOnly = false,
+                authHeaderName = "Authorization",
+                authHeaderValue = "",
+                clearAuthHeader = true,
+            )
+
+            // s1: traces + metrics + logs
+            val s1 = store.startSession(pid = 5001, env = sampleEnv())
+            store.recordMetric(
+                SessionLogStore.MetricSnapshot(
+                    timestampMs = nowMs + 10L,
+                    trigger = "sample1",
+                    pssMb = 132,
+                    runtimeState = "READY",
+                    serverAlive = true,
+                ),
+            )
+            store.recordEvent(SessionLogStore.EventLevel.ERROR, "test.s1", "S1_ERROR_SIGNAL")
+            nowMs += 1_000L
+            store.endSession("s1-done")
+
+            // s2: traces + logs
+            nowMs += 1_000L
+            val s2 = store.startSession(pid = 5002, env = sampleEnv())
+            store.recordEvent(SessionLogStore.EventLevel.ERROR, "test.s2", "S2_ERROR_SIGNAL")
+            nowMs += 1_000L
+            store.endSession("s2-done")
+
+            val fakeClient = object : OtlpHttpClient {
+                override fun postJson(url: String, headers: Map<String, String>, jsonBody: String): OtlpHttpResponse {
+                    sentUrls.add(url)
+                    if (firstPost.compareAndSet(true, false)) {
+                        postStarted.countDown()
+                        check(releasePost.await(5, TimeUnit.SECONDS)) {
+                            "Timed out waiting for releasePost latch"
+                        }
+                    }
+                    return OtlpHttpResponse(statusCode = 200, body = "{}")
+                }
+            }
+
+            val exporter = OtlpOutboxExporter(
+                sessionLogStore = store,
+                outboxDir = outboxDir,
+                configStore = configStore,
+                httpClient = fakeClient,
+                clockMs = { nowMs },
+            )
+            assertTrue(exporter.enqueueSession(s1.sessionId))
+            nowMs += 100L
+            assertTrue(exporter.enqueueSession(s2.sessionId))
+
+            val flushFuture = flushExecutor.submit(Callable { exporter.flushOutbox() })
+            assertTrue("Expected first HTTP POST to start", postStarted.await(2, TimeUnit.SECONDS))
+
+            // While s1's /v1/traces POST is blocked in flight, synchronous reads and consent updates
+            // must complete without waiting on flushLock.
+            val pending = readerExecutor.submit(Callable { exporter.pendingCount() }).get(2, TimeUnit.SECONDS)
+            assertTrue("Expected pendingCount >= 2, got $pending", pending >= 2)
+
+            val publicConfig = readerExecutor.submit(Callable { exporter.getPublicConfigJson() }).get(2, TimeUnit.SECONDS)
+            assertTrue(publicConfig.getBoolean("enabled"))
+            assertTrue(publicConfig.getInt("outboxPendingCount") >= 2)
+
+            val hasCrash = readerExecutor.submit(Callable { exporter.hasPendingCrashSessions() }).get(2, TimeUnit.SECONDS)
+            assertFalse(hasCrash)
+
+            val saveRes = readerExecutor.submit(
+                Callable {
+                    configStore.saveConfig(
+                        enabled = false,
+                        endpointUrl = "https://otlp.example.com",
+                        granularity = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+                        unmeteredOnly = false,
+                        authHeaderName = "Authorization",
+                        authHeaderValue = "",
+                        clearAuthHeader = false,
+                    )
+                },
+            ).get(2, TimeUnit.SECONDS)
+            assertTrue(saveRes.ok)
+
+            releasePost.countDown()
+            val result = flushFuture.get(5, TimeUnit.SECONDS)
+
+            assertFalse(result.enabled)
+            assertFalse(result.ok)
+            assertEquals("disabled", result.skippedReason)
+            assertEquals(0, result.flushed)
+            assertEquals(0, result.failed)
+            assertEquals(2, result.remaining)
+            assertEquals(listOf("https://otlp.example.com/v1/traces"), sentUrls.toList())
+
+            val queued = OtlpOutboxStore(outboxDir).list()
+            assertEquals(2, queued.size)
+            val queued1 = queued.first { it.sessionId == s1.sessionId }
+            val queued2 = queued.first { it.sessionId == s2.sessionId }
+            assertEquals(0, queued1.attempts)
+            assertTrue(queued1.tracesSent)
+            assertFalse(queued1.metricsSent)
+            assertFalse(queued1.logsSent)
+            assertEquals(0, queued2.attempts)
+            assertFalse(queued2.tracesSent)
+            assertTrue(queued2.metricsSent)
+            assertFalse(queued2.logsSent)
+        } finally {
+            releasePost.countDown()
+            flushExecutor.shutdownNow()
+            readerExecutor.shutdownNow()
             deleteTreeNoFollow(dir)
         }
     }

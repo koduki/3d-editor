@@ -543,10 +543,14 @@ class OtlpOutboxExporter(
             .put("lastError", lastError ?: JSONObject.NULL)
     }
 
-    private val lock = Any()
+    // Lock ordering invariant: flushLock -> storeLock (NEVER storeLock -> flushLock).
+    // flushLock serializes flushOutbox() executions; storeLock guards short outboxStore file operations only
+    // and MUST NEVER be held across httpClient.postJson(...) calls.
+    private val flushLock = Any()
+    private val storeLock = Any()
     private val outboxStore = OtlpOutboxStore(outboxDir = outboxDir, maxQueuedSessions = maxOutboxSessions)
 
-    fun pendingCount(): Int = synchronized(lock) { outboxStore.pendingCount() }
+    fun pendingCount(): Int = synchronized(storeLock) { outboxStore.pendingCount() }
 
     fun hasSession(selector: String): Boolean = sessionLogStore.resolveSessionSummary(selector) != null
 
@@ -560,14 +564,14 @@ class OtlpOutboxExporter(
         }
     }
 
-    fun hasPendingCrashSessions(): Boolean = synchronized(lock) { outboxStore.hasPendingCrashSessions() }
+    fun hasPendingCrashSessions(): Boolean = synchronized(storeLock) { outboxStore.hasPendingCrashSessions() }
 
-    fun drainPendingCrashSessions(vscodeDataDir: File? = null): Int = synchronized(lock) {
-        val ids = outboxStore.readPendingCrashSessions()
+    fun drainPendingCrashSessions(vscodeDataDir: File? = null): Int {
+        val ids = synchronized(storeLock) { outboxStore.readPendingCrashSessions() }
         if (ids.isEmpty()) return 0
         val cfg = configStore.loadConfig()
         if (!cfg.enabled) {
-            outboxStore.clearPendingCrashSessions()
+            synchronized(storeLock) { outboxStore.clearPendingCrashSessions() }
             return 0
         }
         var enqueued = 0
@@ -576,15 +580,15 @@ class OtlpOutboxExporter(
                 enqueued++
             }
         }
-        outboxStore.clearPendingCrashSessions()
-        enqueued
+        synchronized(storeLock) { outboxStore.clearPendingCrashSessions() }
+        return enqueued
     }
 
     fun enqueueSession(
         sessionId: String,
         granularity: String? = null,
         vscodeDataDir: File? = null,
-    ): Boolean = synchronized(lock) {
+    ): Boolean {
         val cfg = configStore.loadConfig()
         if (!cfg.enabled) return false
         val resolved = sessionLogStore.resolveSessionSummary(sessionId) ?: return false
@@ -613,8 +617,10 @@ class OtlpOutboxExporter(
             metricsJson = payloads.metricsJson?.toString(),
             logsJson = payloads.logsJson?.toString(),
         )
-        outboxStore.put(item)
-        true
+        synchronized(storeLock) {
+            outboxStore.put(item)
+        }
+        return true
     }
 
     private data class ExportGate(
@@ -630,7 +636,7 @@ class OtlpOutboxExporter(
         lastError: String?,
     ): Pair<ExportGate?, FlushResult?> {
         val cfg = configStore.loadConfig()
-        val pending = outboxStore.pendingCount()
+        val pending = synchronized(storeLock) { outboxStore.pendingCount() }
         if (!cfg.enabled) {
             return null to FlushResult(
                 ok = false,
@@ -678,14 +684,14 @@ class OtlpOutboxExporter(
         return ExportGate(cfg, validated.normalizedBaseUrl, headers) to null
     }
 
-    fun flushOutbox(ignoreBackoff: Boolean = false): FlushResult = synchronized(lock) {
+    fun flushOutbox(ignoreBackoff: Boolean = false): FlushResult = synchronized(flushLock) {
         val (_, initialAbort) = evaluateExportGate(flushed = 0, failed = 0, deferred = 0, lastError = null)
         if (initialAbort != null) {
             return initialAbort
         }
 
         val now = clockMs()
-        val items = outboxStore.list()
+        val items = synchronized(storeLock) { outboxStore.list() }
         var flushed = 0
         var failed = 0
         var deferred = 0
@@ -722,7 +728,7 @@ class OtlpOutboxExporter(
                 val (signalGate, signalAbort) = evaluateExportGate(flushed, failed, deferred, lastError)
                 if (signalAbort != null || signalGate == null) {
                     if (current != item) {
-                        outboxStore.update(current)
+                        synchronized(storeLock) { outboxStore.update(current) }
                     }
                     return signalAbort ?: FlushResult(
                         ok = false,
@@ -730,7 +736,7 @@ class OtlpOutboxExporter(
                         flushed = flushed,
                         failed = failed,
                         deferred = deferred,
-                        remaining = outboxStore.pendingCount(),
+                        remaining = synchronized(storeLock) { outboxStore.pendingCount() },
                         skippedReason = "disabled",
                         lastError = lastError,
                     )
@@ -756,28 +762,30 @@ class OtlpOutboxExporter(
             }
 
             if (!itemFailed) {
-                outboxStore.remove(item.sessionId)
+                synchronized(storeLock) { outboxStore.remove(item.sessionId) }
                 flushed++
             } else {
                 failed++
                 lastError = itemError
                 val nextAttempts = current.attempts + 1
                 if (permanentFailure || nextAttempts >= maxRetries) {
-                    outboxStore.remove(item.sessionId)
+                    synchronized(storeLock) { outboxStore.remove(item.sessionId) }
                 } else {
                     val backoffMs = BACKOFF_SCHEDULE_MS.getOrElse(nextAttempts - 1) { BACKOFF_SCHEDULE_MS.last() }
-                    outboxStore.update(
-                        current.copy(
-                            attempts = nextAttempts,
-                            nextAttemptAtMs = now + backoffMs,
-                            lastError = itemError,
-                        ),
-                    )
+                    synchronized(storeLock) {
+                        outboxStore.update(
+                            current.copy(
+                                attempts = nextAttempts,
+                                nextAttemptAtMs = now + backoffMs,
+                                lastError = itemError,
+                            ),
+                        )
+                    }
                 }
             }
         }
 
-        val remaining = outboxStore.pendingCount()
+        val remaining = synchronized(storeLock) { outboxStore.pendingCount() }
         FlushResult(
             ok = failed == 0,
             enabled = true,
