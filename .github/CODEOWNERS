@@ -1,0 +1,14 @@
+# Protected architectural, supply-chain, legal, and harness boundaries
+/.github/ @koduki
+/scripts/guards/ @koduki
+/.agents/hooks.json @koduki
+/runtime-assets.lock.json @koduki
+/scripts/build-proot-android.sh @koduki
+/scripts/fetch-runtime-assets.sh @koduki
+/LICENSE @koduki
+/THIRD_PARTY_NOTICES.md @koduki
+/LICENSES/ @koduki
+/spec.md @koduki
+/docs/adr/ @koduki
+/android/app/proguard-rules.pro @koduki
+/android/app/src/main/res/xml/network_security_config.xml @koduki
