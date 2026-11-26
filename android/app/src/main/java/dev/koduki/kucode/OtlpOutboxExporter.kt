@@ -9,6 +9,7 @@ import java.net.URI
 import java.net.URL
 import java.nio.file.Files
 import java.util.Locale
+import java.util.UUID
 
 /**
  * Strict validator for user-configured OTLP/HTTP endpoints.
@@ -367,6 +368,7 @@ class OtlpOutboxStore(
         val tracesJson: String,
         val metricsJson: String?,
         val logsJson: String?,
+        val revision: String = "",
     ) {
         fun toJsonObject(): JSONObject = JSONObject()
             .put("sessionId", sessionId)
@@ -380,6 +382,7 @@ class OtlpOutboxStore(
             .put("tracesJson", tracesJson)
             .put("metricsJson", metricsJson ?: JSONObject.NULL)
             .put("logsJson", logsJson ?: JSONObject.NULL)
+            .put("revision", revision)
 
         companion object {
             fun fromJsonObject(obj: JSONObject): OutboxItem? {
@@ -398,9 +401,18 @@ class OtlpOutboxStore(
                     tracesJson = tracesJson,
                     metricsJson = if (obj.isNull("metricsJson") || !obj.has("metricsJson")) null else obj.optString("metricsJson", "").ifEmpty { null },
                     logsJson = if (obj.isNull("logsJson") || !obj.has("logsJson")) null else obj.optString("logsJson", "").ifEmpty { null },
+                    revision = obj.optString("revision", ""),
                 )
             }
         }
+    }
+
+    fun get(sessionId: String): OutboxItem? {
+        val target = itemFile(sessionId) ?: return null
+        if (!target.isFile || Files.isSymbolicLink(target.toPath())) return null
+        return runCatching {
+            OutboxItem.fromJsonObject(JSONObject(target.readText(Charsets.UTF_8)))
+        }.getOrNull()
     }
 
     fun put(item: OutboxItem) {
@@ -416,9 +428,23 @@ class OtlpOutboxStore(
         writeTextAtomically(target, item.toJsonObject().toString(), Charsets.UTF_8, worldReadable = false)
     }
 
+    fun updateIfRevisionMatches(item: OutboxItem, expectedRevision: String): Boolean {
+        val current = get(item.sessionId) ?: return false
+        if (current.revision != expectedRevision) return false
+        update(item)
+        return true
+    }
+
     fun remove(sessionId: String) {
         val target = itemFile(sessionId) ?: return
         runCatching { Files.deleteIfExists(target.toPath()) }
+    }
+
+    fun removeIfRevisionMatches(sessionId: String, expectedRevision: String): Boolean {
+        val current = get(sessionId) ?: return false
+        if (current.revision != expectedRevision) return false
+        remove(sessionId)
+        return true
     }
 
     fun list(): List<OutboxItem> {
@@ -616,6 +642,7 @@ class OtlpOutboxExporter(
             tracesJson = payloads.tracesJson.toString(),
             metricsJson = payloads.metricsJson?.toString(),
             logsJson = payloads.logsJson?.toString(),
+            revision = UUID.randomUUID().toString(),
         )
         synchronized(storeLock) {
             outboxStore.put(item)
@@ -728,7 +755,9 @@ class OtlpOutboxExporter(
                 val (signalGate, signalAbort) = evaluateExportGate(flushed, failed, deferred, lastError)
                 if (signalAbort != null || signalGate == null) {
                     if (current != item) {
-                        synchronized(storeLock) { outboxStore.update(current) }
+                        synchronized(storeLock) {
+                            outboxStore.updateIfRevisionMatches(current, item.revision)
+                        }
                     }
                     return signalAbort ?: FlushResult(
                         ok = false,
@@ -762,23 +791,28 @@ class OtlpOutboxExporter(
             }
 
             if (!itemFailed) {
-                synchronized(storeLock) { outboxStore.remove(item.sessionId) }
+                synchronized(storeLock) {
+                    outboxStore.removeIfRevisionMatches(item.sessionId, item.revision)
+                }
                 flushed++
             } else {
                 failed++
                 lastError = itemError
                 val nextAttempts = current.attempts + 1
                 if (permanentFailure || nextAttempts >= maxRetries) {
-                    synchronized(storeLock) { outboxStore.remove(item.sessionId) }
+                    synchronized(storeLock) {
+                        outboxStore.removeIfRevisionMatches(item.sessionId, item.revision)
+                    }
                 } else {
                     val backoffMs = BACKOFF_SCHEDULE_MS.getOrElse(nextAttempts - 1) { BACKOFF_SCHEDULE_MS.last() }
                     synchronized(storeLock) {
-                        outboxStore.update(
+                        outboxStore.updateIfRevisionMatches(
                             current.copy(
                                 attempts = nextAttempts,
                                 nextAttemptAtMs = now + backoffMs,
                                 lastError = itemError,
                             ),
+                            item.revision,
                         )
                     }
                 }
