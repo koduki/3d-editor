@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "project": {
+    "name": "KuCode",
+    "repository": "koduki/kucode",
+    "defaultBranch": "main"
+  },
+  "execution": {
+    "primaryEnvironment": "remote-agent",
+    "subagentWorkspaceMode": "inherit",
+    "concurrency": {
+      "express": 1,
+      "standard": 2,
+      "multiLayerMax": 3
+    },
+    "models": {
+      "orchestrator": "inherit",
+      "implementer": "inherit",
+      "verifier": "flash",
+      "researcher": "flash"
+    },
+    "maxRetries": {
+      "impl": 2,
+      "codex": 2,
+      "ci": 2
+    }
+  },
+  "grilling": {
+    "mode": "one-by-one",
+    "autoSkipWhenClear": true,
+    "minQuestionsWhenAmbiguous": 1,
+    "maxQuestions": 20
+  },
+  "humanGates": [
+    "S2_CONTRACT_LOCK"
+  ],
+  "codexReview": {
+    "primarySurface": "github-app",
+    "optionalLocalCli": true,
+    "autoMentionComment": "@codex review",
+    "autoMentionIfSilentSeconds": 90,
+    "timeoutSeconds": 600,
+    "onTimeoutOrQuota": "escalate"
+  },
+  "ciSelfHeal": {
+    "track": "subscription-only",
+    "allowExternalApiBilling": false,
+    "maxAttempts": 2
+  },
+  "delivery": {
+    "defaultTarget": "merge-only",
+    "mergeStrategy": "squash",
+    "deleteBranch": true,
+    "releaseTagRequiresContractApproval": true
+  },
+  "boundaries": {
+    "neverUnlockablePatterns": [
+      "(^|/)\\.env(\\.|$)",
+      "\\.(keystore|jks|p12)$"
+    ],
+    "protectedPatterns": [
+      "(^|/)\\.github/workflows/",
+      "(^|/)scripts/guards/",
+      "(^|/)\\.agents/hooks\\.json$",
+      "(^|/)\\.agents/ship\\.config\\.json$",
+      "(^|/)runtime-assets\\.lock\\.json$",
+      "(^|/)scripts/build-proot-android\\.sh$",
+      "(^|/)scripts/fetch-runtime-assets\\.sh$",
+      "(^|/)(LICENSE|THIRD_PARTY_NOTICES\\.md)$",
+      "(^|/)LICENSES/",
+      "(^|/)android/gradle/wrapper/gradle-wrapper\\.properties$",
+      "(^|/)android/app/proguard-rules\\.pro$",
+      "(^|/)android/app/src/main/res/xml/network_security_config\\.xml$"
+    ],
+    "contractPatterns": [
+      "(^|/)spec\\.md$",
+      "(^|/)docs/adr/",
+      "(^|/)docs/specs/[^/]+/spec\\.md$"
+    ]
+  },
+  "verification": {
+    "guards": "node scripts/guards/run-all-guards.mjs",
+    "syntax": [
+      "bash -n scripts/*.sh .githooks/pre-commit",
+      "node --check android/app/src/main/assets/kucode-cli.cjs android/app/src/main/assets/runtime-probes.cjs android/app/src/main/assets/kucode-android/extension.js android/app/src/main/assets/kucode-tools/extension.js android/app/src/main/assets/kucode-tools/acp-client.js android/app/src/main/assets/kucode-tools/acp-webview.js"
+    ],
+    "tests": [
+      "python3 -m unittest discover -s tests -p test_runtime_assets.py -v",
+      "node --test tests/*.test.cjs"
+    ],
+    "gradle": "cd android && ./gradlew :app:testDebugUnitTest :app:testDebugMediumUnitTest :app:testReleaseUnitTest"
+  },
+  "diagnostics": {
+    "format": "kucode-flight-recorder",
+    "uploadDir": "/home/antigravity/upload",
+    "analyzerScript": ".agents/skills/ship/scripts/analyze-flight-recorder.mjs"
+  }
+}

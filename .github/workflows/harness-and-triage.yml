@@ -29,12 +29,14 @@ jobs:
       - name: Run non-ignorable KuCode guards
         run: node scripts/guards/run-all-guards.mjs
 
-      - name: Check bash & harness script syntax
+      - name: Check bash, config JSON & harness script syntax
         run: |
           bash -n scripts/*.sh .githooks/pre-commit
+          node -e 'JSON.parse(require("node:fs").readFileSync(".agents/ship.config.json","utf8")); JSON.parse(require("node:fs").readFileSync(".agents/hooks.json","utf8"));'
           node --check \
             scripts/guards/run-all-guards.mjs \
             scripts/guards/ci-log-compressor.mjs \
+            .agents/skills/ship/scripts/session-init.mjs \
             .agents/skills/ship/scripts/state.mjs \
             .agents/skills/ship/scripts/stop-driver.mjs \
             .agents/skills/ship/scripts/guard-boundaries.mjs \

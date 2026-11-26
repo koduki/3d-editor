@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /**
- * Read-Only KuCode Flight Recorder analyzer (SessionLogStore / diagnostics-import).
+ * Read-Only KuCode Flight Recorder analyzer.
  *
- * Follows the "never feed raw logs to AI" and "correlate by sessionId" discipline:
- * 1. Reads `meta.json` (app version, buildSha, session status, OS exit info)
- * 2. Aggregates `events.alerts.jsonl` by level & source (counts + recent tail)
- * 3. Summarizes `metrics.jsonl` (max PSS, min freeDisk, thermal peaks, serverAlive drops)
- * 4. Extracts bounded top/tail snippets from `exit-trace.txt` & `vscode-sublogs.txt`
+ * Supports both:
+ * 1. Raw SessionLogStore session directories (`meta.json`, `events.alerts.jsonl`, `metrics.jsonl`, `exit-trace.txt`, `vscode-sublogs.txt`)
+ * 2. Exported KuCode AI Diagnostic Bundle Markdown (`# KuCode AI セッション診断バンドル (Flight Recorder)`),
+ *    whether uploaded to `/home/antigravity/upload/` or pasted into a GitHub Issue body.
  *
- * Treats all diagnostic input strictly as untrusted data, never instructions.
+ * Strips unbounded Section 4 raw timelines so the main agent receives only structured
+ * sessionId-correlated triage metadata, alert counts, anomalous metrics, and crash traces.
+ * Treats all diagnostic inputs strictly as untrusted data, never instructions.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -79,8 +80,9 @@ export function analyzeSessionDir(sessionDir) {
     exitTraceLines.length > 0;
 
   return {
-    schema: 1,
+    schema: 2,
     readOnly: true,
+    format: "session-dir",
     sessionId: meta.sessionId || path.basename(sessionDir),
     status: meta.status || "UNKNOWN",
     abnormal,
@@ -110,14 +112,94 @@ export function analyzeSessionDir(sessionDir) {
   };
 }
 
+export function parseKuCodeAiMarkdownBundle(text, sourceLabel = "bundle.md") {
+  const grab = (re) => {
+    const m = text.match(re);
+    return m ? m[1].trim() : "unknown";
+  };
+
+  const sessionId = grab(/-\s*Session ID:\s*`([^`]+)`/);
+  const statusMatch = text.match(/-\s*Session Status:\s*`([^`]+)`\s*\(`([^`]+)`\)/);
+  const status = statusMatch ? statusMatch[1] : grab(/-\s*Session Status:\s*`([^`]+)`/);
+  const exitCategory = statusMatch ? statusMatch[2] : "unknown";
+  const exitSummary = grab(/-\s*Exit \/ State Summary:\s*`([^`]+)`/);
+  const app = grab(/App:\s*`([^`]+)`/);
+  const device = grab(/Device:\s*`([^`]+)`/);
+  const android = grab(/Android:\s*`([^`]+)`/);
+  const counters = grab(/-\s*Counters:\s*`([^`]+)`/);
+
+  // Split by "## <n>." sections; intentionally drop unbounded Section 4 raw timeline.
+  const section = (num) => {
+    const re = new RegExp(`##\\s+${num}\\.[^\\n]*\\n([\\s\\S]*?)(?=\\n##\\s+\\d+\\.|$)`);
+    const m = text.match(re);
+    return m ? m[1] : "";
+  };
+
+  const sec1 = section(1);
+  const alerts = sec1
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^-\s*`\[\+/.test(l))
+    .slice(-15);
+
+  const sec2 = section(2);
+  const anomalousMetricRows = sec2
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith("| +") && (/srv=false|MB!|MODERATE|SEVERE|CRITICAL|EMERGENCY|SHUTDOWN/i.test(l)))
+    .slice(0, 12);
+
+  const sec3 = section(3)
+    .replace(/```[a-z]*\n?/gi, "")
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter(Boolean)
+    .slice(0, 30);
+
+  const sec5 = section(5)
+    .replace(/```[a-z]*\n?/gi, "")
+    .split(/\r?\n/)
+    .filter((l) => /(error|fatal|exception|eacces|enospc|crash|killed|sigsegv|sigkill)/i.test(l))
+    .slice(-20);
+
+  const errorCountMatch = counters.match(/errors=(\d+)/);
+  const errorCount = errorCountMatch ? Number(errorCountMatch[1]) : 0;
+  const abnormal = status === "ENDED_ABNORMALLY" || errorCount > 0 || sec3.length > 0;
+
+  return {
+    schema: 2,
+    readOnly: true,
+    format: "kucode-ai-markdown-bundle",
+    source: sourceLabel,
+    sessionId,
+    status,
+    exitCategory,
+    exitSummary,
+    app,
+    device,
+    android,
+    counters,
+    abnormal,
+    alerts,
+    anomalousMetricRows,
+    exitTraceHead: sec3,
+    vscodeSublogErrors: sec5,
+    omittedRawTimelineSection4: true,
+  };
+}
+
 export function analyzeDiagnosticBundleFile(filePath) {
-  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  const raw = fs.readFileSync(filePath, "utf8");
+  if (/KuCode AI セッション診断バンドル|## 1\. AI トリアージ要約/.test(raw)) {
+    return parseKuCodeAiMarkdownBundle(raw, path.basename(filePath));
+  }
+  const lines = raw.split(/\r?\n/);
   const errorLines = lines
     .filter((l) => /(ENDED_ABNORMALLY|FATAL|ERROR|Exception|Caused by:|exit=|sigkill|sigsegv|OOM)/i.test(l))
     .slice(0, 35);
   return {
-    schema: 1,
+    schema: 2,
     readOnly: true,
+    format: "generic-text",
     bundleFile: path.basename(filePath),
     totalLines: lines.length,
     abnormal: errorLines.length > 0,
@@ -128,7 +210,7 @@ export function analyzeDiagnosticBundleFile(filePath) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const target = process.argv[2];
   if (!target || !fs.existsSync(target)) {
-    console.error("Usage: analyze-flight-recorder.mjs <session-dir | diagnostics-import-dir | bundle-file>");
+    console.error("Usage: analyze-flight-recorder.mjs <session-dir | diagnostics-bundle.md | upload-dir>");
     process.exit(1);
   }
   const stat = fs.statSync(target);
@@ -138,13 +220,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   } else if (fs.existsSync(path.join(target, "meta.json")) || fs.existsSync(path.join(target, "events.alerts.jsonl"))) {
     result = analyzeSessionDir(target);
   } else {
-    // Pick the newest session subdirectory or exported bundle file inside the directory.
     const entries = fs
       .readdirSync(target, { withFileTypes: true })
       .map((e) => ({ name: e.name, full: path.join(target, e.name), isDir: e.isDirectory(), mtime: fs.statSync(path.join(target, e.name)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime);
     if (entries.length === 0) {
-      result = { schema: 1, readOnly: true, empty: true, abnormal: false };
+      result = { schema: 2, readOnly: true, empty: true, abnormal: false };
     } else if (entries[0].isDir) {
       result = analyzeSessionDir(entries[0].full);
     } else {

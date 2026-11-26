@@ -1,4 +1,13 @@
 {
+  "ship-session-init": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node .agents/skills/ship/scripts/session-init.mjs",
+        "timeout": 10
+      }
+    ]
+  },
   "ship-boundary-lock": {
     "PreToolUse": [
       {

@@ -2,6 +2,7 @@
 /.github/ @koduki
 /scripts/guards/ @koduki
 /.agents/hooks.json @koduki
+/.agents/ship.config.json @koduki
 /runtime-assets.lock.json @koduki
 /scripts/build-proot-android.sh @koduki
 /scripts/fetch-runtime-assets.sh @koduki

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Deterministic state machine CLI & library for /ship.
- * Persists per-branch checkpoints under `.ship/runs/<branch-slug>.json` and
- * enforces transition preconditions so phases cannot be skipped.
+ * Generic deterministic state machine CLI & library for /ship.
+ * Reads project policies from `.agents/ship.config.json` and persists per-branch
+ * checkpoints under `.ship/runs/<branch-slug>.json`.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -24,11 +24,25 @@ export const VALID_STATES = [
 ];
 
 export const VALID_GATES = ["AUTO_PROCEED", "WAITING_HUMAN", "DONE"];
-export const MAX_RETRIES_PER_PHASE = 2;
+export const DEFAULT_MAX_RETRIES = 2;
+
+export function loadShipConfig(cwd = process.cwd()) {
+  const cfgPath = path.join(cwd, ".agents", "ship.config.json");
+  if (!fs.existsSync(cfgPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
 
 export function getBranchSlug(cwd = process.cwd()) {
   try {
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf8" }).trim();
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
     return branch.replace(/[^a-zA-Z0-9._-]/g, "_") || "detached";
   } catch {
     return "local";
@@ -54,20 +68,33 @@ export function saveState(statePath, state) {
   return state;
 }
 
+function normalizeProtectedPaths(list) {
+  return Array.from(
+    new Set(
+      (list || [])
+        .map((p) => String(p || "").trim().replace(/\\/g, "/").replace(/^\.\//, ""))
+        .filter(Boolean),
+    ),
+  );
+}
+
 export function initRun(statePath, goal, options = {}) {
+  const cfg = loadShipConfig(options.cwd || process.cwd());
   const now = new Date().toISOString();
   const state = {
-    schema: 1,
+    schema: 2,
     goal,
     lane: options.lane || "standard",
-    deployTarget: options.deployTarget || "merge-only",
+    deployTarget: options.deployTarget || cfg?.delivery?.defaultTarget || "merge-only",
     currentState: "S0_RECON",
     gate: "AUTO_PROCEED",
     contractLocked: false,
+    allowedProtectedPaths: [],
     specPath: options.specPath || "",
     acceptancePath: options.acceptancePath || "",
     prNumber: null,
     ciStatus: "pending",
+    codexStatus: "pending",
     grillSummary: { rounds: 0, questionsAsked: 0, skipped: false },
     retries: { impl: 0, codex: 0, ci: 0 },
     stallsInState: 0,
@@ -89,6 +116,9 @@ export function approveContract(statePath, updates = {}) {
   if (updates.specPath) state.specPath = updates.specPath;
   if (updates.acceptancePath) state.acceptancePath = updates.acceptancePath;
   if (updates.deployTarget) state.deployTarget = updates.deployTarget;
+  if (Array.isArray(updates.allowedProtectedPaths)) {
+    state.allowedProtectedPaths = normalizeProtectedPaths(updates.allowedProtectedPaths);
+  }
   state.currentState = "S3_IMPL_WORKFLOW";
   state.gate = "AUTO_PROCEED";
   state.stallsInState = 0;
@@ -103,7 +133,6 @@ export function transitionState(statePath, nextState, options = {}) {
     throw new Error(`Invalid state: ${nextState}`);
   }
 
-  // Enforce deterministic preconditions so phases cannot be bypassed.
   const postContractStates = new Set([
     "S3_IMPL_WORKFLOW",
     "S4_LOCAL_CODEX_REVIEW",
@@ -116,15 +145,22 @@ export function transitionState(statePath, nextState, options = {}) {
   if (postContractStates.has(nextState) && !state.contractLocked) {
     throw new Error(`Precondition failed: cannot transition to ${nextState} before contractLocked=true (approve S2_CONTRACT_LOCK first).`);
   }
+
   if (options.prNumber != null) state.prNumber = Number(options.prNumber);
   if (options.ciPassed) state.ciStatus = "passed";
+  if (options.codexPassed) state.codexStatus = "passed";
   if (options.lane) state.lane = options.lane;
   if (options.deployTarget) state.deployTarget = options.deployTarget;
   if (options.specPath) state.specPath = options.specPath;
   if (options.acceptancePath) state.acceptancePath = options.acceptancePath;
 
-  if (nextState === "S6_AUTO_MERGE_AND_DEPLOY" && state.ciStatus !== "passed") {
-    throw new Error("Precondition failed: cannot transition to S6_AUTO_MERGE_AND_DEPLOY until CI status is passed (--ci-passed).");
+  if (nextState === "S6_AUTO_MERGE_AND_DEPLOY") {
+    if (state.ciStatus !== "passed") {
+      throw new Error("Precondition failed: cannot transition to S6_AUTO_MERGE_AND_DEPLOY until CI status is passed (--ci-passed).");
+    }
+    if (state.codexStatus !== "passed") {
+      throw new Error("Precondition failed: cannot transition to S6_AUTO_MERGE_AND_DEPLOY until Codex PR review completes cleanly (--codex-passed).");
+    }
   }
 
   state.currentState = nextState;
@@ -139,16 +175,18 @@ export function transitionState(statePath, nextState, options = {}) {
   return saveState(statePath, state);
 }
 
-export function recordRetry(statePath, bucket) {
+export function recordRetry(statePath, bucket, cwd = process.cwd()) {
   const state = loadState(statePath);
   if (!state) throw new Error("No active /ship state found.");
   if (!(bucket in state.retries)) {
     throw new Error(`Unknown retry bucket '${bucket}'. Use impl | codex | ci.`);
   }
+  const cfg = loadShipConfig(cwd);
+  const max = Number(cfg?.execution?.maxRetries?.[bucket] ?? DEFAULT_MAX_RETRIES);
   state.retries[bucket] += 1;
-  const exceeded = state.retries[bucket] > MAX_RETRIES_PER_PHASE;
+  const exceeded = state.retries[bucket] > max;
   saveState(statePath, state);
-  return { bucket, count: state.retries[bucket], max: MAX_RETRIES_PER_PHASE, exceeded };
+  return { bucket, count: state.retries[bucket], max, exceeded };
 }
 
 export function escalateRun(statePath, reason) {
@@ -172,7 +210,6 @@ export function recordFinding(statePath, patternId, detail) {
   });
   saveState(statePath, state);
 
-  // Also track cross-run counts under .ship/history.json for "2 strikes -> guard"
   const historyPath = path.join(path.dirname(path.dirname(statePath)), "history.json");
   const history = fs.existsSync(historyPath) ? JSON.parse(fs.readFileSync(historyPath, "utf8")) : { counts: {} };
   history.counts[patternId] = (history.counts[patternId] || 0) + 1;
@@ -229,10 +266,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         break;
       }
       case "approve-contract": {
+        const allowRaw = parseFlag(rest, "--allow-protected");
+        const allowedProtectedPaths = allowRaw ? allowRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
         const state = approveContract(statePath, {
           specPath: parseFlag(rest, "--spec"),
           acceptancePath: parseFlag(rest, "--acceptance"),
           deployTarget: parseFlag(rest, "--deploy-target"),
+          allowedProtectedPaths,
         });
         console.log(JSON.stringify(state, null, 2));
         break;
@@ -241,6 +281,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         const nextState = rest[0];
         const state = transitionState(statePath, nextState, {
           ciPassed: rest.includes("--ci-passed"),
+          codexPassed: rest.includes("--codex-passed"),
           prNumber: parseFlag(rest, "--pr"),
           lane: parseFlag(rest, "--lane"),
           deployTarget: parseFlag(rest, "--deploy-target"),
