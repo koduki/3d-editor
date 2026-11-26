@@ -19,8 +19,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.experimental.categories.Category
 import java.io.BufferedInputStream
+import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -202,6 +204,20 @@ class OtelFlightRecorderMediumOracleTest {
         }
     }
 
+    private fun sendRawHttpStatus(port: Int, rawRequest: String): Int {
+        Socket("127.0.0.1", port).use { socket ->
+            socket.soTimeout = 3_000
+            val out = socket.getOutputStream()
+            runCatching {
+                out.write(rawRequest.toByteArray(Charsets.US_ASCII))
+                out.flush()
+            }
+            val statusLine = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.US_ASCII)).readLine()
+                ?: return -1
+            return statusLine.split(' ').getOrNull(1)?.toIntOrNull() ?: -1
+        }
+    }
+
     @Test
     fun ac7_liveDiagnosticsServerOtlpRoutesAndCollectorFlushWithoutRedirectSecretLeak() {
         // [AC-7] Live loopback LocalDiagnosticsServer (?format=otlp, POST /event, POST /span, POST /otlp/flush) + collector E2E
@@ -337,15 +353,20 @@ class OtelFlightRecorderMediumOracleTest {
                 403,
                 httpRequest("POST", "$base/span", token = "", body = """{"name":"unauth"}""").first,
             )
+            val csrfBody = """{"name":"csrf"}"""
             assertEquals(
                 403,
-                httpRequest(
-                    "POST",
-                    "$base/span",
-                    token = token,
-                    extraHeaders = mapOf("Origin" to "https://evil.example"),
-                    body = """{"name":"csrf"}""",
-                ).first,
+                sendRawHttpStatus(
+                    port,
+                    "POST /span HTTP/1.1\r\n" +
+                        "Host: 127.0.0.1:$port\r\n" +
+                        "Origin: https://evil.example\r\n" +
+                        "X-KuCode-Token: $token\r\n" +
+                        "Content-Type: application/json; charset=utf-8\r\n" +
+                        "Content-Length: ${csrfBody.toByteArray(Charsets.UTF_8).size}\r\n" +
+                        "\r\n" +
+                        csrfBody,
+                ),
             )
             assertEquals(400, httpRequest("POST", "$base/span", token, body = """{"name":"   "}""").first)
             assertEquals(400, httpRequest("POST", "$base/span", token, body = "{bad json").first)

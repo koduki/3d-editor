@@ -537,42 +537,71 @@ class OtlpOutboxExporter(
         true
     }
 
-    fun flushOutbox(ignoreBackoff: Boolean = false): FlushResult = synchronized(lock) {
+    private data class ExportGate(
+        val config: OtlpConfig,
+        val normalizedBaseUrl: String,
+        val headers: Map<String, String>,
+    )
+
+    private fun evaluateExportGate(
+        flushed: Int,
+        failed: Int,
+        deferred: Int,
+        lastError: String?,
+    ): Pair<ExportGate?, FlushResult?> {
         val cfg = configStore.loadConfig()
-        val initialPending = outboxStore.pendingCount()
+        val pending = outboxStore.pendingCount()
         if (!cfg.enabled) {
-            return FlushResult(
+            return null to FlushResult(
                 ok = false,
                 enabled = false,
-                remaining = initialPending,
+                flushed = flushed,
+                failed = failed,
+                deferred = deferred,
+                remaining = pending,
                 skippedReason = "disabled",
+                lastError = lastError,
             )
         }
 
         val validated = OtlpEndpointValidator.validate(cfg.endpointUrl, requireNonBlank = true)
         if (!validated.valid) {
-            return FlushResult(
+            return null to FlushResult(
                 ok = false,
                 enabled = true,
-                remaining = initialPending,
+                flushed = flushed,
+                failed = failed,
+                deferred = deferred,
+                remaining = pending,
                 skippedReason = "invalid_endpoint",
                 lastError = validated.error,
             )
         }
 
         if (cfg.unmeteredOnly && isNetworkMetered()) {
-            return FlushResult(
-                ok = true,
+            return null to FlushResult(
+                ok = failed == 0,
                 enabled = true,
-                deferred = initialPending,
-                remaining = initialPending,
+                flushed = flushed,
+                failed = failed,
+                deferred = pending,
+                remaining = pending,
                 skippedReason = "metered_network",
+                lastError = lastError,
             )
         }
 
         val headers = linkedMapOf<String, String>()
         if (cfg.authHeaderName.isNotBlank() && cfg.authHeaderValue.isNotBlank()) {
             headers[cfg.authHeaderName] = cfg.authHeaderValue
+        }
+        return ExportGate(cfg, validated.normalizedBaseUrl, headers) to null
+    }
+
+    fun flushOutbox(ignoreBackoff: Boolean = false): FlushResult = synchronized(lock) {
+        val (_, initialAbort) = evaluateExportGate(flushed = 0, failed = 0, deferred = 0, lastError = null)
+        if (initialAbort != null) {
+            return initialAbort
         }
 
         val now = clockMs()
@@ -583,6 +612,11 @@ class OtlpOutboxExporter(
         var lastError: String? = null
 
         for (item in items) {
+            val (_, sessionAbort) = evaluateExportGate(flushed, failed, deferred, lastError)
+            if (sessionAbort != null) {
+                return sessionAbort
+            }
+
             if (!ignoreBackoff && item.nextAttemptAtMs > now) {
                 deferred++
                 continue
@@ -605,8 +639,25 @@ class OtlpOutboxExporter(
             }
 
             for ((path, body) in signals) {
-                val url = "${validated.normalizedBaseUrl}$path"
-                val resp = httpClient.postJson(url, headers, body)
+                val (signalGate, signalAbort) = evaluateExportGate(flushed, failed, deferred, lastError)
+                if (signalAbort != null || signalGate == null) {
+                    if (current != item) {
+                        outboxStore.update(current)
+                    }
+                    return signalAbort ?: FlushResult(
+                        ok = false,
+                        enabled = false,
+                        flushed = flushed,
+                        failed = failed,
+                        deferred = deferred,
+                        remaining = outboxStore.pendingCount(),
+                        skippedReason = "disabled",
+                        lastError = lastError,
+                    )
+                }
+
+                val url = "${signalGate.normalizedBaseUrl}$path"
+                val resp = httpClient.postJson(url, signalGate.headers, body)
                 if (resp.statusCode in 200..299) {
                     current = when (path) {
                         "/v1/traces" -> current.copy(tracesSent = true)
