@@ -18,6 +18,22 @@ test('ship.config.json defines cloud-first Remote Agents, 1-gate, one-by-one gri
   assert.equal(cfg.project.repository, 'koduki/kucode');
   assert.equal(cfg.execution.primaryEnvironment, 'remote-agent');
   assert.equal(cfg.execution.subagentWorkspaceMode, 'inherit');
+  assert.deepEqual(cfg.execution.agents, {
+    recon: 'ship-recon',
+    architect: 'ship-architect',
+    oracleAuthor: 'oracle-test-author',
+    implementer: 'ship-implementer',
+    verifier: 'ship-verifier',
+  });
+  assert.deepEqual(cfg.execution.models, {
+    orchestrator: 'inherit',
+    recon: 'flash',
+    architect: 'pro',
+    oracleAuthor: 'pro',
+    implementer: 'inherit',
+    verifier: 'flash',
+  });
+  assert.ok(cfg.boundaries.protectedPatterns.includes('(^|/)\\.agents/agents/'));
   assert.equal(cfg.grilling.mode, 'one-by-one');
   assert.equal(cfg.grilling.autoSkipWhenClear, true);
   assert.equal(cfg.grilling.maxQuestions, 20);
@@ -92,6 +108,88 @@ test('run-all-guards blocks suppressions, skips, trust regressions, module leaks
   }
 });
 
+test('Guard 11 validates .agents/agents/*.md frontmatter, official tool allowlist, model tiers, and read-only enforcement', async () => {
+  const { runGuards } = await import('../scripts/guards/run-all-guards.mjs');
+
+  const liveAgentsDir = path.join(REPO_ROOT, '.agents', 'agents');
+  const liveAgentFiles = fs.readdirSync(liveAgentsDir).filter((f) => f.endsWith('.md')).sort();
+  assert.deepEqual(liveAgentFiles, [
+    'oracle-test-author.md',
+    'ship-architect.md',
+    'ship-implementer.md',
+    'ship-recon.md',
+    'ship-verifier.md',
+  ]);
+
+  const tmp = makeTempDir('kucode-guard11-test-');
+  try {
+    const write = (rel, content) => {
+      const full = path.join(tmp, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, content, 'utf8');
+    };
+
+    // Required OSS files so only Guard 11 triggers
+    write('LICENSE', 'MIT\n');
+    write('THIRD_PARTY_NOTICES.md', 'notices\n');
+    write('LICENSES/MIT-OpenVSCode.txt', 'MIT\n');
+
+    // (a) Misspelled/unmapped tool name
+    write('.agents/agents/bad-tool.md', [
+      '---',
+      'name: bad-tool',
+      'description: Agent with unmapped tool',
+      'tools:',
+      '  - view_file',
+      '  - read_file_typo',
+      'subagent: true',
+      'model: flash',
+      'commandExecutionPolicy: sandbox',
+      '---',
+      '# Prompt',
+    ].join('\n'));
+
+    // (b) Invalid model tier
+    write('.agents/agents/bad-model.md', [
+      '---',
+      'name: bad-model',
+      'description: Agent with invalid model tier',
+      'tools: [view_file, send_message]',
+      'subagent: true',
+      'model: gpt-99',
+      'commandExecutionPolicy: sandbox',
+      '---',
+      '# Prompt',
+    ].join('\n'));
+
+    // (c) Read-only subagent accidentally granted write tool
+    write('.agents/agents/ship-verifier.md', [
+      '---',
+      'name: ship-verifier',
+      'description: Read-only verifier with forbidden write tool',
+      'tools:',
+      '  - view_file',
+      '  - write_to_file',
+      '  - run_command',
+      'subagent: true',
+      'model: flash',
+      'commandExecutionPolicy: sandbox',
+      '---',
+      '# Prompt',
+    ].join('\n'));
+
+    const report = runGuards(tmp, { changedOnly: false });
+    assert.equal(report.passed, false);
+    const guard11 = report.violations.filter((v) => v.ruleId === 'custom-subagent-frontmatter');
+    assert.equal(guard11.length, 3, `Expected 3 Guard 11 violations, got: ${JSON.stringify(guard11, null, 2)}`);
+    assert.ok(guard11.some((v) => v.file.endsWith('bad-tool.md') && /read_file_typo/.test(v.detail)));
+    assert.ok(guard11.some((v) => v.file.endsWith('bad-model.md') && /gpt-99/.test(v.detail)));
+    assert.ok(guard11.some((v) => v.file.endsWith('ship-verifier.md') && /write_to_file/.test(v.detail)));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('guard-boundaries enforces two-way Clean-Room Oracle isolation, S2 allowedProtectedPaths, and never-unlockable secrets', async () => {
   const { evaluateBoundaryWrite } = await import('../.agents/skills/ship/scripts/guard-boundaries.mjs');
   const { loadShipConfig } = await import('../.agents/skills/ship/scripts/state.mjs');
@@ -101,6 +199,14 @@ test('guard-boundaries enforces two-way Clean-Room Oracle isolation, S2 allowedP
   assert.equal(evaluateBoundaryWrite('/repo/runtime-assets.lock.json', { config }).decision, 'deny');
   assert.equal(evaluateBoundaryWrite('/repo/scripts/guards/run-all-guards.mjs', { config }).decision, 'deny');
   assert.equal(evaluateBoundaryWrite('/repo/.agents/ship.config.json', { config }).decision, 'deny');
+  assert.equal(evaluateBoundaryWrite('/repo/.agents/agents/ship-verifier.md', { config }).decision, 'deny');
+  assert.equal(
+    evaluateBoundaryWrite('/repo/.agents/agents/ship-verifier.md', {
+      config,
+      allowedProtectedPaths: ['.agents/agents/ship-verifier.md'],
+    }).decision,
+    'allow',
+  );
 
   // Explicit S2 approval unlocks only the approved protected path
   assert.equal(

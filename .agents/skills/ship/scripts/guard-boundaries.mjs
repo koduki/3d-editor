@@ -26,6 +26,7 @@ const DEFAULT_PROTECTED = [
   /(^|\/)scripts\/guards\//,
   /(^|\/)\.agents\/hooks\.json$/,
   /(^|\/)\.agents\/ship\.config\.json$/,
+  /(^|\/)\.agents\/agents\//,
   /(^|\/)runtime-assets\.lock\.json$/,
   /(^|\/)scripts\/build-proot-android\.sh$/,
   /(^|\/)scripts\/fetch-runtime-assets\.sh$/,

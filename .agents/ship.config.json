@@ -13,12 +13,20 @@
       "standard": 2,
       "multiLayerMax": 3
     },
+    "agents": {
+      "recon": "ship-recon",
+      "architect": "ship-architect",
+      "oracleAuthor": "oracle-test-author",
+      "implementer": "ship-implementer",
+      "verifier": "ship-verifier"
+    },
     "models": {
       "orchestrator": "inherit",
-      "oracleAuthor": "inherit",
+      "recon": "flash",
+      "architect": "pro",
+      "oracleAuthor": "pro",
       "implementer": "inherit",
-      "verifier": "flash",
-      "researcher": "flash"
+      "verifier": "flash"
     },
     "maxRetries": {
       "impl": 2,
@@ -78,6 +86,7 @@
       "(^|/)scripts/guards/",
       "(^|/)\\.agents/hooks\\.json$",
       "(^|/)\\.agents/ship\\.config\\.json$",
+      "(^|/)\\.agents/agents/",
       "(^|/)runtime-assets\\.lock\\.json$",
       "(^|/)scripts/build-proot-android\\.sh$",
       "(^|/)scripts/fetch-runtime-assets\\.sh$",

@@ -56,7 +56,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           CHANGED="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
-          PROTECTED="$(printf '%s\n' "$CHANGED" | grep -E '^(\.github/workflows/|scripts/guards/|\.agents/hooks\.json|runtime-assets\.lock\.json|scripts/build-proot-android\.sh|scripts/fetch-runtime-assets\.sh|LICENSE|THIRD_PARTY_NOTICES\.md|LICENSES/)' || true)"
+          PROTECTED="$(printf '%s\n' "$CHANGED" | grep -E '^(\.github/workflows/|scripts/guards/|\.agents/hooks\.json|\.agents/ship\.config\.json|\.agents/agents/|runtime-assets\.lock\.json|scripts/build-proot-android\.sh|scripts/fetch-runtime-assets\.sh|LICENSE|THIRD_PARTY_NOTICES\.md|LICENSES/)' || true)"
           if [[ -n "$PROTECTED" ]]; then
             echo "::notice::Protected boundary files changed in this PR (requires human CODEOWNERS review):"
             printf '%s\n' "$PROTECTED"

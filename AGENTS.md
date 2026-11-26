@@ -9,11 +9,12 @@
 - AURA real-device acceptance & CLI contracts: `docs/aura-self-host-acceptance.md`
 - Runtime asset supply-chain lock (pinned SHA-256): `runtime-assets.lock.json`
 - End-to-end autonomous workflow (`/ship`): `.agents/skills/ship/SKILL.md` (configured by `.agents/ship.config.json`)
+- Tiered custom subagents (`.agents/agents/*.md`, validated by Guard 11): `ship-recon` (`flash`), `ship-architect` (`pro`), `oracle-test-author` (`pro`), `ship-implementer` (`inherit`), `ship-verifier` (`flash`)
 - Non-ignorable deterministic guards: `scripts/guards/run-all-guards.mjs`
 
 ## 2. Hard Boundaries (AI Must Never Modify Without Explicit Human Approval in S2)
 - Secret/signing files (NEVER unlockable): `.env*`, `*.keystore`, `*.jks`, `*.p12`
-- CI/CD & harness controls: `.github/workflows/**`, `scripts/guards/**`, `.agents/hooks.json`, `.agents/ship.config.json`
+- CI/CD & harness controls: `.github/workflows/**`, `scripts/guards/**`, `.agents/hooks.json`, `.agents/ship.config.json`, `.agents/agents/**`
 - Supply-chain & legal compliance: `runtime-assets.lock.json`, `scripts/build-proot-android.sh`, `scripts/fetch-runtime-assets.sh`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `LICENSES/**`, `android/gradle/wrapper/gradle-wrapper.properties`
 - Security & build contracts: `android/app/proguard-rules.pro`, `android/app/src/main/res/xml/network_security_config.xml`
 - Approved feature contracts (locked automatically after `/ship` S2 approval): `spec.md`, `docs/adr/**`, `docs/specs/**/spec.md`

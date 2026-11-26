@@ -37,6 +37,105 @@ const SECRET_SCAN_EXCLUDED = new Set([
   "tests/agentic-harness.test.cjs",
 ]);
 
+// Guard 11: Verified Antigravity custom subagent frontmatter allowlists (prevents unmapped-tool hangs).
+const ALLOWED_SUBAGENT_TOOLS = new Set([
+  "view_file",
+  "write_to_file",
+  "replace_file_content",
+  "multi_replace_file_content",
+  "list_dir",
+  "find_by_name",
+  "grep_search",
+  "run_command",
+  "manage_task",
+  "send_message",
+]);
+
+const SUBAGENT_WRITE_TOOLS = new Set([
+  "write_to_file",
+  "replace_file_content",
+  "multi_replace_file_content",
+]);
+
+const READ_ONLY_SUBAGENTS = new Set([
+  "ship-recon",
+  "ship-architect",
+  "ship-verifier",
+]);
+
+const ALLOWED_SUBAGENT_MODELS = new Set(["inherit", "flash", "pro"]);
+const ALLOWED_COMMAND_POLICIES = new Set(["off", "auto", "eager", "sandbox"]);
+
+function stripYamlQuotes(raw) {
+  const s = String(raw || "").trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    return s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+function parseAgentFrontmatter(content) {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  if (lines[0]?.trim() !== "---") {
+    return { validDelimiters: false, fields: {}, tools: [] };
+  }
+  let endIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") {
+      endIdx = i;
+      break;
+    }
+  }
+  if (endIdx === -1) {
+    return { validDelimiters: false, fields: {}, tools: [] };
+  }
+
+  const fields = {};
+  const tools = [];
+  let currentListKey = null;
+
+  for (let i = 1; i < endIdx; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const listMatch = rawLine.match(/^\s*-\s+(.+)$/);
+    if (listMatch && currentListKey === "tools") {
+      const val = stripYamlQuotes(listMatch[1]);
+      if (val) tools.push({ value: val, line: i + 1 });
+      continue;
+    }
+
+    const kvMatch = rawLine.match(/^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/);
+    if (kvMatch) {
+      const key = kvMatch[1];
+      const rawVal = kvMatch[2].trim();
+      if (key === "tools") {
+        if (rawVal.startsWith("[") && rawVal.endsWith("]")) {
+          const inner = rawVal.slice(1, -1).trim();
+          if (inner) {
+            for (const part of inner.split(",")) {
+              const val = stripYamlQuotes(part);
+              if (val) tools.push({ value: val, line: i + 1 });
+            }
+          }
+          currentListKey = null;
+        } else if (rawVal === "") {
+          currentListKey = "tools";
+        } else {
+          tools.push({ value: stripYamlQuotes(rawVal), line: i + 1 });
+          currentListKey = null;
+        }
+      } else {
+        currentListKey = null;
+        fields[key] = { value: stripYamlQuotes(rawVal), line: i + 1 };
+      }
+    }
+  }
+
+  return { validDelimiters: true, fields, tools };
+}
+
 function normalizeRel(filePath) {
   return filePath.replace(/\\/g, "/").replace(/^\.\//, "");
 }
@@ -109,6 +208,119 @@ export function runGuards(repoRoot, options = {}) {
         "Keystore or signing binary found in repository",
         "Remove the signing key from the repository immediately and pass it via ANDROID_KEYSTORE_PATH / GitHub Secrets.",
       );
+      continue;
+    }
+
+    // Guard 11: validate custom subagent YAML frontmatter, official tool allowlists, model tiers, and read-only invariants
+    if (/(^|\/)\.agents\/agents\/[^/]+\.md$/.test(rel)) {
+      const abs = path.join(repoRoot, rel);
+      const content = fs.readFileSync(abs, "utf8");
+      const parsed = parseAgentFrontmatter(content);
+      const expectedName = path.basename(rel, ".md");
+      if (!parsed.validDelimiters) {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          1,
+          "Custom subagent file is missing valid YAML frontmatter delimited by '---'",
+          "Add valid YAML frontmatter (name, description, tools, mainAgent, subagent, model, commandExecutionPolicy) at the top of the file.",
+        );
+        continue;
+      }
+
+      const { fields, tools } = parsed;
+      const agentName = fields.name?.value || "";
+      if (!agentName || !/^[a-z0-9][a-z0-9_.-]*$/.test(agentName)) {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          fields.name?.line || 1,
+          `Invalid or missing subagent 'name': '${agentName}'`,
+          `Set 'name: ${expectedName}' matching [a-z0-9][a-z0-9_.-]*.`,
+        );
+      } else if (agentName !== expectedName) {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          fields.name?.line || 1,
+          `Subagent name '${agentName}' does not match filename '${expectedName}.md'`,
+          `Rename the file or set 'name: ${expectedName}' so Antigravity subagent lookup stays unambiguous.`,
+        );
+      }
+
+      if (!fields.description?.value) {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          fields.description?.line || 1,
+          "Custom subagent is missing a non-empty 'description' field",
+          "Provide a clear description explaining when the orchestrator should invoke this subagent.",
+        );
+      }
+
+      if (fields.subagent?.value !== "true") {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          fields.subagent?.line || 1,
+          `Custom subagent must set 'subagent: true' (got '${fields.subagent?.value || ""}')`,
+          "Set 'subagent: true' in frontmatter so the agent can be invoked via invoke_subagent.",
+        );
+      }
+
+      const modelVal = fields.model?.value || "";
+      if (!ALLOWED_SUBAGENT_MODELS.has(modelVal)) {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          fields.model?.line || 1,
+          `Invalid custom subagent model tier '${modelVal}'`,
+          "Set 'model' to one of the supported Antigravity tiers: 'inherit', 'flash', or 'pro'.",
+        );
+      }
+
+      const policyVal = fields.commandExecutionPolicy?.value || "";
+      if (!ALLOWED_COMMAND_POLICIES.has(policyVal)) {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          fields.commandExecutionPolicy?.line || 1,
+          `Invalid or missing commandExecutionPolicy '${policyVal}'`,
+          "Set 'commandExecutionPolicy' to one of: 'off', 'auto', 'eager', or 'sandbox'.",
+        );
+      }
+
+      if (tools.length === 0) {
+        addViolation(
+          "custom-subagent-frontmatter",
+          rel,
+          1,
+          "Custom subagent must declare an explicit non-empty 'tools' allowlist",
+          "Declare only the minimal verified tools needed (e.g., view_file, run_command, send_message).",
+        );
+      } else {
+        const isReadOnlyAgent = READ_ONLY_SUBAGENTS.has(agentName) || READ_ONLY_SUBAGENTS.has(expectedName);
+        for (const toolEntry of tools) {
+          if (!ALLOWED_SUBAGENT_TOOLS.has(toolEntry.value)) {
+            addViolation(
+              "custom-subagent-frontmatter",
+              rel,
+              toolEntry.line,
+              `Unmapped or unsupported tool name '${toolEntry.value}' in custom subagent tools list`,
+              `Replace '${toolEntry.value}' with a verified Antigravity core tool (${Array.from(ALLOWED_SUBAGENT_TOOLS).join(", ")}) to avoid subagent tool-resolution hangs.`,
+            );
+          }
+          if (isReadOnlyAgent && SUBAGENT_WRITE_TOOLS.has(toolEntry.value)) {
+            addViolation(
+              "custom-subagent-frontmatter",
+              rel,
+              toolEntry.line,
+              `Read-only subagent '${expectedName}' must not be granted write tool '${toolEntry.value}'`,
+              "Remove all file-write tools from read-only subagents (ship-recon, ship-architect, ship-verifier).",
+            );
+          }
+        }
+      }
       continue;
     }
 

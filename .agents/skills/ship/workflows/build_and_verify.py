@@ -40,6 +40,7 @@ if not skip_oracle:
             "required": ["oracle_files", "pre_impl_red_verified", "covered_criteria"],
         },
         role="Clean-Room Oracle Author",
+        model="pro",
     )
     oracle_files = oracle_result["oracle_files"]
     log("Oracle tests locked before implementation:", oracle_result)
@@ -84,6 +85,7 @@ plan = await agent(
         "required": ["wave1", "wave2"],
     },
     role="KuCode Layer Planner",
+    model="pro",
 )
 
 # Enforce exclusive file ownership lock: 1 file -> at most 1 Wave 1 worker
