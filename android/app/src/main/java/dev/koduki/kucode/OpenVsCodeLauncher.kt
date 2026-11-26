@@ -33,23 +33,13 @@ internal class OpenVsCodeLauncher(
     private val tokenGenerator: () -> String = ::generateConnectionToken,
     private val portPicker: () -> Int = { pickStableLocalPort() },
     private val startupTimeoutMs: Long = DEFAULT_STARTUP_TIMEOUT_MS,
-    private val commandBuilder: (
+    private val commandBuilder: ((
         paths: PosixRuntimeConfig.Paths,
         port: Int,
         disableSeccomp: Boolean,
         adminPort: Int,
         adminToken: String,
-    ) -> Pair<List<String>, Map<String, String>> = { paths, port, disableSeccomp, adminPort, adminToken ->
-        val guestCmd = PosixRuntimeConfig.buildOpenVsCodeServerCommand(port)
-        val prootCmd = PosixRuntimeConfig.buildProotCommand(paths, guestCmd)
-        val env = PosixRuntimeConfig.buildProotEnvironment(
-            paths = paths,
-            disableSeccomp = disableSeccomp,
-            adminPort = adminPort,
-            adminToken = adminToken,
-        )
-        prootCmd to env
-    },
+    ) -> Pair<List<String>, Map<String, String>>)? = null,
     private val processStarter: (List<String>, Map<String, String>) -> Process = { cmd, env ->
         ProcessBuilder(cmd).apply {
             redirectErrorStream(true)
@@ -87,6 +77,7 @@ internal class OpenVsCodeLauncher(
         onStarting: (port: Int) -> Unit = {},
         onProcessCreated: (Process) -> Unit = {},
         onUnexpectedExit: (Process, Int) -> Unit = { _, _ -> },
+        traceparent: String = "",
     ): LaunchResult {
         var disableSeccomp = initialDisableSeccomp
         var retryAllowed = allowSeccompRetry
@@ -100,7 +91,31 @@ internal class OpenVsCodeLauncher(
             val token = tokenGenerator()
             writeTextAtomically(File(paths.vscodeDataDir, ".editor-token"), token, Charsets.US_ASCII)
 
-            val (prootCmd, env) = commandBuilder(paths, port, disableSeccomp, adminPort, adminToken)
+            val (prootCmd, env) = if (commandBuilder != null) {
+                val (builtCmd, builtEnv) = commandBuilder.invoke(paths, port, disableSeccomp, adminPort, adminToken)
+                val parsedTp = TraceContext.parseTraceParent(traceparent)
+                if (parsedTp != null && !builtEnv.containsKey("TRACEPARENT")) {
+                    val normalizedTp = TraceContext.formatTraceParent(
+                        parsedTp.traceId,
+                        parsedTp.parentSpanId,
+                        parsedTp.traceFlags,
+                    )
+                    builtCmd to (LinkedHashMap(builtEnv).apply { put("TRACEPARENT", normalizedTp) })
+                } else {
+                    builtCmd to builtEnv
+                }
+            } else {
+                val guestCmd = PosixRuntimeConfig.buildOpenVsCodeServerCommand(port)
+                val builtCmd = PosixRuntimeConfig.buildProotCommand(paths, guestCmd)
+                val builtEnv = PosixRuntimeConfig.buildProotEnvironment(
+                    paths = paths,
+                    disableSeccomp = disableSeccomp,
+                    adminPort = adminPort,
+                    adminToken = adminToken,
+                    traceparent = traceparent,
+                )
+                builtCmd to builtEnv
+            }
             onLog("[runtime] Launching PRoot (disableSeccomp=$disableSeccomp) on 127.0.0.1:$port (admin=$adminPort)")
 
             val proc = processStarter(prootCmd, env)

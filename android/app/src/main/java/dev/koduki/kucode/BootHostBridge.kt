@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
  * Minimal, strictly non-blocking JS bridge exposed ONLY on `boot.html`
@@ -28,6 +29,7 @@ class BootHostBridge(
     private val onSessionReportLoaded: (selector: String, format: String, content: String) -> Unit = { _, _, _ -> },
     private val onSessionExported: (message: String) -> Unit = {},
     private val onShareDiagnostic: (java.io.File) -> Unit = {},
+    private val onOtlpFlushResult: (String) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -93,10 +95,11 @@ class BootHostBridge(
     @JavascriptInterface
     fun loadSessionReport(selector: String, format: String) {
         val safeSelector = selector.trim().ifEmpty { "latest" }
-        val safeFormat = format.trim().ifEmpty { "ai" }
+        val safeFormat = sanitizeSessionFormat(format)
         scope.launch {
             val content = try {
                 telemetryManager.renderSessionBundle(safeSelector, safeFormat)
+                    ?: "# Session not found: $safeSelector\n"
             } catch (cancel: kotlin.coroutines.cancellation.CancellationException) {
                 throw cancel
             } catch (e: Exception) {
@@ -108,10 +111,16 @@ class BootHostBridge(
 
     @JavascriptInterface
     fun exportSessionReport(selector: String) {
+        exportSessionReportWithFormat(selector, "ai")
+    }
+
+    @JavascriptInterface
+    fun exportSessionReportWithFormat(selector: String, format: String) {
         val safeSelector = selector.trim().ifEmpty { "latest" }
+        val safeFormat = sanitizeSessionFormat(format)
         scope.launch {
             val msg = try {
-                val file = telemetryManager.exportSessionToShared(safeSelector)
+                val file = telemetryManager.exportSessionToShared(safeSelector, safeFormat)
                 if (file != null) {
                     "保存しました: ${file.absolutePath}"
                 } else {
@@ -127,10 +136,28 @@ class BootHostBridge(
     }
 
     @JavascriptInterface
+    fun getOtlpConfig(): String = telemetryManager.getOtlpConfigJson()
+
+    @JavascriptInterface
+    fun saveOtlpConfig(configJson: String): String = telemetryManager.saveOtlpConfigJson(configJson)
+
+    @JavascriptInterface
+    fun flushOtlpOutbox() {
+        telemetryManager.flushOtlpOutboxAsync(selector = null, ignoreBackoff = true) { resultJson ->
+            onOtlpFlushResult(resultJson)
+        }
+    }
+
+    @JavascriptInterface
     fun shareDiagnostic(selector: String) {
+        val safeSelector = selector.trim().ifEmpty { "latest" }
         scope.launch {
             try {
-                val report = telemetryManager.renderSessionBundle(selector.trim().ifEmpty { "latest" }, "ai")
+                val report = telemetryManager.renderSessionBundle(safeSelector, "ai")
+                    ?: run {
+                        onSessionExported("Diagnostic export failed: Session not found ($safeSelector)")
+                        return@launch
+                    }
                 val dir = java.io.File(context.cacheDir, "diagnostic-share").apply { mkdirs() }
                 // Limit retained export files; file names contain no user input.
                 dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(3)?.forEach { it.delete() }
@@ -194,6 +221,13 @@ class BootHostBridge(
 
     companion object {
         internal const val MAX_DIAGNOSTIC_SHARE_BYTES = 1024 * 1024
+
+        private val ALLOWED_SESSION_FORMATS = setOf("ai", "raw", "json", "otlp")
+
+        private fun sanitizeSessionFormat(format: String): String {
+            val normalized = format.trim().lowercase(Locale.US)
+            return if (normalized in ALLOWED_SESSION_FORMATS) normalized else "ai"
+        }
 
         internal fun truncateUtf8Bytes(text: String, maxBytes: Int): ByteArray {
             val bytes = text.toByteArray(Charsets.UTF_8)

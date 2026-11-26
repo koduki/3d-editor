@@ -1,8 +1,10 @@
 package dev.koduki.kucode
 
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.net.InetAddress
@@ -11,6 +13,7 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
@@ -45,6 +48,12 @@ class LocalDiagnosticsServer(
     private val onRequestStoragePermission: () -> Unit,
     private val onRestartServer: () -> Unit,
     private val onAndroidRequest: ((String, String, String) -> Pair<Int, String>)? = null,
+    private val sessionLogStore: SessionLogStore? = null,
+    private val otlpOutboxExporter: OtlpOutboxExporter? = null,
+    private val vscodeDataDirProvider: (() -> File?)? = null,
+    private val onGetSessionBundleWithGranularity: ((selector: String, format: String, granularity: String) -> String?)? = null,
+    private val onRecordClientEventWithTrace: ((level: String, source: String, message: String, traceId: String?, spanId: String?) -> Unit)? = null,
+    private val onFlushOtlp: ((selector: String?) -> Pair<Int, String>)? = null,
     private val maxWorkers: Int = DEFAULT_MAX_WORKERS,
     private val maxQueuedConnections: Int = DEFAULT_MAX_QUEUED_CONNECTIONS,
     private val preAuthTimeoutMs: Int = DEFAULT_PRE_AUTH_TIMEOUT_MS,
@@ -327,18 +336,52 @@ class LocalDiagnosticsServer(
                         val rawSelector = path.removePrefix("/sessions/")
                         val selector = decodeUrlPathSegment(rawSelector)
                         val format = parseQueryParam(rawQuery, "format") ?: "ai"
-                        val bundle = onGetSessionBundle(selector, format)
-                        if (bundle == null) {
-                            respond(404, "Session not found")
-                            audit(404, "selector=$selector")
-                        } else {
-                            val ct = if (format.equals("json", ignoreCase = true)) {
-                                "application/json; charset=utf-8"
+                        val formatLower = format.lowercase(Locale.US)
+                        if (formatLower !in SUPPORTED_SESSION_FORMATS) {
+                            respond(400, "Invalid format: $format")
+                            audit(400, "invalid_format")
+                        } else if (formatLower == "otlp") {
+                            val granularity = parseQueryParam(rawQuery, "granularity")
+                                ?: OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS
+                            if (!OtlpJsonSerializer.isValidGranularity(granularity)) {
+                                respond(400, "Invalid granularity: $granularity")
+                                audit(400, "invalid_granularity")
                             } else {
-                                "text/plain; charset=utf-8"
+                                val bundle = onGetSessionBundleWithGranularity?.invoke(selector, "otlp", granularity)
+                                    ?: sessionLogStore?.renderSessionBundle(
+                                        selector = selector,
+                                        format = "otlp",
+                                        vscodeDataDir = vscodeDataDirProvider?.invoke(),
+                                        granularity = granularity,
+                                    )
+                                    ?: onGetSessionBundle(selector, "otlp")
+                                if (bundle == null) {
+                                    respond(404, "Session not found")
+                                    audit(404, "selector=$selector")
+                                } else {
+                                    respond(200, bundle, contentType = "application/json; charset=utf-8")
+                                    audit(200, "selector=$selector,format=otlp,granularity=$granularity")
+                                }
                             }
-                            respond(200, bundle, contentType = ct)
-                            audit(200, "selector=$selector,format=$format")
+                        } else {
+                            val bundle = onGetSessionBundle(selector, format)
+                                ?: sessionLogStore?.renderSessionBundle(
+                                    selector = selector,
+                                    format = format,
+                                    vscodeDataDir = vscodeDataDirProvider?.invoke(),
+                                )
+                            if (bundle == null) {
+                                respond(404, "Session not found")
+                                audit(404, "selector=$selector")
+                            } else {
+                                val ct = if (formatLower == "json") {
+                                    "application/json; charset=utf-8"
+                                } else {
+                                    "text/plain; charset=utf-8"
+                                }
+                                respond(200, bundle, contentType = ct)
+                                audit(200, "selector=$selector,format=$format")
+                            }
                         }
                     }
 
@@ -366,9 +409,10 @@ class LocalDiagnosticsServer(
 
                     method == "POST" && path == "/event" -> {
                         val trimmed = body.trim()
+                        val parsedTp = TraceContext.parseTraceParent(headers["traceparent"])
                         if (trimmed.isNotEmpty()) {
                             val json = if (trimmed.startsWith("{")) {
-                                runCatching { org.json.JSONObject(trimmed) }.getOrNull()
+                                runCatching { JSONObject(trimmed) }.getOrNull()
                             } else {
                                 null
                             }
@@ -376,14 +420,239 @@ class LocalDiagnosticsServer(
                                 val lvl = json.optString("level", "INFO")
                                 val src = json.optString("source", "ext.kucode")
                                 val msg = json.optString("msg", "")
+                                val jsonTraceId = json.optString("traceId", "").trim()
+                                    .takeIf { TraceContext.isValidTraceId(it) }
+                                val jsonSpanId = json.optString("spanId", "").trim()
+                                    .takeIf { TraceContext.isValidSpanId(it) }
+                                val effectiveTraceId = jsonTraceId ?: parsedTp?.traceId
+                                val effectiveSpanId = jsonSpanId ?: parsedTp?.parentSpanId
                                 if (msg.isNotBlank()) {
-                                    onRecordClientEvent(lvl, src, msg)
+                                    when {
+                                        onRecordClientEventWithTrace != null ->
+                                            onRecordClientEventWithTrace.invoke(lvl, src, msg, effectiveTraceId, effectiveSpanId)
+                                        sessionLogStore != null && (effectiveTraceId != null || effectiveSpanId != null) ->
+                                            sessionLogStore.recordEvent(
+                                                level = parseEventLevel(lvl),
+                                                source = src,
+                                                message = msg,
+                                                traceId = effectiveTraceId,
+                                                spanId = effectiveSpanId,
+                                            )
+                                        else ->
+                                            onRecordClientEvent(lvl, src, msg)
+                                    }
                                 }
                             } else {
-                                onRecordClientEvent("INFO", "ext.kucode", trimmed)
+                                when {
+                                    onRecordClientEventWithTrace != null ->
+                                        onRecordClientEventWithTrace.invoke(
+                                            "INFO",
+                                            "ext.kucode",
+                                            trimmed,
+                                            parsedTp?.traceId,
+                                            parsedTp?.parentSpanId,
+                                        )
+                                    sessionLogStore != null && parsedTp != null ->
+                                        sessionLogStore.recordEvent(
+                                            level = SessionLogStore.EventLevel.INFO,
+                                            source = "ext.kucode",
+                                            message = trimmed,
+                                            traceId = parsedTp.traceId,
+                                            spanId = parsedTp.parentSpanId,
+                                        )
+                                    else ->
+                                        onRecordClientEvent("INFO", "ext.kucode", trimmed)
+                                }
                             }
                         }
                         respond(200, "ok")
+                    }
+
+                    method == "POST" && path == "/span" -> {
+                        val trimmed = body.trim()
+                        val json = if (trimmed.startsWith("{")) {
+                            runCatching { JSONObject(trimmed) }.getOrNull()
+                        } else {
+                            null
+                        }
+                        if (json == null) {
+                            respond(400, "Invalid JSON payload")
+                            audit(400, "invalid_json")
+                        } else {
+                            val name = json.optString("name", "").trim()
+                            val rawTraceId = if (json.has("traceId") && !json.isNull("traceId")) {
+                                json.optString("traceId", "").trim()
+                            } else {
+                                ""
+                            }
+                            val rawSpanId = if (json.has("spanId") && !json.isNull("spanId")) {
+                                json.optString("spanId", "").trim()
+                            } else {
+                                ""
+                            }
+                            val rawParentSpanId = if (json.has("parentSpanId") && !json.isNull("parentSpanId")) {
+                                json.optString("parentSpanId", "").trim()
+                            } else {
+                                ""
+                            }
+                            val phase = json.optString("phase", "").trim().lowercase(Locale.US)
+                            val invalidReason = when {
+                                name.isEmpty() -> "Missing or blank span name"
+                                rawTraceId.isNotEmpty() && !TraceContext.isValidTraceId(rawTraceId) -> "Malformed traceId"
+                                rawSpanId.isNotEmpty() && !TraceContext.isValidSpanId(rawSpanId) -> "Malformed spanId"
+                                rawParentSpanId.isNotEmpty() && !TraceContext.isValidSpanId(rawParentSpanId) -> "Malformed parentSpanId"
+                                phase == "end" && rawSpanId.isEmpty() -> "spanId is required when phase=end"
+                                else -> null
+                            }
+                            if (invalidReason != null) {
+                                respond(400, invalidReason)
+                                audit(400, "invalid_span")
+                            } else if (sessionLogStore == null) {
+                                respond(503, "SessionLogStore unavailable")
+                                audit(503, "no_session_store")
+                            } else {
+                                val parsedTp = TraceContext.parseTraceParent(headers["traceparent"])
+                                val effectiveTraceId = rawTraceId.ifEmpty { parsedTp?.traceId }
+                                val effectiveParentSpanId = rawParentSpanId.ifEmpty { parsedTp?.parentSpanId }
+                                val explicitSpanId = rawSpanId.ifEmpty { null }
+                                val kind = runCatching {
+                                    SessionLogStore.SpanKind.valueOf(json.optString("kind", "INTERNAL").trim().uppercase(Locale.US))
+                                }.getOrDefault(SessionLogStore.SpanKind.INTERNAL)
+                                val status = runCatching {
+                                    SessionLogStore.SpanStatus.valueOf(json.optString("status", "OK").trim().uppercase(Locale.US))
+                                }.getOrDefault(SessionLogStore.SpanStatus.OK)
+                                val statusMessage = if (json.has("statusMessage") && !json.isNull("statusMessage")) {
+                                    json.optString("statusMessage")
+                                } else {
+                                    null
+                                }
+                                val attrs = linkedMapOf<String, Any?>()
+                                val attrsObj = json.optJSONObject("attributes")
+                                if (attrsObj != null) {
+                                    val keys = attrsObj.keys()
+                                    while (keys.hasNext()) {
+                                        val k = keys.next()
+                                        val v = attrsObj.opt(k)
+                                        if (v != null && v != JSONObject.NULL) {
+                                            attrs[k] = v
+                                        }
+                                    }
+                                }
+                                val now = System.currentTimeMillis()
+                                val hasStart = json.has("startMs") && !json.isNull("startMs")
+                                val hasEnd = json.has("endMs") && !json.isNull("endMs")
+                                val hasDuration = json.has("durationMs") && !json.isNull("durationMs")
+                                val durationMs = if (hasDuration) json.optLong("durationMs", 0L).coerceAtLeast(0L) else 0L
+                                val startMs = when {
+                                    hasStart -> json.optLong("startMs", now)
+                                    hasEnd && hasDuration -> json.optLong("endMs", now) - durationMs
+                                    hasDuration -> now - durationMs
+                                    else -> now
+                                }
+                                val endMs = when {
+                                    hasEnd -> json.optLong("endMs", now)
+                                    hasStart && hasDuration -> startMs + durationMs
+                                    else -> now
+                                }
+
+                                val recorded = when (phase) {
+                                    "start" -> sessionLogStore.startSpan(
+                                        name = name,
+                                        kind = kind,
+                                        parentSpanId = effectiveParentSpanId,
+                                        traceId = effectiveTraceId,
+                                        spanId = explicitSpanId,
+                                        startMs = startMs,
+                                        attributes = attrs,
+                                    )
+                                    "end" -> sessionLogStore.endSpan(
+                                        spanId = explicitSpanId!!,
+                                        endMs = endMs,
+                                        status = status,
+                                        statusMessage = statusMessage,
+                                        attributes = attrs,
+                                    )
+                                    else -> sessionLogStore.recordSpan(
+                                        name = name,
+                                        kind = kind,
+                                        traceId = effectiveTraceId,
+                                        spanId = explicitSpanId,
+                                        parentSpanId = effectiveParentSpanId,
+                                        startMs = startMs,
+                                        endMs = endMs,
+                                        status = status,
+                                        statusMessage = statusMessage,
+                                        attributes = attrs,
+                                    )
+                                }
+                                if (recorded == null) {
+                                    respond(404, "No active session or span cap reached")
+                                    audit(404, "span_not_recorded")
+                                } else {
+                                    val respJson = JSONObject()
+                                        .put("ok", true)
+                                        .put("traceId", recorded.traceId)
+                                        .put("spanId", recorded.spanId)
+                                        .put("parentSpanId", recorded.parentSpanId ?: JSONObject.NULL)
+                                    respond(200, respJson.toString(), contentType = "application/json; charset=utf-8")
+                                    audit(200, "span=${recorded.name}")
+                                }
+                            }
+                        }
+                    }
+
+                    method == "POST" && path == "/otlp/flush" -> {
+                        val trimmed = body.trim()
+                        var parsedSelector: String? = null
+                        var jsonValid = true
+                        if (trimmed.isNotEmpty()) {
+                            val json = if (trimmed.startsWith("{")) {
+                                runCatching { JSONObject(trimmed) }.getOrNull()
+                            } else {
+                                null
+                            }
+                            if (json == null) {
+                                jsonValid = false
+                            } else if (json.has("selector") && !json.isNull("selector")) {
+                                parsedSelector = json.optString("selector", "").trim().takeIf { it.isNotEmpty() }
+                            }
+                        }
+                        if (!jsonValid) {
+                            respond(400, "Invalid JSON payload")
+                            audit(400, "invalid_json")
+                        } else if (onFlushOtlp != null) {
+                            val (code, respJson) = onFlushOtlp.invoke(parsedSelector)
+                            respond(code, respJson, contentType = "application/json; charset=utf-8")
+                            audit(code, "otlp_flush")
+                        } else if (otlpOutboxExporter == null) {
+                            val unconfigured = OtlpOutboxExporter.FlushResult(
+                                ok = false,
+                                enabled = false,
+                                skippedReason = "exporter_not_configured",
+                            )
+                            respond(200, unconfigured.toJsonObject().toString(), contentType = "application/json; charset=utf-8")
+                            audit(200, "otlp_flush=unconfigured")
+                        } else {
+                            if (parsedSelector != null && !otlpOutboxExporter.hasSession(parsedSelector)) {
+                                respond(404, "Session not found")
+                                audit(404, "selector=$parsedSelector")
+                            } else {
+                                var enqueued = 0
+                                val vscodeDir = vscodeDataDirProvider?.invoke()
+                                if (parsedSelector != null) {
+                                    if (otlpOutboxExporter.enqueueSession(parsedSelector, vscodeDataDir = vscodeDir)) {
+                                        enqueued = 1
+                                    }
+                                } else if (otlpOutboxExporter.pendingCount() == 0) {
+                                    if (otlpOutboxExporter.enqueueSession("current", vscodeDataDir = vscodeDir)) {
+                                        enqueued = 1
+                                    }
+                                }
+                                val result = otlpOutboxExporter.flushOutbox(ignoreBackoff = true).copy(enqueued = enqueued)
+                                respond(200, result.toJsonObject().toString(), contentType = "application/json; charset=utf-8")
+                                audit(200, "otlp_flush:flushed=${result.flushed},failed=${result.failed},remaining=${result.remaining}")
+                            }
+                        }
                     }
 
                     method == "POST" && path == "/copy" -> {
@@ -440,6 +709,13 @@ class LocalDiagnosticsServer(
                 audit(500, e.javaClass.simpleName)
             }
         }
+    }
+
+    private fun parseEventLevel(raw: String): SessionLogStore.EventLevel = when (raw.trim().uppercase(Locale.US)) {
+        "FATAL" -> SessionLogStore.EventLevel.FATAL
+        "ERROR" -> SessionLogStore.EventLevel.ERROR
+        "WARN", "WARNING" -> SessionLogStore.EventLevel.WARN
+        else -> SessionLogStore.EventLevel.INFO
     }
 
     internal fun isTokenAuthorized(providedToken: String?): Boolean {
@@ -598,6 +874,7 @@ class LocalDiagnosticsServer(
         private const val DEFAULT_POST_AUTH_TIMEOUT_MS = 60_000
         private const val UNAUTHORIZED_AUDIT_WINDOW_MS = 5_000L
         private const val UNAUTHORIZED_AUDIT_MAX_PER_WINDOW = 5
+        private val SUPPORTED_SESSION_FORMATS = setOf("ai", "raw", "text", "timeline", "json", "otlp")
 
         private fun createWorkerPool(maxWorkers: Int, maxQueued: Int): ThreadPoolExecutor {
             val safeWorkers = maxWorkers.coerceAtLeast(1)

@@ -32,7 +32,7 @@ import kotlin.concurrent.withLock
  * - `vscode-sublogs.txt`: harvested tails from openvscode-server `ptyhost.log` / `exthost.log` / `remoteagent.log`
  * - `exit-trace.txt`: uncaught JVM stacktrace and/or OS ANR/tombstone trace from `ApplicationExitInfo`
  */
-internal class SessionLogStore(
+class SessionLogStore(
     private val diagnosticsRootDir: File,
     private val maxStoredSessions: Int = DEFAULT_MAX_SESSIONS,
     private val maxHeadEvents: Int = DEFAULT_MAX_HEAD_EVENTS,
@@ -40,6 +40,7 @@ internal class SessionLogStore(
     private val maxAlertEvents: Int = DEFAULT_MAX_ALERT_EVENTS,
     private val maxMetricsSnapshots: Int = DEFAULT_MAX_METRICS_SNAPSHOTS,
     private val clockMs: () -> Long = System::currentTimeMillis,
+    private val maxSpans: Int = DEFAULT_MAX_SPANS,
 ) {
 
     enum class SessionStatus {
@@ -55,6 +56,111 @@ internal class SessionLogStore(
         FATAL,
     }
 
+    enum class SpanKind(val otlpCode: Int) {
+        INTERNAL(1),
+        SERVER(2),
+        CLIENT(3),
+        PRODUCER(4),
+        CONSUMER(5),
+    }
+
+    enum class SpanStatus(val otlpCode: Int) {
+        UNSET(0),
+        OK(1),
+        ERROR(2),
+    }
+
+    data class SpanRecord(
+        val traceId: String,
+        val spanId: String,
+        val parentSpanId: String? = null,
+        val name: String,
+        val kind: SpanKind = SpanKind.INTERNAL,
+        val startMs: Long,
+        val endMs: Long? = null,
+        val status: SpanStatus = SpanStatus.UNSET,
+        val statusMessage: String? = null,
+        val attributes: Map<String, Any?> = emptyMap(),
+    ) {
+        fun toJsonObject(): JSONObject {
+            val obj = JSONObject()
+                .put("traceId", traceId)
+                .put("spanId", spanId)
+                .put("name", name)
+                .put("kind", kind.name)
+                .put("startMs", startMs)
+                .put("endMs", endMs ?: JSONObject.NULL)
+                .put("status", status.name)
+            if (!parentSpanId.isNullOrEmpty()) {
+                obj.put("parentSpanId", parentSpanId)
+            }
+            if (!statusMessage.isNullOrEmpty()) {
+                obj.put("statusMessage", statusMessage)
+            }
+            if (attributes.isNotEmpty()) {
+                val attrsObj = JSONObject()
+                for ((k, v) in attributes) {
+                    if (v != null) {
+                        attrsObj.put(k, v)
+                    }
+                }
+                if (attrsObj.length() > 0) {
+                    obj.put("attributes", attrsObj)
+                }
+            }
+            return obj
+        }
+
+        companion object {
+            fun fromJsonObject(obj: JSONObject): SpanRecord? {
+                val traceId = obj.optString("traceId", "")
+                val spanId = obj.optString("spanId", "")
+                val name = obj.optString("name", "")
+                if (traceId.isEmpty() || spanId.isEmpty() || name.isEmpty()) return null
+                val parentSpanId = if (obj.isNull("parentSpanId") || !obj.has("parentSpanId")) {
+                    null
+                } else {
+                    obj.optString("parentSpanId", "").ifEmpty { null }
+                }
+                val kind = runCatching { SpanKind.valueOf(obj.optString("kind", "INTERNAL")) }
+                    .getOrDefault(SpanKind.INTERNAL)
+                val status = runCatching { SpanStatus.valueOf(obj.optString("status", "UNSET")) }
+                    .getOrDefault(SpanStatus.UNSET)
+                val startMs = obj.optLong("startMs", 0L)
+                val endMs = if (obj.isNull("endMs") || !obj.has("endMs")) null else obj.optLong("endMs")
+                val statusMessage = if (obj.isNull("statusMessage") || !obj.has("statusMessage")) {
+                    null
+                } else {
+                    obj.optString("statusMessage", "").ifEmpty { null }
+                }
+                val attrs = linkedMapOf<String, Any?>()
+                val attrsObj = obj.optJSONObject("attributes")
+                if (attrsObj != null) {
+                    val keys = attrsObj.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val v = attrsObj.opt(k)
+                        if (v != null && v != JSONObject.NULL) {
+                            attrs[k] = v
+                        }
+                    }
+                }
+                return SpanRecord(
+                    traceId = traceId,
+                    spanId = spanId,
+                    parentSpanId = parentSpanId,
+                    name = name,
+                    kind = kind,
+                    startMs = startMs,
+                    endMs = endMs,
+                    status = status,
+                    statusMessage = statusMessage,
+                    attributes = attrs,
+                )
+            }
+        }
+    }
+
     data class SessionEnvMetadata(
         val appVersion: String = "unknown",
         val packageName: String = "dev.koduki.kucode",
@@ -67,6 +173,7 @@ internal class SessionLogStore(
         val hasAllFilesAccess: Boolean = false,
         val notificationsEnabled: Boolean = false,
         val batteryOptIgnored: Boolean = false,
+        val buildSha: String = "unknown",
     )
 
     data class MetricSnapshot(
@@ -172,6 +279,8 @@ internal class SessionLogStore(
         val source: String,
         val message: String,
         val benignNote: String? = null,
+        val traceId: String? = null,
+        val spanId: String? = null,
     ) {
         fun toJsonObject(): JSONObject {
             val obj = JSONObject()
@@ -183,6 +292,12 @@ internal class SessionLogStore(
                 .put("msg", message)
             if (!benignNote.isNullOrEmpty()) {
                 obj.put("benign", benignNote)
+            }
+            if (!traceId.isNullOrEmpty()) {
+                obj.put("traceId", traceId)
+            }
+            if (!spanId.isNullOrEmpty()) {
+                obj.put("spanId", spanId)
             }
             return obj
         }
@@ -196,6 +311,8 @@ internal class SessionLogStore(
                 source = obj.optString("source", "general"),
                 message = obj.optString("msg", ""),
                 benignNote = obj.optString("benign", "").ifEmpty { null },
+                traceId = obj.optString("traceId", "").ifEmpty { null },
+                spanId = obj.optString("spanId", "").ifEmpty { null },
             )
         }
     }
@@ -232,6 +349,9 @@ internal class SessionLogStore(
         val benignNoiseCount: Int,
         val externalUrlCount: Int,
         val isCurrentSession: Boolean = false,
+        val buildSha: String = "unknown",
+        val traceId: String = "",
+        val rootSpanId: String = "",
     ) {
         val durationMs: Long
             get() = ((endedAtMs ?: updatedAtMs) - startedAtMs).coerceAtLeast(0L)
@@ -253,6 +373,9 @@ internal class SessionLogStore(
             .put("durationHuman", formatDurationHuman(durationMs))
             .put("appVersion", appVersion)
             .put("packageName", packageName)
+            .put("buildSha", buildSha)
+            .put("traceId", traceId)
+            .put("rootSpanId", rootSpanId)
             .put("deviceSummary", deviceSummary)
             .put("androidSummary", androidSummary)
             .put("webviewVersion", webviewVersion)
@@ -309,9 +432,24 @@ internal class SessionLogStore(
                 benignNoiseCount = obj.optInt("benignNoiseCount", 0),
                 externalUrlCount = obj.optInt("externalUrlCount", 0),
                 isCurrentSession = isCurrent,
+                buildSha = obj.optString("buildSha", "").ifBlank { "unknown" },
+                traceId = obj.optString("traceId", ""),
+                rootSpanId = obj.optString("rootSpanId", ""),
             )
         }
     }
+
+    internal data class SessionRawData(
+        val summary: SessionSummary,
+        val spans: List<SpanRecord>,
+        val headEvents: List<RecordedEvent>,
+        val prevTailEvents: List<RecordedEvent>,
+        val tailEvents: List<RecordedEvent>,
+        val alertEvents: List<RecordedEvent>,
+        val metrics: List<MetricSnapshot>,
+        val exitTrace: String,
+        val vscodeSubLogs: String,
+    )
 
     private class ActiveSessionHandle(
         var summary: SessionSummary,
@@ -320,20 +458,32 @@ internal class SessionLogStore(
         var tailStream: BufferedOutputStream?,
         var alertsStream: BufferedOutputStream?,
         var metricsStream: BufferedOutputStream?,
+        var spansStream: BufferedOutputStream?,
         var tailBytesWritten: Long = 0L,
         var alertCountWritten: Int = 0,
         var metricsCountWritten: Int = 0,
         var lastMetaPersistMs: Long = 0L,
+        val spansById: LinkedHashMap<String, SpanRecord> = LinkedHashMap(),
     ) {
+        fun flushStreams() {
+            runCatching { headStream?.flush() }
+            runCatching { tailStream?.flush() }
+            runCatching { alertsStream?.flush() }
+            runCatching { metricsStream?.flush() }
+            runCatching { spansStream?.flush() }
+        }
+
         fun closeStreams() {
             runCatching { headStream?.flush(); headStream?.close() }
             runCatching { tailStream?.flush(); tailStream?.close() }
             runCatching { alertsStream?.flush(); alertsStream?.close() }
             runCatching { metricsStream?.flush(); metricsStream?.close() }
+            runCatching { spansStream?.flush(); spansStream?.close() }
             headStream = null
             tailStream = null
             alertsStream = null
             metricsStream = null
+            spansStream = null
         }
     }
 
@@ -347,6 +497,15 @@ internal class SessionLogStore(
     fun currentSessionId(): String? = lock.withLock { active?.summary?.sessionId }
 
     fun currentSummary(): SessionSummary? = lock.withLock { active?.summary?.copy(isCurrentSession = true) }
+
+    fun currentTraceParent(): String? = lock.withLock {
+        val summary = active?.summary ?: return null
+        if (summary.status != SessionStatus.RUNNING) return null
+        if (!TraceContext.isValidTraceId(summary.traceId) || !TraceContext.isValidSpanId(summary.rootSpanId)) {
+            return null
+        }
+        TraceContext.formatTraceParent(summary.traceId, summary.rootSpanId)
+    }
 
     /**
      * Reconciles any sessions left in `RUNNING` state from prior OS process lifetimes using
@@ -448,6 +607,15 @@ internal class SessionLogStore(
                 }
             }
 
+            reconcileSessionSpansOnDisk(
+                dir = dir,
+                summary = recoveredCounts,
+                finalStatus = finalStatus,
+                exitCategory = category,
+                exitSummary = exitSummary,
+                endMs = endMs,
+            )
+
             val updatedSummary = recoveredCounts.copy(
                 status = finalStatus,
                 exitCategory = category,
@@ -491,6 +659,8 @@ internal class SessionLogStore(
         ensureRootDirectories()
         val now = clockMs()
         val sessionId = generateSessionId(now)
+        val traceId = TraceContext.newTraceId()
+        val rootSpanId = TraceContext.newSpanId()
         val dir = File(sessionsRootDir, sessionId)
         ensureDirectoryWithMode(dir, 0b111_101_101)
 
@@ -526,7 +696,14 @@ internal class SessionLogStore(
             benignNoiseCount = 0,
             externalUrlCount = 0,
             isCurrentSession = true,
+            buildSha = env.buildSha,
+            traceId = traceId,
+            rootSpanId = rootSpanId,
         )
+
+        val spansFile = File(dir, FILE_SPANS)
+        val spansOut = BufferedOutputStream(FileOutputStream(spansFile, true))
+        runCatching { TarGzExtractor.DefaultPosixFsOps.chmod(spansFile, 0b110_100_100) }
 
         val handle = ActiveSessionHandle(
             summary = summary,
@@ -535,11 +712,28 @@ internal class SessionLogStore(
             tailStream = BufferedOutputStream(FileOutputStream(File(dir, FILE_EVENTS_TAIL), true)),
             alertsStream = BufferedOutputStream(FileOutputStream(File(dir, FILE_EVENTS_ALERTS), true)),
             metricsStream = BufferedOutputStream(FileOutputStream(File(dir, FILE_METRICS), true)),
+            spansStream = spansOut,
             lastMetaPersistMs = now,
         )
         active = handle
         writeSummaryAtomically(dir, summary)
         pruneOldSessionsLocked()
+
+        // Start root session span immediately and flush to spans.jsonl
+        val rootSpan = SpanRecord(
+            traceId = traceId,
+            spanId = rootSpanId,
+            parentSpanId = null,
+            name = ROOT_SPAN_NAME,
+            kind = SpanKind.INTERNAL,
+            startMs = now,
+            endMs = null,
+            status = SpanStatus.UNSET,
+            statusMessage = null,
+            attributes = emptyMap(),
+        )
+        handle.spansById[rootSpanId] = rootSpan
+        writeSpanLineLocked(handle, rootSpan)
 
         recordEventLocked(
             handle = handle,
@@ -565,10 +759,150 @@ internal class SessionLogStore(
         level: EventLevel,
         source: String,
         message: String,
+        traceId: String? = null,
+        spanId: String? = null,
     ) = lock.withLock {
         val handle = active ?: return
         if (handle.summary.status != SessionStatus.RUNNING) return
-        recordEventLocked(handle, level, source, message, forceMetaPersist = false)
+        recordEventLocked(
+            handle = handle,
+            level = level,
+            source = source,
+            rawMessage = message,
+            forceMetaPersist = false,
+            traceId = traceId,
+            spanId = spanId,
+        )
+    }
+
+    fun startSpan(
+        name: String,
+        kind: SpanKind = SpanKind.INTERNAL,
+        parentSpanId: String? = null,
+        traceId: String? = null,
+        spanId: String? = null,
+        startMs: Long = clockMs(),
+        attributes: Map<String, Any?> = emptyMap(),
+    ): SpanRecord? = lock.withLock {
+        val handle = active ?: return null
+        if (handle.summary.status != SessionStatus.RUNNING) return null
+
+        val effectiveSpanId = if (TraceContext.isValidSpanId(spanId)) spanId!! else TraceContext.newSpanId()
+        if (effectiveSpanId !in handle.spansById && handle.spansById.size >= maxSpans) {
+            return null
+        }
+
+        val effectiveTraceId = if (TraceContext.isValidTraceId(traceId)) {
+            traceId!!
+        } else {
+            handle.summary.traceId.ifBlank { TraceContext.deterministicTraceId(handle.summary.sessionId) }
+        }
+        val effectiveParentSpanId = when {
+            TraceContext.isValidSpanId(parentSpanId) -> parentSpanId
+            effectiveSpanId == handle.summary.rootSpanId -> null
+            effectiveTraceId == handle.summary.traceId -> handle.summary.rootSpanId.ifEmpty { null }
+            else -> null
+        }
+
+        val record = SpanRecord(
+            traceId = effectiveTraceId,
+            spanId = effectiveSpanId,
+            parentSpanId = effectiveParentSpanId,
+            name = sanitizeSpanName(name),
+            kind = kind,
+            startMs = startMs,
+            endMs = null,
+            status = SpanStatus.UNSET,
+            statusMessage = null,
+            attributes = sanitizeSpanAttributes(attributes),
+        )
+        handle.spansById[effectiveSpanId] = record
+        writeSpanLineLocked(handle, record)
+        record
+    }
+
+    fun endSpan(
+        spanId: String,
+        endMs: Long = clockMs(),
+        status: SpanStatus = SpanStatus.OK,
+        statusMessage: String? = null,
+        attributes: Map<String, Any?> = emptyMap(),
+    ): SpanRecord? = lock.withLock {
+        val handle = active ?: return null
+        if (handle.summary.status != SessionStatus.RUNNING) return null
+        val existing = handle.spansById[spanId] ?: return null
+
+        val mergedAttributes = sanitizeSpanAttributes(existing.attributes + attributes)
+        val clampedEndMs = maxOf(existing.startMs, endMs)
+        val updated = existing.copy(
+            endMs = clampedEndMs,
+            status = status,
+            statusMessage = sanitizeSpanStatusMessage(statusMessage) ?: existing.statusMessage,
+            attributes = mergedAttributes,
+        )
+        handle.spansById[spanId] = updated
+        writeSpanLineLocked(handle, updated)
+        updated
+    }
+
+    fun recordSpan(
+        name: String,
+        kind: SpanKind = SpanKind.INTERNAL,
+        traceId: String? = null,
+        spanId: String? = null,
+        parentSpanId: String? = null,
+        startMs: Long,
+        endMs: Long,
+        status: SpanStatus = SpanStatus.OK,
+        statusMessage: String? = null,
+        attributes: Map<String, Any?> = emptyMap(),
+    ): SpanRecord? = lock.withLock {
+        val handle = active ?: return null
+        if (handle.summary.status != SessionStatus.RUNNING) return null
+
+        val effectiveSpanId = if (TraceContext.isValidSpanId(spanId)) spanId!! else TraceContext.newSpanId()
+        if (effectiveSpanId !in handle.spansById && handle.spansById.size >= maxSpans) {
+            return null
+        }
+
+        val effectiveTraceId = if (TraceContext.isValidTraceId(traceId)) {
+            traceId!!
+        } else {
+            handle.summary.traceId.ifBlank { TraceContext.deterministicTraceId(handle.summary.sessionId) }
+        }
+        val effectiveParentSpanId = when {
+            TraceContext.isValidSpanId(parentSpanId) -> parentSpanId
+            effectiveSpanId == handle.summary.rootSpanId -> null
+            effectiveTraceId == handle.summary.traceId -> handle.summary.rootSpanId.ifEmpty { null }
+            else -> null
+        }
+        val clampedEndMs = maxOf(startMs, endMs)
+        val record = SpanRecord(
+            traceId = effectiveTraceId,
+            spanId = effectiveSpanId,
+            parentSpanId = effectiveParentSpanId,
+            name = sanitizeSpanName(name),
+            kind = kind,
+            startMs = startMs,
+            endMs = clampedEndMs,
+            status = status,
+            statusMessage = sanitizeSpanStatusMessage(statusMessage),
+            attributes = sanitizeSpanAttributes(attributes),
+        )
+        handle.spansById[effectiveSpanId] = record
+        writeSpanLineLocked(handle, record)
+        record
+    }
+
+    fun readSessionSpans(selector: String = "current"): List<SpanRecord> {
+        val dir = lock.withLock {
+            val resolved = resolveSessionSummary(selector) ?: return emptyList()
+            if (resolved.isCurrentSession) {
+                active?.flushStreams()
+            }
+            resolveSafeSessionDir(resolved.sessionId) ?: return emptyList()
+        }
+        return collapseSpans(readSpansJsonl(File(dir, FILE_SPANS)))
     }
 
     fun updateSessionState(
@@ -842,15 +1176,19 @@ internal class SessionLogStore(
     }
 
     fun renderSessionBundle(
-        selector: String = "latest",
+        selector: String = "current",
         format: String = "ai",
         vscodeDataDir: File? = null,
+        granularity: String = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
     ): String? {
         val (target, dir) = lock.withLock {
             val resolved = resolveSessionSummary(selector) ?: return null
             val sessionDir = resolveSafeSessionDir(resolved.sessionId) ?: return null
             if (resolved.isCurrentSession) {
-                active?.let { writeSummaryAtomically(it.dir, it.summary) }
+                active?.let {
+                    it.flushStreams()
+                    writeSummaryAtomically(it.dir, it.summary)
+                }
             }
             resolved to sessionDir
         }
@@ -868,6 +1206,12 @@ internal class SessionLogStore(
         return when (format.lowercase(Locale.US)) {
             "raw", "text", "timeline" -> buildRawTimelineReportInternal(dir, target)
             "json" -> buildJsonBundleInternal(dir, target)
+            "otlp" -> OtlpJsonSerializer.serializeSession(
+                store = this,
+                selector = target.sessionId,
+                granularity = granularity,
+                vscodeDataDir = null,
+            )?.combinedJson?.toString(2)
             else -> {
                 val md = buildAiMarkdownReportInternal(dir, target)
                 if (target.isCurrentSession) {
@@ -882,13 +1226,154 @@ internal class SessionLogStore(
         selector: String,
         exportDir: File,
         vscodeDataDir: File? = null,
+        format: String = "ai",
+        granularity: String = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
     ): File? {
         val target = resolveSessionSummary(selector) ?: return null
-        val markdown = renderSessionBundle(target.sessionId, format = "ai", vscodeDataDir = vscodeDataDir) ?: return null
+        val normalizedFormat = format.lowercase(Locale.US)
+        val rendered = renderSessionBundle(
+            selector = target.sessionId,
+            format = normalizedFormat,
+            vscodeDataDir = vscodeDataDir,
+            granularity = granularity,
+        ) ?: return null
         ensureDirectoryWithMode(exportDir, 0b111_101_101)
-        val outFile = File(exportDir, "kucode-session-${target.sessionId}-ai.md")
-        writeTextAtomically(outFile, markdown, Charsets.UTF_8, worldReadable = true)
+        val fileName = when (normalizedFormat) {
+            "otlp" -> "kucode-session-${target.sessionId}-otlp.json"
+            "json" -> "kucode-session-${target.sessionId}.json"
+            "raw", "text", "timeline" -> "kucode-session-${target.sessionId}-raw.txt"
+            else -> "kucode-session-${target.sessionId}-ai.md"
+        }
+        val outFile = File(exportDir, fileName)
+        writeTextAtomically(outFile, rendered, Charsets.UTF_8, worldReadable = true)
         return outFile
+    }
+
+    internal fun loadSessionRawData(selector: String, vscodeDataDir: File? = null): SessionRawData? {
+        val (target, dir) = lock.withLock {
+            val resolved = resolveSessionSummary(selector) ?: return null
+            val sessionDir = resolveSafeSessionDir(resolved.sessionId) ?: return null
+            if (resolved.isCurrentSession) {
+                active?.let {
+                    it.flushStreams()
+                    writeSummaryAtomically(it.dir, it.summary)
+                }
+            }
+            resolved to sessionDir
+        }
+        if (target.isCurrentSession && vscodeDataDir != null) {
+            runCatching {
+                val sub = extractOpenVsCodeSubLogs(
+                    vscodeDataDir = vscodeDataDir,
+                    minTimestampMs = target.startedAtMs - 10_000L,
+                )
+                if (sub.isNotBlank()) {
+                    writeTextAtomically(File(dir, FILE_VSCODE_SUBLOGS), sub, Charsets.UTF_8, worldReadable = true)
+                }
+            }
+        }
+        return SessionRawData(
+            summary = target,
+            spans = collapseSpans(readSpansJsonl(File(dir, FILE_SPANS))),
+            headEvents = readEventsJsonl(File(dir, FILE_EVENTS_HEAD)),
+            prevTailEvents = readEventsJsonl(File(dir, FILE_EVENTS_TAIL_PREV)),
+            tailEvents = readEventsJsonl(File(dir, FILE_EVENTS_TAIL)),
+            alertEvents = readEventsJsonl(File(dir, FILE_EVENTS_ALERTS)),
+            metrics = readMetricsJsonl(File(dir, FILE_METRICS)),
+            exitTrace = readOptionalText(File(dir, FILE_EXIT_TRACE)),
+            vscodeSubLogs = readOptionalText(File(dir, FILE_VSCODE_SUBLOGS)),
+        )
+    }
+
+    private fun writeSpanLineLocked(handle: ActiveSessionHandle, span: SpanRecord) {
+        val lineBytes = (span.toJsonObject().toString() + "\n").toByteArray(Charsets.UTF_8)
+        runCatching {
+            handle.spansStream?.write(lineBytes)
+            handle.spansStream?.flush()
+        }
+    }
+
+    private fun reconcileSessionSpansOnDisk(
+        dir: File,
+        summary: SessionSummary,
+        finalStatus: SessionStatus,
+        exitCategory: String,
+        exitSummary: String,
+        endMs: Long,
+    ) {
+        val spansFile = File(dir, FILE_SPANS)
+        val collapsed = LinkedHashMap<String, SpanRecord>()
+        for (span in collapseSpans(readSpansJsonl(spansFile))) {
+            collapsed[span.spanId] = span
+        }
+
+        val traceId = if (TraceContext.isValidTraceId(summary.traceId)) {
+            summary.traceId
+        } else {
+            TraceContext.deterministicTraceId(summary.sessionId)
+        }
+        val rootSpanId = if (TraceContext.isValidSpanId(summary.rootSpanId)) {
+            summary.rootSpanId
+        } else {
+            TraceContext.deterministicSpanId(summary.sessionId)
+        }
+
+        val hasRoot = collapsed.values.any { it.spanId == rootSpanId || it.name == ROOT_SPAN_NAME }
+        if (!hasRoot) {
+            collapsed[rootSpanId] = SpanRecord(
+                traceId = traceId,
+                spanId = rootSpanId,
+                parentSpanId = null,
+                name = ROOT_SPAN_NAME,
+                kind = SpanKind.INTERNAL,
+                startMs = summary.startedAtMs,
+                endMs = null,
+                status = SpanStatus.UNSET,
+                statusMessage = null,
+                attributes = emptyMap(),
+            )
+        }
+
+        val toAppend = mutableListOf<SpanRecord>()
+        for (span in collapsed.values) {
+            if (span.endMs != null) continue
+            val isRoot = span.spanId == rootSpanId || span.name == ROOT_SPAN_NAME
+            val clampedEnd = maxOf(span.startMs, endMs)
+            val finalized = if (finalStatus == SessionStatus.ENDED_ABNORMALLY) {
+                span.copy(
+                    endMs = clampedEnd,
+                    status = SpanStatus.ERROR,
+                    statusMessage = sanitizeSpanStatusMessage(exitSummary),
+                )
+            } else if (isRoot) {
+                span.copy(
+                    endMs = clampedEnd,
+                    status = SpanStatus.OK,
+                    statusMessage = null,
+                )
+            } else {
+                span.copy(
+                    endMs = clampedEnd,
+                    status = SpanStatus.ERROR,
+                    statusMessage = sanitizeSpanStatusMessage("Interrupted by process exit: $exitCategory"),
+                )
+            }
+            toAppend.add(finalized)
+        }
+
+        if (toAppend.isEmpty()) return
+        runCatching {
+            val existed = spansFile.exists()
+            FileOutputStream(spansFile, true).use { fos ->
+                for (span in toAppend) {
+                    fos.write((span.toJsonObject().toString() + "\n").toByteArray(Charsets.UTF_8))
+                }
+                fos.flush()
+            }
+            if (!existed) {
+                runCatching { TarGzExtractor.DefaultPosixFsOps.chmod(spansFile, 0b110_100_100) }
+            }
+        }
     }
 
     private fun recordEventLocked(
@@ -897,6 +1382,8 @@ internal class SessionLogStore(
         source: String,
         rawMessage: String,
         forceMetaPersist: Boolean,
+        traceId: String? = null,
+        spanId: String? = null,
     ) {
         val now = clockMs()
         val sanitized = LogRedactor.redact(rawMessage)
@@ -913,6 +1400,17 @@ internal class SessionLogStore(
             level
         }
 
+        val effectiveTraceId = if (TraceContext.isValidTraceId(traceId)) {
+            traceId
+        } else {
+            handle.summary.traceId.ifEmpty { null }
+        }
+        val effectiveSpanId = if (TraceContext.isValidSpanId(spanId)) {
+            spanId
+        } else {
+            handle.summary.rootSpanId.ifEmpty { null }
+        }
+
         val nextSeq = handle.summary.totalEvents + 1
         val offset = (now - handle.summary.startedAtMs).coerceAtLeast(0L)
         val event = RecordedEvent(
@@ -923,6 +1421,8 @@ internal class SessionLogStore(
             source = source.take(40),
             message = sanitized,
             benignNote = benignNote,
+            traceId = effectiveTraceId,
+            spanId = effectiveSpanId,
         )
         val lineBytes = (event.toJsonObject().toString() + "\n").toByteArray(Charsets.UTF_8)
 
@@ -986,6 +1486,22 @@ internal class SessionLogStore(
         skipMarkdownBuild: Boolean = false,
     ) {
         val now = clockMs()
+        val isAbnormal = status == SessionStatus.ENDED_ABNORMALLY
+        val finalSpanStatus = if (isAbnormal) SpanStatus.ERROR else SpanStatus.OK
+        val finalSpanMsg = if (isAbnormal) sanitizeSpanStatusMessage(exitSummary) else null
+
+        val openSpanIds = handle.spansById.values.filter { it.endMs == null }.map { it.spanId }
+        for (spanId in openSpanIds) {
+            val openSpan = handle.spansById[spanId] ?: continue
+            val closed = openSpan.copy(
+                endMs = maxOf(openSpan.startMs, now),
+                status = finalSpanStatus,
+                statusMessage = finalSpanMsg ?: openSpan.statusMessage,
+            )
+            handle.spansById[spanId] = closed
+            writeSpanLineLocked(handle, closed)
+        }
+
         val finalSummary = handle.summary.copy(
             status = status,
             exitCategory = exitCategory,
@@ -1472,12 +1988,19 @@ internal class SessionLogStore(
 
     companion object {
         const val SCHEMA_VERSION = "kucode-session-v1"
+        const val ROOT_SPAN_NAME = "kucode.session"
 
-        internal const val DEFAULT_MAX_SESSIONS = 20
-        internal const val DEFAULT_MAX_HEAD_EVENTS = 250
-        internal const val DEFAULT_MAX_TAIL_BYTES = 768L * 1024L
-        internal const val DEFAULT_MAX_ALERT_EVENTS = 300
-        internal const val DEFAULT_MAX_METRICS_SNAPSHOTS = 360
+        const val DEFAULT_MAX_SESSIONS = 20
+        const val DEFAULT_MAX_HEAD_EVENTS = 250
+        const val DEFAULT_MAX_TAIL_BYTES = 768L * 1024L
+        const val DEFAULT_MAX_ALERT_EVENTS = 300
+        const val DEFAULT_MAX_METRICS_SNAPSHOTS = 360
+        const val DEFAULT_MAX_SPANS = 500
+        private const val MAX_SPAN_ATTRIBUTES = 64
+        private const val MAX_SPAN_ATTR_KEY_CHARS = 128
+        private const val MAX_SPAN_ATTR_VALUE_CHARS = 2048
+        private const val MAX_SPAN_NAME_CHARS = 128
+        private const val MAX_SPAN_STATUS_MESSAGE_CHARS = 512
         private const val LOW_DISK_THRESHOLD_BYTES = 256L * 1024L * 1024L
         private const val LOW_DISK_MAX_SESSIONS = 3
         private const val CRASH_LOCK_TIMEOUT_MS = 1_500L
@@ -1494,12 +2017,69 @@ internal class SessionLogStore(
         private const val FILE_EVENTS_TAIL_PREV = "events.tail.prev.jsonl"
         private const val FILE_EVENTS_ALERTS = "events.alerts.jsonl"
         private const val FILE_METRICS = "metrics.jsonl"
+        private const val FILE_SPANS = "spans.jsonl"
         private const val FILE_VSCODE_SUBLOGS = "vscode-sublogs.txt"
         private const val FILE_EXIT_TRACE = "exit-trace.txt"
 
         private val SESSION_ID_REGEX = Regex("^[0-9]{8}-[0-9]{6,9}(?:-[0-9]{4})?-[0-9a-f]{4,6}$")
         private val random = SecureRandom()
         private val sessionSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+        internal fun sanitizeSpanName(raw: String): String =
+            LogRedactor.redact(raw.trim()).take(MAX_SPAN_NAME_CHARS).ifEmpty { "unnamed" }
+
+        internal fun sanitizeSpanStatusMessage(raw: String?): String? =
+            raw?.let { LogRedactor.redact(it.trim()).take(MAX_SPAN_STATUS_MESSAGE_CHARS) }?.ifEmpty { null }
+
+        internal fun sanitizeSpanAttributes(raw: Map<String, Any?>): Map<String, Any?> {
+            if (raw.isEmpty()) return emptyMap()
+            val out = LinkedHashMap<String, Any?>()
+            for ((rawKey, rawVal) in raw) {
+                if (rawVal == null || rawVal == JSONObject.NULL) continue
+                val key = LogRedactor.redact(rawKey.trim()).take(MAX_SPAN_ATTR_KEY_CHARS)
+                if (key.isEmpty()) continue
+                if (key !in out && out.size >= MAX_SPAN_ATTRIBUTES) break
+                val sanitizedVal: Any = when (rawVal) {
+                    is String -> LogRedactor.redact(rawVal).take(MAX_SPAN_ATTR_VALUE_CHARS)
+                    is Boolean -> rawVal
+                    is Int -> rawVal
+                    is Long -> rawVal
+                    is Short -> rawVal.toInt()
+                    is Byte -> rawVal.toInt()
+                    is Double -> if (rawVal.isFinite()) rawVal else rawVal.toString()
+                    is Float -> if (rawVal.isFinite()) rawVal.toDouble() else rawVal.toString()
+                    else -> LogRedactor.redact(rawVal.toString()).take(MAX_SPAN_ATTR_VALUE_CHARS)
+                }
+                out[key] = sanitizedVal
+            }
+            return out
+        }
+
+        private fun readSpansJsonl(file: File): List<SpanRecord> {
+            if (!file.isFile) return emptyList()
+            val out = mutableListOf<SpanRecord>()
+            runCatching {
+                file.useLines(Charsets.UTF_8) { lines ->
+                    for (line in lines) {
+                        val trimmed = line.trim()
+                        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue
+                        runCatching { SpanRecord.fromJsonObject(JSONObject(trimmed)) }
+                            .getOrNull()
+                            ?.let { out.add(it) }
+                    }
+                }
+            }
+            return out
+        }
+
+        private fun collapseSpans(raw: List<SpanRecord>): List<SpanRecord> {
+            if (raw.isEmpty()) return emptyList()
+            val byId = LinkedHashMap<String, SpanRecord>()
+            for (span in raw) {
+                byId[span.spanId] = span
+            }
+            return byId.values.sortedBy { it.startMs }
+        }
 
         internal fun classifyBenignReason(message: String): String? = when {
             message.contains("Unable to retrieve mac address", ignoreCase = true) ->

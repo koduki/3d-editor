@@ -2,6 +2,7 @@
 const vscode = require('vscode');
 const http = require('http');
 const { AcpChatViewProvider } = require('./acp-webview');
+const { parseTraceParent } = require('./acp-client');
 
 let acpProviderInstance = null;
 
@@ -69,7 +70,7 @@ const VST_COLORS = {
   'editorGroupHeader.tabsBackground': '#12141a',
 };
 
-function callHost(method, path, body) {
+function callHost(method, path, body, options) {
   return new Promise((resolve, reject) => {
     const port = Number(process.env.KUCODE_ADMIN_PORT || 0);
     const token = process.env.KUCODE_ADMIN_TOKEN || '';
@@ -77,14 +78,20 @@ function callHost(method, path, body) {
       reject(new Error('KUCODE_ADMIN_PORT is not configured'));
       return;
     }
+    const opts = options && typeof options === 'object' ? options : {};
     const payload = body !== undefined && body !== null ? Buffer.from(body, 'utf8') : null;
     const headers = { 'X-KuCode-Token': token };
+    const parsedTp = parseTraceParent(opts.traceparent || process.env.TRACEPARENT);
+    if (parsedTp) {
+      headers.traceparent = parsedTp.normalized;
+    }
     if (payload) {
-      headers['Content-Type'] = 'text/plain; charset=utf-8';
+      headers['Content-Type'] = opts.contentType || 'text/plain; charset=utf-8';
       headers['Content-Length'] = String(payload.length);
     }
+    const timeout = typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : 60000;
     const req = http.request(
-      { hostname: '127.0.0.1', port, path, method, headers, timeout: 60000 },
+      { hostname: '127.0.0.1', port, path, method, headers, timeout },
       (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
@@ -313,9 +320,23 @@ async function runDiagnosticsCommand() {
   );
 }
 
-function reportHostEvent(level, source, msg) {
+function reportHostEvent(level, source, msg, traceparent) {
   if (!process.env.KUCODE_ADMIN_PORT) return;
-  callHost('POST', '/event', JSON.stringify({ level, source, msg })).catch(() => {});
+  callHost('POST', '/event', JSON.stringify({ level, source, msg }), {
+    contentType: 'application/json; charset=utf-8',
+    traceparent,
+  }).catch(() => {});
+}
+
+function reportHostSpan(spanPayload, traceparent) {
+  if (!process.env.KUCODE_ADMIN_PORT || !spanPayload || typeof spanPayload !== 'object') {
+    return Promise.resolve(null);
+  }
+  return callHost('POST', '/span', JSON.stringify(spanPayload), {
+    contentType: 'application/json; charset=utf-8',
+    traceparent,
+    timeoutMs: 3000,
+  }).catch(() => null);
 }
 
 async function openSessionLogsCommand() {
@@ -717,6 +738,7 @@ function createSidebarMenuProvider() {
 function activate(context) {
   acpProviderInstance = new AcpChatViewProvider({
     reportHostEvent,
+    reportHostSpan,
     writeHostClipboard,
     extensionVersion: '0.10.0',
   });
@@ -817,6 +839,7 @@ module.exports = {
   AcpChatViewProvider,
   callHost,
   reportHostEvent,
+  reportHostSpan,
   writeHostClipboard,
   readHostClipboard,
   extractEditorCopyPlan,
