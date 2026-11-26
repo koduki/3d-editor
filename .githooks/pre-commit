@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "[pre-commit] Running KuCode non-ignorable guards..."
+node scripts/guards/run-all-guards.mjs --changed-only
+
+echo "[pre-commit] Running fast syntax checks..."
+bash -n scripts/*.sh
+node --check \
+  android/app/src/main/assets/runtime-probes.cjs \
+  android/app/src/main/assets/kucode-cli.cjs \
+  android/app/src/main/assets/kucode-android/extension.js \
+  android/app/src/main/assets/kucode-tools/extension.js \
+  android/app/src/main/assets/kucode-tools/acp-client.js \
+  android/app/src/main/assets/kucode-tools/acp-webview.js
+
+echo "[pre-commit] OK"

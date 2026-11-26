@@ -131,11 +131,13 @@ jobs:
           echo "${OPENVSCODE_X64_SHA256}  $archive" | sha256sum -c -
           tar -xzf "$archive" -C "$server" --strip-components=1
           rm -f "$archive"
+          "$server/node" scripts/guards/run-all-guards.mjs
+          "$server/node" scripts/guards/run-oracle-tests.mjs
           "$server/node" --check android/app/src/main/assets/runtime-probes.cjs
           bash -n scripts/probe-android-arm64.sh scripts/aura-language-smoke.sh scripts/aura-self-host-e2e.sh
           "$server/node" --check android/app/src/main/assets/kucode-cli.cjs
           "$server/node" --check android/app/src/main/assets/kucode-android/extension.js
-          "$server/node" --test tests/kucode-android.test.cjs
+          "$server/node" --test tests/kucode-android.test.cjs tests/agentic-harness.test.cjs
           "$server/node" --check android/app/src/main/assets/kucode-tools/extension.js
           "$server/node" --check android/app/src/main/assets/kucode-tools/acp-client.js
           "$server/node" --check android/app/src/main/assets/kucode-tools/acp-webview.js
