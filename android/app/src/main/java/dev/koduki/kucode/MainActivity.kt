@@ -184,6 +184,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             },
+            onOtlpFlushResult = { resultJson -> dispatchOtlpFlushResult(resultJson) },
         )
 
         webView = createEditorWebView()
@@ -915,6 +916,17 @@ class MainActivity : AppCompatActivity() {
             webView.destroy()
         }
         super.onDestroy()
+    }
+
+    private fun dispatchOtlpFlushResult(resultJson: String) {
+        runOnUiThread {
+            if (!isDestroyed && ::bootView.isInitialized) {
+                bootView.evaluateJavascript(
+                    "window.__onOtlpFlushResult && window.__onOtlpFlushResult(${JSONObject.quote(resultJson)});",
+                    null,
+                )
+            }
+        }
     }
 
     private fun loadBootPage() {

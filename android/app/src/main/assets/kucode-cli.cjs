@@ -3,7 +3,55 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
+
+const ZERO_TRACE_ID = '0'.repeat(32);
+const ZERO_SPAN_ID = '0'.repeat(16);
+const TRACEPARENT_RE = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i;
+
+function parseTraceParent(raw) {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  const match = TRACEPARENT_RE.exec(trimmed);
+  if (!match) return null;
+  const version = match[1].toLowerCase();
+  const traceId = match[2].toLowerCase();
+  const parentSpanId = match[3].toLowerCase();
+  const traceFlags = match[4].toLowerCase();
+  if (version === 'ff' || traceId === ZERO_TRACE_ID || parentSpanId === ZERO_SPAN_ID) {
+    return null;
+  }
+  return {
+    version,
+    traceId,
+    parentSpanId,
+    traceFlags,
+    normalized: `${version}-${traceId}-${parentSpanId}-${traceFlags}`,
+  };
+}
+
+function newSpanId(avoidSpanId) {
+  let id = ZERO_SPAN_ID;
+  while (id === ZERO_SPAN_ID || (avoidSpanId && id === avoidSpanId)) {
+    id = crypto.randomBytes(8).toString('hex');
+  }
+  return id;
+}
+
+function deriveChildTraceParent(raw) {
+  const parsed = parseTraceParent(raw);
+  if (!parsed) return null;
+  const spanId = newSpanId(parsed.parentSpanId);
+  return {
+    traceId: parsed.traceId,
+    parentSpanId: parsed.parentSpanId,
+    spanId,
+    traceFlags: parsed.traceFlags,
+    parentTraceparent: parsed.normalized,
+    traceparent: `00-${parsed.traceId}-${spanId}-${parsed.traceFlags}`,
+  };
+}
 
 function request(method, route, body) {
   const port = Number(process.env.KUCODE_ADMIN_PORT);
@@ -12,10 +60,13 @@ function request(method, route, body) {
     return Promise.reject(new Error('KuCode host bridge unavailable'));
   }
   const payload = body ? Buffer.from(JSON.stringify(body)) : Buffer.alloc(0);
+  const headers = {'X-KuCode-Token': token, 'Content-Type': 'application/json', 'Content-Length': payload.length};
+  const tp = parseTraceParent(process.env.TRACEPARENT);
+  if (tp) headers.traceparent = tp.normalized;
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1', port, method, path: route, timeout: 10000,
-      headers: {'X-KuCode-Token': token, 'Content-Type': 'application/json', 'Content-Length': payload.length},
+      headers,
     }, res => {
       let length = 0;
       const chunks = [];
@@ -98,16 +149,37 @@ function androidPlatforms() {
 }
 
 // Use the existing Flight Recorder event route; never include command arguments or secrets.
-async function event(level, message) {
+async function event(level, message, traceparent) {
   const port = Number(process.env.KUCODE_ADMIN_PORT);
   const token = process.env.KUCODE_ADMIN_TOKEN;
-  if (!port || !token) return;
+  if (!Number.isInteger(port) || port <= 0 || port > 65535 || !token) return;
   const payload = Buffer.from(JSON.stringify({level, source: 'selfhost.build', msg: message}));
+  const headers = {'X-KuCode-Token': token, 'Content-Type': 'application/json', 'Content-Length': payload.length};
+  const tp = parseTraceParent(traceparent || process.env.TRACEPARENT);
+  if (tp) headers.traceparent = tp.normalized;
   await new Promise(resolve => {
     const req = http.request({host: '127.0.0.1', port, path: '/event', method: 'POST', timeout: 1500,
-      headers: {'X-KuCode-Token': token, 'Content-Length': payload.length}}, res => { res.resume(); res.on('end', resolve); });
+      headers}, res => { res.resume(); res.on('end', resolve); });
     req.on('error', resolve);
     req.on('timeout', () => req.destroy(new Error('event timeout')));
+    req.end(payload);
+  });
+}
+
+// Post completed OTel span to Flight Recorder; never include command arguments or secrets.
+async function postSpan(spanPayload, traceparent) {
+  const port = Number(process.env.KUCODE_ADMIN_PORT);
+  const token = process.env.KUCODE_ADMIN_TOKEN;
+  if (!Number.isInteger(port) || port <= 0 || port > 65535 || !token) return;
+  const payload = Buffer.from(JSON.stringify(spanPayload));
+  const headers = {'X-KuCode-Token': token, 'Content-Type': 'application/json', 'Content-Length': payload.length};
+  const tp = parseTraceParent(traceparent || process.env.TRACEPARENT);
+  if (tp) headers.traceparent = tp.normalized;
+  await new Promise(resolve => {
+    const req = http.request({host: '127.0.0.1', port, path: '/span', method: 'POST', timeout: 1500,
+      headers}, res => { res.resume(); res.on('end', resolve); });
+    req.on('error', resolve);
+    req.on('timeout', () => req.destroy(new Error('span timeout')));
     req.end(payload);
   });
 }
@@ -115,11 +187,18 @@ async function event(level, message) {
 async function build(args) {
   if (args[0] !== '--' || !args[1]) throw new Error('Usage: kucode build -- <command> [args...]');
   const label = path.basename(args[1]).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 64);
+  const childCtx = deriveChildTraceParent(process.env.TRACEPARENT);
+  const startMs = Date.now();
   const start = process.hrtime.bigint();
-  await event('INFO', 'start tool=' + label);
+  await event('INFO', 'start tool=' + label, childCtx ? childCtx.parentTraceparent : null);
   const env = {...process.env};
   delete env.KUCODE_ADMIN_TOKEN;
   delete env.KUCODE_ADMIN_PORT;
+  if (childCtx) {
+    env.TRACEPARENT = childCtx.traceparent;
+  } else {
+    delete env.TRACEPARENT;
+  }
   const result = await new Promise(resolve => {
     const child = spawn(args[1], args.slice(2), {stdio: 'inherit', env, shell: false});
     child.on('error', err => {
@@ -129,7 +208,30 @@ async function build(args) {
     child.on('exit', (code, signal) => resolve({code: code ?? 1, signal}));
   });
   const elapsedMs = Number((process.hrtime.bigint() - start) / 1000000n);
-  await event(result.code === 0 ? 'INFO' : 'WARN', 'end tool=' + label + ' exit=' + result.code + ' elapsedMs=' + elapsedMs + ' signal=' + (result.signal || 'none'));
+  const endMs = Math.max(startMs, Date.now());
+  await event(
+    result.code === 0 ? 'INFO' : 'WARN',
+    'end tool=' + label + ' exit=' + result.code + ' elapsedMs=' + elapsedMs + ' signal=' + (result.signal || 'none'),
+    childCtx ? childCtx.parentTraceparent : null,
+  );
+  const spanPayload = {
+    name: 'proot.command',
+    kind: 'CLIENT',
+    startMs,
+    endMs,
+    status: result.code === 0 ? 'OK' : 'ERROR',
+    attributes: {
+      'kucode.command.tool': label,
+      'process.exit.code': result.code,
+      'kucode.build.signal': result.signal || 'none',
+    },
+  };
+  if (childCtx) {
+    spanPayload.traceId = childCtx.traceId;
+    spanPayload.spanId = childCtx.spanId;
+    spanPayload.parentSpanId = childCtx.parentSpanId;
+  }
+  await postSpan(spanPayload, childCtx ? childCtx.parentTraceparent : null);
   return result.code;
 }
 
@@ -180,4 +282,4 @@ if (require.main === module) {
     console.log(JSON.stringify({version: 1, state: 'failed', message: error.message})); process.exitCode = 1;
   });
 }
-module.exports = {findTool, main, build};
+module.exports = {findTool, main, build, parseTraceParent, deriveChildTraceParent};

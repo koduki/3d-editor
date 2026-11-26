@@ -186,6 +186,7 @@ object PosixRuntimeConfig {
         adminPort: Int = 0,
         adminToken: String = "",
         includeNodeExtraCaCerts: Boolean = paths.androidUserCaBundleFile.isFile,
+        traceparent: String = "",
     ): Map<String, String> {
         val env = linkedMapOf(
             "PROOT_LOADER" to paths.prootLoader.absolutePath,
@@ -222,6 +223,14 @@ object PosixRuntimeConfig {
             env["KUCODE_ADMIN_TOKEN"] = adminToken
             env["BROWSER"] = "/usr/local/bin/kucode-open"
             env["GH_BROWSER"] = "/usr/local/bin/kucode-open"
+        }
+        val parsedTraceParent = TraceContext.parseTraceParent(traceparent)
+        if (parsedTraceParent != null) {
+            env["TRACEPARENT"] = TraceContext.formatTraceParent(
+                parsedTraceParent.traceId,
+                parsedTraceParent.parentSpanId,
+                parsedTraceParent.traceFlags,
+            )
         }
         return env
     }
@@ -661,16 +670,21 @@ object PosixRuntimeConfig {
             const token = process.env.KUCODE_ADMIN_TOKEN || '';
             const rawArgs = process.argv.slice(2);
             let format = 'ai';
+            let granularity = 'summary-and-errors';
             const positional = [];
             for (const a of rawArgs) {
               if (a === '--raw' || a === '--timeline') format = 'raw';
               else if (a === '--json') format = 'json';
+              else if (a === '--otlp') format = 'otlp';
               else if (a === '--ai') format = 'ai';
+              else if (a === '--summary') granularity = 'summary-and-errors';
+              else if (a === '--full') granularity = 'full';
               else if (a === '-h' || a === '--help') {
                 console.log('Usage:');
-                console.log('  kucode-logs [show] [latest|prev|prev-abnormal|<sessionId>] [--ai|--raw|--json]');
+                console.log('  kucode-logs [show] [latest|prev|prev-abnormal|<sessionId>] [--ai|--raw|--json|--otlp] [--summary|--full]');
                 console.log('  kucode-logs list [--json]');
-                console.log('  kucode-logs export [latest|prev|prev-abnormal|<sessionId>] [outputPath]');
+                console.log('  kucode-logs export [latest|prev|prev-abnormal|<sessionId>] [outputPath] [--ai|--raw|--json|--otlp] [--summary|--full]');
+                console.log('  kucode-logs otlp-flush [latest|current|prev|<sessionId>]');
                 process.exit(0);
               } else {
                 positional.push(a);
@@ -700,6 +714,34 @@ object PosixRuntimeConfig {
                 req.end();
               });
             }
+            function postHost(urlPath, jsonBody) {
+              return new Promise((resolve, reject) => {
+                if (!port || !token) {
+                  reject(new Error('admin API unavailable'));
+                  return;
+                }
+                const payload = jsonBody ? Buffer.from(jsonBody, 'utf8') : Buffer.alloc(0);
+                const headers = { 'X-KuCode-Token': token, 'Content-Length': String(payload.length) };
+                if (payload.length > 0) {
+                  headers['Content-Type'] = 'application/json; charset=utf-8';
+                }
+                const req = http.request(
+                  { hostname: '127.0.0.1', port, path: urlPath, method: 'POST', headers, timeout: 30000 },
+                  (res) => {
+                    const chunks = [];
+                    res.on('data', (c) => chunks.push(c));
+                    res.on('end', () => {
+                      const body = Buffer.concat(chunks).toString('utf8');
+                      if (res.statusCode >= 200 && res.statusCode < 300) resolve(body);
+                      else reject(new Error('HTTP ' + res.statusCode + ': ' + body));
+                    });
+                  },
+                );
+                req.on('timeout', () => req.destroy(new Error('timeout')));
+                req.on('error', reject);
+                req.end(payload);
+              });
+            }
             (async () => {
               if (sub === 'list') {
                 const jsonText = await fetchHost('/sessions');
@@ -723,21 +765,32 @@ object PosixRuntimeConfig {
                 }
                 return;
               }
+              if (sub === 'otlp-flush') {
+                const targetSelector = positional[1];
+                const body = targetSelector ? JSON.stringify({ selector: targetSelector }) : '';
+                const resp = await postHost('/otlp/flush', body);
+                process.stdout.write(resp.endsWith('\n') ? resp : resp + '\n');
+                return;
+              }
               const isExplicitCmd = (sub === 'show' || sub === 'export');
               const selector = encodeURIComponent((isExplicitCmd ? positional[1] : positional[0]) || 'latest');
+              const query = format === 'otlp'
+                ? '?format=otlp&granularity=' + encodeURIComponent(granularity)
+                : '?format=' + encodeURIComponent(format);
               let content;
               try {
-                content = await fetchHost('/sessions/' + selector + '?format=' + encodeURIComponent(format));
+                content = await fetchHost('/sessions/' + selector + query);
               } catch (err) {
                 const fallback = '$GUEST_DIAGNOSTICS_DIR/latest-ai-report.md';
-                if (selector === 'latest' && fs.existsSync(fallback)) {
+                if (format === 'ai' && selector === 'latest' && fs.existsSync(fallback)) {
                   content = fs.readFileSync(fallback, 'utf8');
                 } else {
                   throw err;
                 }
               }
               if (sub === 'export') {
-                const dest = positional[2] || path.resolve(process.cwd(), 'kucode-session-' + decodeURIComponent(selector) + (format === 'json' ? '.json' : format === 'raw' ? '.log' : '-ai.md'));
+                const suffix = format === 'otlp' ? '-otlp.json' : format === 'json' ? '.json' : format === 'raw' ? '.log' : '-ai.md';
+                const dest = positional[2] || path.resolve(process.cwd(), 'kucode-session-' + decodeURIComponent(selector) + suffix);
                 fs.writeFileSync(dest, content, 'utf8');
                 console.log(dest);
               } else {

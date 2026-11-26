@@ -160,7 +160,7 @@
       display: flex;
       gap: 8px;
     }
-    input[type="text"] {
+    input[type="text"], input[type="url"], input[type="password"] {
       flex: 1;
       background: #040405;
       color: var(--text);
@@ -170,9 +170,35 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 14px;
     }
-    input[type="text"]:focus, select:focus {
+    input[type="text"]:focus, input[type="url"]:focus, input[type="password"]:focus, select:focus {
       outline: none;
       border-color: var(--accent);
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .field label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .checkbox-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .checkbox-row input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
     }
   </style>
 </head>
@@ -221,6 +247,7 @@
           <option value="ai">AI インプット用バンドル (Markdown)</option>
           <option value="raw">統合タイムライン生ログ (Raw)</option>
           <option value="json">構造化データ (JSON)</option>
+          <option value="otlp">OTLP JSON (OpenTelemetry)</option>
         </select>
         <button id="loadSessionBtn" class="primary">表示する</button>
         <button id="copySessionBtn" disabled>AI レポートをコピー</button>
@@ -229,6 +256,59 @@
       </div>
       <div id="sessionExportStatus" class="hint"></div>
       <pre id="sessionReportViewer">（セッションを選択して「表示する」を押すと、AI にそのまま渡せる診断バンドルを表示します）</pre>
+    </section>
+
+    <section class="card" id="otlpSettingsCard">
+      <div class="card-head">
+        <div>
+          <strong>OpenTelemetry (OTLP/HTTP JSON) クラウド送信設定（オプトイン）</strong>
+          <div class="hint">既定は OFF です。有効化すると、セッション終了時およびネットワーク復帰時にローカル送信キュー（Outbox）経由で OTLP/HTTP JSON（<code>/v1/traces</code>, <code>/v1/metrics</code>, <code>/v1/logs</code>）を送信します。HTTPS（または <code>http://127.0.0.1</code> / <code>localhost</code>）のみ許可されます。</div>
+        </div>
+        <span id="otlpAuthBadge" class="badge">認証ヘッダー: 未設定</span>
+      </div>
+      <div class="actions">
+        <label class="checkbox-row" for="otlpEnabled">
+          <input id="otlpEnabled" type="checkbox" />
+          <span>OTLP クラウド送信を有効にする</span>
+        </label>
+        <label class="checkbox-row" for="otlpUnmeteredOnly">
+          <input id="otlpUnmeteredOnly" type="checkbox" />
+          <span>Wi-Fi 等の従量課金外ネットワークのみ送信する (unmeteredOnly)</span>
+        </label>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="otlpEndpointUrl">OTLP エンドポイントベース URL</label>
+          <input id="otlpEndpointUrl" type="url" placeholder="https://otel.example.com" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="otlpGranularity">送信粒度 (granularity)</label>
+          <select id="otlpGranularity" aria-label="OTLP 送信粒度">
+            <option value="summary-and-errors" selected>summary-and-errors（サマリー＋異常ログ / 推奨）</option>
+            <option value="full">full（全イベント＋サブプロセスログ）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="otlpAuthHeaderName">認証ヘッダー名</label>
+          <input id="otlpAuthHeaderName" type="text" value="Authorization" placeholder="Authorization" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="otlpAuthHeaderValue">認証ヘッダー値（暗号化保存・平文表示なし）</label>
+          <input id="otlpAuthHeaderValue" type="password" placeholder="新規設定または変更時のみ入力（空欄で既存値を保持）" autocomplete="off" spellcheck="false" />
+        </div>
+      </div>
+      <div class="actions">
+        <label class="checkbox-row" for="otlpClearAuthHeader">
+          <input id="otlpClearAuthHeader" type="checkbox" />
+          <span>保存済み認証ヘッダーを削除する</span>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="saveOtlpBtn" class="primary">OTLP 設定を保存</button>
+        <button id="flushOtlpBtn">今すぐ送信 (Outbox Flush)</button>
+      </div>
+      <div id="otlpOutboxStatus" class="hint">Outbox 待機件数: 0</div>
+      <div id="otlpStatusMessage" class="hint"></div>
     </section>
 
     <section class="card">
@@ -535,11 +615,120 @@
       window.KuCodeHost?.shareDiagnostic(sessionSelect.value || 'latest');
     });
     exportSessionBtn.addEventListener('click', () => {
-      if (!window.KuCodeHost || typeof window.KuCodeHost.exportSessionReport !== 'function') return;
-      exportSessionBtn.disabled = true;
-      sessionExportStatus.textContent = '共有フォルダへ保存中...';
-      window.KuCodeHost.exportSessionReport(sessionSelect.value || 'latest');
+      if (!window.KuCodeHost) return;
+      const selector = sessionSelect.value || 'latest';
+      const format = sessionFormatSelect.value || 'ai';
+      if (typeof window.KuCodeHost.exportSessionReportWithFormat === 'function') {
+        exportSessionBtn.disabled = true;
+        sessionExportStatus.textContent = '共有フォルダへ保存中...';
+        window.KuCodeHost.exportSessionReportWithFormat(selector, format);
+      } else if (typeof window.KuCodeHost.exportSessionReport === 'function') {
+        exportSessionBtn.disabled = true;
+        sessionExportStatus.textContent = '共有フォルダへ保存中...';
+        window.KuCodeHost.exportSessionReport(selector);
+      }
     });
+
+    const otlpEnabled = document.getElementById('otlpEnabled');
+    const otlpEndpointUrl = document.getElementById('otlpEndpointUrl');
+    const otlpGranularity = document.getElementById('otlpGranularity');
+    const otlpUnmeteredOnly = document.getElementById('otlpUnmeteredOnly');
+    const otlpAuthHeaderName = document.getElementById('otlpAuthHeaderName');
+    const otlpAuthHeaderValue = document.getElementById('otlpAuthHeaderValue');
+    const otlpClearAuthHeader = document.getElementById('otlpClearAuthHeader');
+    const otlpAuthBadge = document.getElementById('otlpAuthBadge');
+    const saveOtlpBtn = document.getElementById('saveOtlpBtn');
+    const flushOtlpBtn = document.getElementById('flushOtlpBtn');
+    const otlpOutboxStatus = document.getElementById('otlpOutboxStatus');
+    const otlpStatusMessage = document.getElementById('otlpStatusMessage');
+
+    function applyOtlpConfig(cfg) {
+      if (!cfg) return;
+      otlpEnabled.checked = Boolean(cfg.enabled);
+      otlpEndpointUrl.value = cfg.endpointUrl || '';
+      otlpGranularity.value = cfg.granularity === 'full' ? 'full' : 'summary-and-errors';
+      otlpUnmeteredOnly.checked = Boolean(cfg.unmeteredOnly);
+      otlpAuthHeaderName.value = cfg.authHeaderName || 'Authorization';
+      otlpAuthHeaderValue.value = '';
+      otlpClearAuthHeader.checked = false;
+      if (cfg.hasAuthHeader) {
+        const preview = cfg.authHeaderPreview ? ' (' + cfg.authHeaderPreview + ')' : '';
+        otlpAuthBadge.textContent = '認証ヘッダー: 設定済み' + preview;
+        otlpAuthBadge.className = 'badge ready';
+      } else {
+        otlpAuthBadge.textContent = '認証ヘッダー: 未設定';
+        otlpAuthBadge.className = 'badge';
+      }
+      const pending = typeof cfg.outboxPendingCount === 'number' ? cfg.outboxPendingCount : 0;
+      otlpOutboxStatus.textContent = 'Outbox 待機件数: ' + pending;
+    }
+
+    function loadOtlpConfig() {
+      if (!window.KuCodeHost || typeof window.KuCodeHost.getOtlpConfig !== 'function') return;
+      try {
+        const cfg = JSON.parse(window.KuCodeHost.getOtlpConfig() || '{}');
+        applyOtlpConfig(cfg);
+      } catch (err) {
+        otlpStatusMessage.textContent = 'OTLP 設定読み込みエラー: ' + err;
+      }
+    }
+
+    saveOtlpBtn.addEventListener('click', () => {
+      if (!window.KuCodeHost || typeof window.KuCodeHost.saveOtlpConfig !== 'function') return;
+      const payload = {
+        enabled: Boolean(otlpEnabled.checked),
+        endpointUrl: String(otlpEndpointUrl.value || '').trim(),
+        granularity: otlpGranularity.value === 'full' ? 'full' : 'summary-and-errors',
+        unmeteredOnly: Boolean(otlpUnmeteredOnly.checked),
+        authHeaderName: String(otlpAuthHeaderName.value || '').trim() || 'Authorization',
+        authHeaderValue: String(otlpAuthHeaderValue.value || ''),
+        clearAuthHeader: Boolean(otlpClearAuthHeader.checked),
+      };
+      try {
+        const res = JSON.parse(window.KuCodeHost.saveOtlpConfig(JSON.stringify(payload)) || '{}');
+        if (res.ok) {
+          if (res.config) applyOtlpConfig(res.config);
+          otlpStatusMessage.textContent = 'OTLP 設定を保存しました。';
+        } else {
+          otlpStatusMessage.textContent = 'OTLP 設定保存エラー: ' + (res.error || 'unknown');
+        }
+      } catch (err) {
+        otlpStatusMessage.textContent = 'OTLP 設定保存エラー: ' + err;
+      }
+    });
+
+    flushOtlpBtn.addEventListener('click', () => {
+      if (!window.KuCodeHost || typeof window.KuCodeHost.flushOtlpOutbox !== 'function') return;
+      flushOtlpBtn.disabled = true;
+      otlpStatusMessage.textContent = 'OTLP Outbox を送信中...';
+      window.KuCodeHost.flushOtlpOutbox();
+    });
+
+    window.__onOtlpFlushResult = function(rawResult) {
+      flushOtlpBtn.disabled = false;
+      let res = null;
+      try {
+        res = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
+      } catch (err) {
+        otlpStatusMessage.textContent = 'OTLP 送信結果の解析に失敗しました: ' + err;
+        return;
+      }
+      if (!res) {
+        otlpStatusMessage.textContent = 'OTLP 送信完了';
+        return;
+      }
+      if (typeof res.remaining === 'number') {
+        otlpOutboxStatus.textContent = 'Outbox 待機件数: ' + res.remaining;
+      }
+      if (res.skippedReason) {
+        otlpStatusMessage.textContent = 'OTLP 送信スキップ (' + res.skippedReason + ') / 待機: ' + (res.remaining || 0);
+      } else if (res.ok) {
+        otlpStatusMessage.textContent = 'OTLP 送信完了: flushed=' + (res.flushed || 0) + ', remaining=' + (res.remaining || 0);
+      } else {
+        const errDetail = res.lastError ? ' (' + res.lastError + ')' : '';
+        otlpStatusMessage.textContent = 'OTLP 送信失敗: failed=' + (res.failed || 0) + ', remaining=' + (res.remaining || 0) + errDetail;
+      }
+    };
 
     runDiagBtn.addEventListener('click', runDiagnostics);
     copyDiagBtn.addEventListener('click', () => copyText(latestReportText, copyDiagBtn, '結果をコピー'));
@@ -588,6 +777,7 @@
         statusMessage.textContent = 'ステータス取得エラー: ' + e;
       }
       refreshSessions();
+      loadOtlpConfig();
       setInterval(() => {
         if (document.hidden) return;
         try {

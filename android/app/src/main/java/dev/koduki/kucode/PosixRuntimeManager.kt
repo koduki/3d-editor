@@ -134,6 +134,16 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
     private val shellExecutor = PosixShellExecutor(
         ensureMountDirs = installer::ensureMountPointDirsExist,
+        commandBuilder = { paths, command, noSeccomp ->
+            PosixRuntimeConfig.buildProotCommand(
+                paths = paths,
+                guestCommand = PosixRuntimeConfig.buildShellCommand(command),
+            ) to PosixRuntimeConfig.buildProotEnvironment(
+                paths = paths,
+                disableSeccomp = noSeccomp,
+                traceparent = telemetry.currentTraceParent().orEmpty(),
+            )
+        },
     )
 
     private val editorPort = if (appContext.packageName.endsWith(".debug"))
@@ -164,14 +174,10 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
         currentEditorPortProvider = { statusStore.currentState().port },
         onListSessions = { telemetry.listSessionsJson() },
         onGetSessionBundle = { selector, format ->
-            telemetry.store.renderSessionBundle(selector, format, getPaths().vscodeDataDir)
+            telemetry.renderSessionBundle(selector, format)
         },
         onRecordClientEvent = { level, source, message ->
-            when (level.uppercase()) {
-                "ERROR", "FATAL" -> telemetry.error(source, message)
-                "WARN", "WARNING" -> telemetry.warn(source, message)
-                else -> telemetry.info(source, message)
-            }
+            telemetry.recordClientEvent(level, source, message)
         },
         onAuditRequest = { method, path, statusCode, durationMs, detail ->
             val note = if (detail.isNotEmpty()) " ($detail)" else ""
@@ -189,6 +195,18 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
             AndroidHostBridge.get(appContext).handle(method, path, body) { pkg ->
                 hostActions?.onLaunchAndroidApp?.invoke(pkg) ?: false
             }
+        },
+        sessionLogStore = telemetry.store,
+        otlpOutboxExporter = telemetry.otlpOutboxExporter,
+        vscodeDataDirProvider = { getPaths().vscodeDataDir },
+        onGetSessionBundleWithGranularity = { selector, format, granularity ->
+            telemetry.renderSessionBundle(selector, format, granularity)
+        },
+        onRecordClientEventWithTrace = { level, source, message, traceId, spanId ->
+            telemetry.recordClientEvent(level, source, message, traceId, spanId)
+        },
+        onFlushOtlp = { selector ->
+            telemetry.flushOtlpOutboxSync(selector = selector, ignoreBackoff = true)
         },
     )
 
@@ -446,49 +464,121 @@ class PosixRuntimeManager private constructor(private val appContext: Context) {
 
         var stagedNewInstall = false
         try {
-            stagedNewInstall = installer.ensureExtracted(paths) == RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL
-            installer.prepareRuntimeDirectories(paths)
-            installer.ensureMachineVsCodeSettings(paths)
+            val bootstrapSpan = telemetry.startSpan("runtime.bootstrap")
+            var bootstrapStatus = SessionLogStore.SpanStatus.ERROR
+            var bootstrapStatusMessage: String? = null
+            try {
+                stagedNewInstall = installer.ensureExtracted(paths) == RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL
+                installer.prepareRuntimeDirectories(paths)
+                installer.ensureMachineVsCodeSettings(paths)
+                bootstrapStatus = SessionLogStore.SpanStatus.OK
+            } catch (cancel: CancellationException) {
+                bootstrapStatusMessage = "Cancelled"
+                throw cancel
+            } catch (e: Exception) {
+                bootstrapStatusMessage = e.message ?: e.javaClass.simpleName
+                throw e
+            } finally {
+                bootstrapSpan?.let {
+                    telemetry.endSpan(
+                        spanId = it.spanId,
+                        status = bootstrapStatus,
+                        statusMessage = bootstrapStatusMessage,
+                        attributes = mapOf("kucode.runtime.staged_new_install" to stagedNewInstall),
+                    )
+                }
+            }
 
             val adminPort = diagnosticsServer.start()
-            val result = launcher.launch(
-                paths = paths,
-                adminPort = adminPort,
-                adminToken = diagnosticsServer.authToken,
-                initialDisableSeccomp = disableSeccomp,
-                allowSeccompRetry = true,
-                onStarting = { port ->
-                    val snap = statusStore.update(hasAllFilesAccess()) {
-                        it.copy(
-                            state = State.STARTING,
-                            message = "内蔵 openvscode-server を起動中 (127.0.0.1:$port)...",
-                            progress = 92,
-                            port = port,
-                            editorToken = null,
-                        )
-                    }
-                    telemetry.updateRuntimeSnapshot(snap, adminPort = adminPort, disableSeccomp = disableSeccomp)
-                },
-                onProcessCreated = { proc -> serverProcess = proc },
-                onUnexpectedExit = { proc, code ->
-                    if (serverProcess === proc && statusStore.currentState().state == State.READY) {
-                        serverProcess = null
+            val startupSpan = telemetry.startSpan(
+                name = "openvscode.startup",
+                attributes = mapOf("kucode.disable_seccomp" to disableSeccomp),
+            )
+            var startupStatus = SessionLogStore.SpanStatus.ERROR
+            var startupStatusMessage: String? = null
+            var startupAttrs: Map<String, Any?> = emptyMap()
+            val result = try {
+                launcher.launch(
+                    paths = paths,
+                    adminPort = adminPort,
+                    adminToken = diagnosticsServer.authToken,
+                    initialDisableSeccomp = disableSeccomp,
+                    allowSeccompRetry = true,
+                    traceparent = telemetry.currentTraceParent().orEmpty(),
+                    onStarting = { port ->
                         val snap = statusStore.update(hasAllFilesAccess()) {
                             it.copy(
-                                state = State.ERROR,
-                                message = "サーバーが終了しました (exit=$code)",
-                                progress = 0,
-                                port = 0,
+                                state = State.STARTING,
+                                message = "内蔵 openvscode-server を起動中 (127.0.0.1:$port)...",
+                                progress = 92,
+                                port = port,
                                 editorToken = null,
                             )
                         }
-                        telemetry.error("runtime", "openvscode-server exited unexpectedly while READY (exit=$code)")
-                        telemetry.harvestOpenVsCodeLogsNow()
-                        telemetry.updateRuntimeSnapshot(snap, adminPort = diagnosticsServer.port, disableSeccomp = disableSeccomp)
-                        telemetry.captureMetricSnapshotAsync("server_unexpected_exit_$code", includePss = true)
+                        telemetry.updateRuntimeSnapshot(snap, adminPort = adminPort, disableSeccomp = disableSeccomp)
+                    },
+                    onProcessCreated = { proc -> serverProcess = proc },
+                    onUnexpectedExit = { proc, code ->
+                        if (serverProcess === proc && statusStore.currentState().state == State.READY) {
+                            serverProcess = null
+                            val snap = statusStore.update(hasAllFilesAccess()) {
+                                it.copy(
+                                    state = State.ERROR,
+                                    message = "サーバーが終了しました (exit=$code)",
+                                    progress = 0,
+                                    port = 0,
+                                    editorToken = null,
+                                )
+                            }
+                            telemetry.error("runtime", "openvscode-server exited unexpectedly while READY (exit=$code)")
+                            telemetry.harvestOpenVsCodeLogsNow()
+                            telemetry.updateRuntimeSnapshot(snap, adminPort = diagnosticsServer.port, disableSeccomp = disableSeccomp)
+                            telemetry.captureMetricSnapshotAsync("server_unexpected_exit_$code", includePss = true)
+                        }
+                    },
+                ).also { launchResult ->
+                    when (launchResult) {
+                        is OpenVsCodeLauncher.LaunchResult.Ready -> {
+                            startupStatus = SessionLogStore.SpanStatus.OK
+                            startupAttrs = mapOf(
+                                "kucode.editor.port" to launchResult.port,
+                                "kucode.disable_seccomp" to launchResult.disableSeccomp,
+                            )
+                        }
+                        is OpenVsCodeLauncher.LaunchResult.Failed -> {
+                            startupStatus = SessionLogStore.SpanStatus.ERROR
+                            startupStatusMessage = "exit=${launchResult.exitCode}"
+                            startupAttrs = mapOf(
+                                "process.exit.code" to launchResult.exitCode,
+                                "kucode.disable_seccomp" to launchResult.disableSeccomp,
+                            )
+                        }
+                        is OpenVsCodeLauncher.LaunchResult.TimedOut -> {
+                            startupStatus = SessionLogStore.SpanStatus.ERROR
+                            startupStatusMessage = "timeout=${launchResult.timeoutMs}ms"
+                            startupAttrs = mapOf(
+                                "kucode.startup.timeout_ms" to launchResult.timeoutMs,
+                                "kucode.disable_seccomp" to launchResult.disableSeccomp,
+                            )
+                        }
                     }
-                },
-            )
+                }
+            } catch (cancel: CancellationException) {
+                startupStatusMessage = "Cancelled"
+                throw cancel
+            } catch (e: Exception) {
+                startupStatusMessage = e.message ?: e.javaClass.simpleName
+                throw e
+            } finally {
+                startupSpan?.let {
+                    telemetry.endSpan(
+                        spanId = it.spanId,
+                        status = startupStatus,
+                        statusMessage = startupStatusMessage,
+                        attributes = startupAttrs,
+                    )
+                }
+            }
 
             when (result) {
                 is OpenVsCodeLauncher.LaunchResult.Ready -> {

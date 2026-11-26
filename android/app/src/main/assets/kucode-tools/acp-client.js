@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
@@ -11,6 +12,40 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
 const MAX_TERMINALS = 8;
 const DEFAULT_TERMINAL_OUTPUT_LIMIT = 256 * 1024;
+
+const ZERO_TRACE_ID = '0'.repeat(32);
+const ZERO_SPAN_ID = '0'.repeat(16);
+const TRACEPARENT_RE = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i;
+
+function parseTraceParent(raw) {
+  if (typeof raw !== 'string') return null;
+  const match = TRACEPARENT_RE.exec(raw.trim());
+  if (!match) return null;
+  const version = match[1].toLowerCase();
+  const traceId = match[2].toLowerCase();
+  const parentSpanId = match[3].toLowerCase();
+  const traceFlags = match[4].toLowerCase();
+  if (version === 'ff' || traceId === ZERO_TRACE_ID || parentSpanId === ZERO_SPAN_ID) {
+    return null;
+  }
+  return {
+    version,
+    traceId,
+    parentSpanId,
+    traceFlags,
+    normalized: `${version}-${traceId}-${parentSpanId}-${traceFlags}`,
+  };
+}
+
+function deriveChildTraceParent(raw) {
+  const parsed = parseTraceParent(raw);
+  if (!parsed) return null;
+  let spanId = ZERO_SPAN_ID;
+  while (spanId === ZERO_SPAN_ID || spanId === parsed.parentSpanId) {
+    spanId = crypto.randomBytes(8).toString('hex');
+  }
+  return `00-${parsed.traceId}-${spanId}-${parsed.traceFlags}`;
+}
 
 const DEFAULT_AGENT_PRESETS = {
   antigravity: {
@@ -242,6 +277,7 @@ class AcpSessionClient extends EventEmitter {
     this.stdoutBuffer = '';
     this.terminals = new Map();
     this.nextTerminalSeq = 1;
+    this.agentTraceParent = null;
     this.disposed = false;
   }
 
@@ -262,6 +298,14 @@ class AcpSessionClient extends EventEmitter {
       ...this.extraEnv,
       PATH: augmentedPath,
     };
+    const derivedTp = deriveChildTraceParent(this.extraEnv.TRACEPARENT || process.env.TRACEPARENT);
+    if (derivedTp) {
+      env.TRACEPARENT = derivedTp;
+      this.agentTraceParent = derivedTp;
+    } else {
+      delete env.TRACEPARENT;
+      this.agentTraceParent = null;
+    }
 
     const proc = spawn(resolvedCmd, this.args, {
       cwd: this.workspaceRoot,
@@ -668,12 +712,20 @@ class AcpSessionClient extends EventEmitter {
       : this.workspaceRoot;
 
     const env = { ...process.env, PATH: buildAugmentedPath(process.env.PATH, process.env.HOME) };
+    let explicitTp = null;
     if (Array.isArray(params.env)) {
       for (const item of params.env) {
         if (item && typeof item.name === 'string' && typeof item.value === 'string') {
           env[item.name] = item.value;
+          if (item.name === 'TRACEPARENT') explicitTp = item.value;
         }
       }
+    }
+    const derivedTp = deriveChildTraceParent(explicitTp || this.agentTraceParent || process.env.TRACEPARENT);
+    if (derivedTp) {
+      env.TRACEPARENT = derivedTp;
+    } else {
+      delete env.TRACEPARENT;
     }
 
     const byteLimit = Math.min(
@@ -823,5 +875,7 @@ module.exports = {
   resolveSafeWorkspacePath,
   sliceLines,
   isAuthRequiredError,
+  parseTraceParent,
+  deriveChildTraceParent,
   AcpSessionClient,
 };

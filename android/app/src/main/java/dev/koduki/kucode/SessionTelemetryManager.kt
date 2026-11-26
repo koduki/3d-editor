@@ -29,6 +29,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -56,8 +57,19 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
 
     private val diagnosticsDir = File(appContext.filesDir, "diagnostics")
     private val vscodeDataDir = File(appContext.filesDir, "runtime/vscode-data")
+    private val otlpOutboxDir = File(appContext.filesDir, "otlp-outbox")
 
     internal val store = SessionLogStore(diagnosticsRootDir = diagnosticsDir)
+    internal val otlpConfigStore = OtlpConfigStore(
+        storage = SharedPreferencesKeyValueStorage.create(appContext),
+        cipher = AndroidKeyStoreSecretCipher(),
+    )
+    internal val otlpOutboxExporter = OtlpOutboxExporter(
+        sessionLogStore = store,
+        outboxDir = otlpOutboxDir,
+        configStore = otlpConfigStore,
+        isNetworkMetered = { isActiveNetworkMetered(appContext) },
+    )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val writerExecutor = Executors.newSingleThreadExecutor { r ->
@@ -116,6 +128,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
      */
     fun initializeProcessHooks() {
         if (hooksInstalled.compareAndSet(false, true)) {
+            runCatching { otlpConfigStore.loadConfig() }
             installUncaughtExceptionHandlerOnce()
             registerSystemCallbacks()
         }
@@ -125,6 +138,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
     private fun triggerInitialReconcileAsync() {
         if (!initialReconcileStarted.compareAndSet(false, true)) return
         enqueueWrite {
+            var reconciledSessions: List<SessionLogStore.SessionSummary> = emptyList()
             try {
                 val myPid = android.os.Process.myPid()
                 val exitRecords = collectHistoricalExitRecords(appContext)
@@ -133,11 +147,26 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
                     exitRecords = exitRecords,
                     vscodeDataDir = vscodeDataDir,
                 )
+                reconciledSessions = reconciled
                 if (reconciled.isNotEmpty()) {
                     pendingReconciledNotes = reconciled
                 }
             } finally {
                 initialReconcileLatch.countDown()
+            }
+            if (reconciledSessions.isNotEmpty() || otlpOutboxExporter.pendingCount() > 0) {
+                scope.launch {
+                    runCatching {
+                        if (otlpConfigStore.loadConfig().enabled) {
+                            for (summary in reconciledSessions) {
+                                otlpOutboxExporter.enqueueSession(summary.sessionId, vscodeDataDir = vscodeDataDir)
+                            }
+                            if (otlpOutboxExporter.pendingCount() > 0) {
+                                otlpOutboxExporter.flushOutbox(ignoreBackoff = false)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -321,6 +350,62 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
         enqueueWrite { store.harvestOpenVsCodeSubLogs(vscodeDataDir) }
     }
 
+    fun currentTraceParent(): String? = store.currentTraceParent()
+
+    fun recordClientEvent(
+        level: String,
+        source: String,
+        message: String,
+        traceId: String? = null,
+        spanId: String? = null,
+    ) {
+        val lvl = when (level.trim().uppercase(Locale.US)) {
+            "FATAL" -> SessionLogStore.EventLevel.FATAL
+            "ERROR" -> SessionLogStore.EventLevel.ERROR
+            "WARN", "WARNING" -> SessionLogStore.EventLevel.WARN
+            else -> SessionLogStore.EventLevel.INFO
+        }
+        enqueueWrite {
+            store.recordEvent(
+                level = lvl,
+                source = source,
+                message = message,
+                traceId = traceId,
+                spanId = spanId,
+            )
+        }
+    }
+
+    fun startSpan(
+        name: String,
+        kind: SessionLogStore.SpanKind = SessionLogStore.SpanKind.INTERNAL,
+        parentSpanId: String? = null,
+        attributes: Map<String, Any?> = emptyMap(),
+    ): SessionLogStore.SpanRecord? = store.startSpan(
+        name = name,
+        kind = kind,
+        parentSpanId = parentSpanId,
+        attributes = attributes,
+    )
+
+    fun endSpan(
+        spanId: String,
+        status: SessionLogStore.SpanStatus = SessionLogStore.SpanStatus.OK,
+        statusMessage: String? = null,
+        attributes: Map<String, Any?> = emptyMap(),
+    ) {
+        val endMs = System.currentTimeMillis()
+        enqueueWrite {
+            store.endSpan(
+                spanId = spanId,
+                endMs = endMs,
+                status = status,
+                statusMessage = statusMessage,
+                attributes = attributes,
+            )
+        }
+    }
+
     fun endCurrentSession(
         reason: String,
         abnormal: Boolean = false,
@@ -330,7 +415,8 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
         metricsJob = null
         stopLogcatCollector()
         enqueueWrite {
-            synchronized(sessionLifecycleLock) {
+            val endedSessionId = synchronized(sessionLifecycleLock) {
+                val activeId = store.currentSessionId()
                 val finalMetric = runCatching { buildMetricSnapshot("session_end", includePss = true) }.getOrNull()
                 store.endSession(
                     reason = reason,
@@ -339,6 +425,17 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
                     finalMetric = finalMetric,
                     vscodeDataDir = vscodeDataDir,
                 )
+                activeId
+            }
+            if (endedSessionId != null) {
+                scope.launch {
+                    runCatching {
+                        if (otlpConfigStore.loadConfig().enabled) {
+                            otlpOutboxExporter.enqueueSession(endedSessionId, vscodeDataDir = vscodeDataDir)
+                            otlpOutboxExporter.flushOutbox(ignoreBackoff = false)
+                        }
+                    }
+                }
             }
         }
     }
@@ -353,24 +450,150 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
         return store.listSessions()
     }
 
-    fun renderSessionBundle(selector: String = "latest", format: String = "ai"): String {
+    fun renderSessionBundle(
+        selector: String = "latest",
+        format: String = "ai",
+        granularity: String = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+    ): String? {
         awaitInitialReconcile()
         return store.renderSessionBundle(
             selector = selector,
             format = format,
             vscodeDataDir = vscodeDataDir,
-        ) ?: "# Session not found: $selector\n"
+            granularity = granularity,
+        )
     }
 
-    fun exportSessionToShared(selector: String = "latest"): File? {
+    fun exportSessionBundle(
+        selector: String,
+        exportDir: File,
+        format: String = "ai",
+        granularity: String = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+    ): File? {
         awaitInitialReconcile()
-        val sharedBase = appContext.getExternalFilesDir("shared") ?: File(appContext.filesDir, "shared")
-        val exportDir = File(sharedBase, "diagnostics")
         return store.exportSessionBundleToDirectory(
             selector = selector,
             exportDir = exportDir,
             vscodeDataDir = vscodeDataDir,
+            format = format,
+            granularity = granularity,
         )
+    }
+
+    fun exportSessionToShared(
+        selector: String = "latest",
+        format: String = "ai",
+        granularity: String = OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS,
+    ): File? {
+        val sharedBase = appContext.getExternalFilesDir("shared") ?: File(appContext.filesDir, "shared")
+        val exportDir = File(sharedBase, "diagnostics")
+        return exportSessionBundle(
+            selector = selector,
+            exportDir = exportDir,
+            format = format,
+            granularity = granularity,
+        )
+    }
+
+    fun getOtlpConfigJson(): String = otlpOutboxExporter.getPublicConfigJson().toString()
+
+    fun saveOtlpConfigJson(configJson: String): String {
+        val json = runCatching { JSONObject(configJson) }.getOrNull()
+            ?: return JSONObject()
+                .put("ok", false)
+                .put("error", "Invalid JSON configuration")
+                .toString()
+
+        val enabled = json.optBoolean("enabled", false)
+        val endpointUrl = if (json.has("endpointUrl") && !json.isNull("endpointUrl")) {
+            json.optString("endpointUrl", "")
+        } else {
+            ""
+        }
+        val granularity = if (json.has("granularity") && !json.isNull("granularity")) {
+            json.optString("granularity", OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS)
+                .ifBlank { OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS }
+        } else {
+            OtlpJsonSerializer.GRANULARITY_SUMMARY_AND_ERRORS
+        }
+        val unmeteredOnly = json.optBoolean("unmeteredOnly", false)
+        val authHeaderName = if (json.has("authHeaderName") && !json.isNull("authHeaderName")) {
+            json.optString("authHeaderName", OtlpConfigStore.DEFAULT_AUTH_HEADER_NAME)
+        } else {
+            OtlpConfigStore.DEFAULT_AUTH_HEADER_NAME
+        }
+        val authHeaderValue = if (json.has("authHeaderValue") && !json.isNull("authHeaderValue")) {
+            json.optString("authHeaderValue", "")
+        } else {
+            null
+        }
+        val clearAuthHeader = json.optBoolean("clearAuthHeader", false)
+
+        val result = otlpConfigStore.saveConfig(
+            enabled = enabled,
+            endpointUrl = endpointUrl,
+            granularity = granularity,
+            unmeteredOnly = unmeteredOnly,
+            authHeaderName = authHeaderName,
+            authHeaderValue = authHeaderValue,
+            clearAuthHeader = clearAuthHeader,
+        )
+        return if (result.ok) {
+            JSONObject()
+                .put("ok", true)
+                .put("config", otlpOutboxExporter.getPublicConfigJson())
+                .toString()
+        } else {
+            JSONObject()
+                .put("ok", false)
+                .put("error", result.error ?: "Failed to save OTLP configuration")
+                .toString()
+        }
+    }
+
+    fun flushOtlpOutboxSync(
+        selector: String? = null,
+        ignoreBackoff: Boolean = true,
+    ): Pair<Int, String> {
+        awaitInitialReconcile()
+        val cleanSelector = selector?.trim()?.takeIf { it.isNotEmpty() }
+        if (cleanSelector != null && !otlpOutboxExporter.hasSession(cleanSelector)) {
+            return 404 to JSONObject()
+                .put("ok", false)
+                .put("error", "Session not found: $cleanSelector")
+                .toString()
+        }
+        var enqueued = 0
+        if (cleanSelector != null) {
+            if (otlpOutboxExporter.enqueueSession(cleanSelector, vscodeDataDir = vscodeDataDir)) {
+                enqueued = 1
+            }
+        } else if (otlpOutboxExporter.pendingCount() == 0) {
+            if (otlpOutboxExporter.enqueueSession("current", vscodeDataDir = vscodeDataDir)) {
+                enqueued = 1
+            }
+        }
+        val result = otlpOutboxExporter.flushOutbox(ignoreBackoff = ignoreBackoff).copy(enqueued = enqueued)
+        return 200 to result.toJsonObject().toString()
+    }
+
+    fun flushOtlpOutboxAsync(
+        selector: String? = null,
+        ignoreBackoff: Boolean = true,
+        onResult: ((String) -> Unit)? = null,
+    ) {
+        scope.launch {
+            val resultJson = runCatching {
+                flushOtlpOutboxSync(selector = selector, ignoreBackoff = ignoreBackoff).second
+            }.getOrElse { e ->
+                JSONObject()
+                    .put("ok", false)
+                    .put("enabled", runCatching { otlpConfigStore.loadConfig().enabled }.getOrDefault(false))
+                    .put("lastError", LogRedactor.redact(e.message ?: e.javaClass.simpleName))
+                    .toString()
+            }
+            onResult?.invoke(resultJson)
+        }
     }
 
     private fun installUncaughtExceptionHandlerOnce() {
@@ -494,6 +717,13 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
                             "android.network",
                             "Default network available: ${queryNetworkSummary(appContext)}",
                         )
+                    }
+                    scope.launch {
+                        runCatching {
+                            if (otlpOutboxExporter.pendingCount() > 0) {
+                                otlpOutboxExporter.flushOutbox(ignoreBackoff = false)
+                            }
+                        }
                     }
                 }
 
@@ -717,9 +947,12 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
             val xrSpatial = runCatching {
                 context.packageManager.hasSystemFeature("android.software.xr.api.spatial")
             }.getOrDefault(false)
+            val buildSha = runCatching {
+                context.getString(R.string.kucode_build_sha).trim().ifEmpty { "unknown" }
+            }.getOrDefault("unknown")
 
             return SessionLogStore.SessionEnvMetadata(
-                appVersion = "$versionName (code=$versionCode, targetSdk=${context.applicationInfo.targetSdkVersion}, git=${context.getString(R.string.kucode_build_sha)})",
+                appVersion = "$versionName (code=$versionCode, targetSdk=${context.applicationInfo.targetSdkVersion}, git=$buildSha)",
                 packageName = context.packageName,
                 deviceSummary = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})",
                 androidSummary = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
@@ -730,6 +963,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
                 hasAllFilesAccess = Environment.isExternalStorageManager(),
                 notificationsEnabled = queryNotificationsEnabled(context),
                 batteryOptIgnored = queryBatteryOptIgnored(context),
+                buildSha = buildSha,
             )
         }
 

@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "feature": "otel-flight-recorder",
+  "issue": 36,
+  "specPath": "docs/specs/otel-flight-recorder/spec.md",
+  "deployTarget": "merge-only",
+  "criteria": [
+    {
+      "id": "AC-1",
+      "title": "Backward-compatible kucode-session-v1 schema with traceId, rootSpanId, buildSha, and legacy deterministic fallback",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-2",
+      "title": "SpanRecord lifecycle and automatic ERROR finalization of unfinished spans on crash and next-boot ApplicationExitInfo reconciliation",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-3",
+      "title": "Canonical OTLP/HTTP JSON v1.x serialization (resourceSpans, resourceMetrics, resourceLogs) with summary-and-errors vs full granularity",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-4",
+      "title": "LogRedactor sanitization across all OTLP signals plus encrypted OtlpConfigStore credential handling and non-disclosure in getPublicConfigJson",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-5",
+      "title": "Strict OTLP endpoint URL validation (https:// required; http:// allowed only for 127.0.0.1 and localhost; userinfo/other schemes rejected)",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-6",
+      "title": "Opt-in default OFF, isolated outbox cap (20 sessions), retry/backoff (max 3), permanent 4xx drop, and unmeteredOnly deferral",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-7",
+      "title": "Live loopback LocalDiagnosticsServer (?format=otlp, POST /event traceparent, POST /span, POST /otlp/flush) E2E with loopback OTLP collector",
+      "verificationType": "oracle-kotlin-medium",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderMediumOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-8",
+      "title": "Generated kucode-logs CLI (--otlp, --summary/--full, export --otlp, otlp-flush) E2E against loopback LocalDiagnosticsServer",
+      "verificationType": "oracle-kotlin-medium",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderMediumOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Compiled cleanly via K2JVMCompiler; local Gradle blocked by Maven Central HTTP 429 — executed in GitHub Actions CI."
+    },
+    {
+      "id": "AC-9",
+      "title": "kucode-cli.cjs TRACEPARENT child-span propagation, KUCODE_ADMIN_TOKEN stripping, and proot.command span reporting without leaking command args",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/otel-flight-recorder.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-10",
+      "title": "kucode-tools acp.turn span reporting without prompt leakage, TRACEPARENT propagation to ACP/terminal env, and Workspace Trust/application-scope preservation",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/otel-flight-recorder.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-11",
+      "title": "boot.html OTLP export option, opt-in settings UI, password-masked auth input, and KuCodeHost bridge wiring",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/otel-flight-recorder.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-12",
+      "title": "PosixRuntimeConfig.buildProotEnvironment propagates valid TRACEPARENT while preserving user/SDK PATH precedence",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/OtelFlightRecorderOracleTest.kt",
+      "status": "PENDING_CI_GRADLE",
+      "passed": false,
+      "notes": "Passed direct JVM execution during Wave 2-A; full Gradle suite pending GitHub Actions CI."
+    },
+    {
+      "id": "AC-13",
+      "title": "analyze-flight-recorder.mjs and scripts/otlp-triage.mjs parse OTLP JSON files/URLs with filtering, untrustedData safety, and INFO omission while preserving schema: 2 backward compatibility",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/otel-flight-recorder.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-14",
+      "title": "Physical XREAL AURA real-device verification (AndroidKeyStore persistence across restart, metered/unmetered switch, ApplicationExitInfo next-boot HTTPS OTLP flush)",
+      "verificationType": "hardware-manual",
+      "oracleFile": null,
+      "status": "NOT RUN",
+      "passed": false
+    }
+  ]
+}

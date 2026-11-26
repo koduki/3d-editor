@@ -62,9 +62,35 @@ function getConfiguredAgents() {
   return merged;
 }
 
+function redactErrorMessage(raw) {
+  if (raw === undefined || raw === null) return '';
+  let out = String(raw);
+  const adminToken = typeof process.env.KUCODE_ADMIN_TOKEN === 'string' ? process.env.KUCODE_ADMIN_TOKEN.trim() : '';
+  if (adminToken.length >= 8 && out.includes(adminToken)) {
+    out = out.split(adminToken).join('[REDACTED_TOKEN]');
+  }
+  out = out.replace(/-{5}BEGIN [A-Z0-9 ]*PRIVATE KEY-{5}[\s\S]*?-{5}END [A-Z0-9 ]*PRIVATE KEY-{5}/g, '[REDACTED_PRIVATE_KEY]');
+  out = out.replace(/\b(https?|wss?|ftp|ssh|git):\/\/([^:@\s"'/]+):([^@\s"'/]+)@/gi, '$1://$2:[REDACTED]@');
+  out = out.replace(/([?&#])(tkn|token|access_token|refresh_token|id_token|client_secret|code|api_key|apikey|key|secret|password|passwd|x-amz-signature|x-amz-security-token)=([^&#\s"']+)/gi, '$1$2=[REDACTED]');
+  out = out.replace(/(vscode-tkn)=([^;\s"']+)/gi, '$1=[REDACTED]');
+  out = out.replace(/((?:X-KuCode-Token|X-API-Key|X-Goog-Api-Key|Anthropic-Api-Key|Proxy-Authorization)\s*:\s*)([^\r\n]+)/gim, '$1[REDACTED]');
+  out = out.replace(/(Authorization\s*:\s*(?:(?:Bearer|Basic|Token|Digest|AWS4-HMAC-SHA256)\s+)?)([^\r\n"']+)/gim, '$1[REDACTED]');
+  out = out.replace(/\b((?:Bearer|Basic|Token)\s+)([^\s"';,]+)/gi, '$1[REDACTED]');
+  out = out.replace(/\b([A-Z0-9_]*(?:TOKEN|API_KEY|SECRET|PASSWORD|PASSWD)=)([^\s"'`]+)/gi, '$1[REDACTED]');
+  out = out.replace(/("(?:access_token|refresh_token|id_token|client_secret|api_key|apiKey|password|secret|token|authorization)"\s*:\s*")([^"]+)(")/gi, '$1[REDACTED]$3');
+  out = out.replace(/\b(gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b/g, '[REDACTED_GH_TOKEN]');
+  out = out.replace(/\b(sk-(?:proj-|ant-[A-Za-z0-9_-]*|svcacct-)?[A-Za-z0-9_-]{20,})\b/g, '[REDACTED_API_KEY]');
+  out = out.replace(/\b(AIza[0-9A-Za-z_-]{35})\b/g, '[REDACTED_GOOGLE_KEY]');
+  out = out.replace(/\b(xox[baprs]-[0-9A-Za-z-]{10,})\b/g, '[REDACTED_SLACK_TOKEN]');
+  out = out.replace(/\b((?:AKIA|ASIA)[0-9A-Z]{16})\b/g, '[REDACTED_AWS_KEY]');
+  out = out.replace(/\b(hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,})\b/g, '[REDACTED_API_KEY]');
+  return out.slice(0, 512);
+}
+
 class AcpChatViewProvider {
   constructor(options) {
     this.reportHostEvent = (options && options.reportHostEvent) || (() => {});
+    this.reportHostSpan = (options && options.reportHostSpan) || null;
     this.writeHostClipboard = (options && options.writeHostClipboard) || null;
     this.extensionVersion = (options && options.extensionVersion) || '0.10.0';
     this.webviewView = null;
@@ -456,6 +482,26 @@ class AcpChatViewProvider {
     }
   }
 
+  _reportTurnSpan({ startMs, endMs, status, statusMessage, agentId, stopReason, attachmentCount }) {
+    if (typeof this.reportHostSpan !== 'function') return;
+    const payload = {
+      name: 'acp.turn',
+      kind: 'CLIENT',
+      startMs,
+      endMs,
+      status,
+      attributes: {
+        'kucode.acp.agent': String(agentId || 'unknown'),
+        'kucode.acp.stop_reason': String(stopReason || ''),
+        'kucode.acp.attachment_count': Number(attachmentCount) || 0,
+      },
+    };
+    if (statusMessage) {
+      payload.statusMessage = statusMessage;
+    }
+    Promise.resolve(this.reportHostSpan(payload, process.env.TRACEPARENT)).catch(() => {});
+  }
+
   async _sendPrompt(rawText) {
     const trimmed = rawText.trim();
     if (!trimmed && this.pendingAttachments.length === 0) return;
@@ -465,6 +511,8 @@ class AcpChatViewProvider {
     if (!client) return;
 
     const attachments = this.pendingAttachments.splice(0, this.pendingAttachments.length);
+    const attachmentCount = attachments.length;
+    const agentId = this.activeAgentId;
     this._post({ type: 'attachments', items: [] });
 
     const blocks = [];
@@ -479,6 +527,7 @@ class AcpChatViewProvider {
     }
 
     this.isPrompting = true;
+    const turnStartMs = Date.now();
     this._post({
       type: 'turnStart',
       userText: trimmed,
@@ -487,13 +536,31 @@ class AcpChatViewProvider {
 
     try {
       const result = await client.prompt(blocks);
+      const stopReason = (result && result.stopReason) || 'end_turn';
       this._post({
         type: 'turnEnd',
-        stopReason: (result && result.stopReason) || 'end_turn',
+        stopReason,
+      });
+      this._reportTurnSpan({
+        startMs: turnStartMs,
+        endMs: Math.max(turnStartMs, Date.now()),
+        status: 'OK',
+        agentId,
+        stopReason,
+        attachmentCount,
       });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
       this._post({ type: 'turnError', message });
+      this._reportTurnSpan({
+        startMs: turnStartMs,
+        endMs: Math.max(turnStartMs, Date.now()),
+        status: 'ERROR',
+        statusMessage: redactErrorMessage(message),
+        agentId,
+        stopReason: 'error',
+        attachmentCount,
+      });
       if (isAuthRequiredError(err)) {
         const spec = getConfiguredAgents()[this.activeAgentId];
         this._post({
