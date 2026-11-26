@@ -48,6 +48,8 @@ class OtlpOutboxExporterTest {
         deviceSummary = "TestDevice",
         androidSummary = "15 (API 35)",
         buildSha = "deadbeef",
+        notificationsEnabled = true,
+        batteryOptIgnored = true,
     )
 
     @Test
