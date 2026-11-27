@@ -8,9 +8,9 @@
 - Architecture Decision Records (ADR-0001..0012): `docs/adr/README.md`
 - AURA real-device acceptance & CLI contracts: `docs/aura-self-host-acceptance.md`
 - Runtime asset supply-chain lock (pinned SHA-256): `runtime-assets.lock.json`
-- End-to-end autonomous workflow (`/ship`): `.agents/skills/ship/SKILL.md` (configured by `.agents/ship.config.json`)
-- Tiered custom subagents (`.agents/agents/*.md`, validated by Guard 11): `ship-recon` (`flash`), `ship-architect` (`pro`), `oracle-test-author` (`pro`), `ship-implementer` (`inherit`), `ship-verifier` (`flash`)
-- Non-ignorable deterministic guards: `scripts/guards/run-all-guards.mjs`
+- End-to-end autonomous workflow (`/ship`): `.agents/skills/ship/SKILL.md` (configured by `.agents/ship.config.json`; resume escalated runs via `state.mjs resume`)
+- Tiered custom subagents (`.agents/agents/*.md`, validated by Guard 11): `ship-recon` (`flash`), `ship-architect` (`pro`), `oracle-test-author` (`pro`), `ship-implementer` (`standard`: `flash` / `complex`: `inherit`), `ship-verifier` (`flash`), `ship-reviewer` (`pro`)
+- Non-ignorable deterministic guards & staged boundary lock: `scripts/guards/run-all-guards.mjs`, `.agents/skills/ship/scripts/check-staged-boundaries.mjs` (wired in `.githooks/pre-commit`)
 
 ## 2. Hard Boundaries (AI Must Never Modify Without Explicit Human Approval in S2)
 - Secret/signing files (NEVER unlockable): `.env*`, `*.keystore`, `*.jks`, `*.p12`

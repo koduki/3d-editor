@@ -270,6 +270,112 @@ export function escalateRun(statePath, reason) {
   return saveState(statePath, state);
 }
 
+const VALID_RETRY_BUCKETS = ["impl", "codex", "ci"];
+
+export function resumeRun(statePath, options = {}) {
+  const state = loadState(statePath);
+  if (!state) throw new Error("No active /ship state found.");
+  if (state.currentState === "DONE") {
+    throw new Error("Cannot resume a completed /ship run (currentState is DONE).");
+  }
+
+  const defaultTarget = state.oracleLocked
+    ? "S3b_IMPL_WORKFLOW"
+    : state.contractLocked
+      ? "S3a_ORACLE_TEST_GEN"
+      : "S0_RECON";
+  const targetState = options.targetState || defaultTarget;
+
+  if (!VALID_STATES.includes(targetState) || targetState === "ESCALATED" || targetState === "DONE") {
+    throw new Error(`Invalid resume target state: ${targetState}`);
+  }
+
+  const postContractStates = new Set([
+    "S3a_ORACLE_TEST_GEN",
+    "S3b_IMPL_WORKFLOW",
+    "S4_LOCAL_CODEX_REVIEW",
+    "S5_PR_CI_HEAL_LOOP",
+    "S6_AUTO_MERGE_AND_DEPLOY",
+    "S7_POST_DEPLOY_VERIFY",
+    "S8_HARNESS_LEARN",
+  ]);
+  if (postContractStates.has(targetState) && !state.contractLocked) {
+    throw new Error(`Precondition failed: cannot resume to ${targetState} before contractLocked=true (approve S2_CONTRACT_LOCK first).`);
+  }
+
+  const postOracleLockStates = new Set([
+    "S3b_IMPL_WORKFLOW",
+    "S4_LOCAL_CODEX_REVIEW",
+    "S5_PR_CI_HEAL_LOOP",
+    "S6_AUTO_MERGE_AND_DEPLOY",
+    "S7_POST_DEPLOY_VERIFY",
+    "S8_HARNESS_LEARN",
+  ]);
+  if (postOracleLockStates.has(targetState) && !state.oracleLocked) {
+    throw new Error(`Precondition failed: cannot resume to ${targetState} before oracleLocked=true (lock oracle tests first).`);
+  }
+
+  const postPrGateStates = new Set([
+    "S6_AUTO_MERGE_AND_DEPLOY",
+    "S7_POST_DEPLOY_VERIFY",
+    "S8_HARNESS_LEARN",
+  ]);
+  if (postPrGateStates.has(targetState)) {
+    if (state.ciStatus !== "passed") {
+      throw new Error(`Precondition failed: cannot resume to ${targetState} until ciStatus is passed.`);
+    }
+    if (state.codexStatus !== "passed") {
+      throw new Error(`Precondition failed: cannot resume to ${targetState} until codexStatus is passed.`);
+    }
+  }
+
+  let bucketsToReset = [];
+  if (options.resetRetries !== undefined && options.resetRetries !== null) {
+    if (options.resetRetries === "all") {
+      bucketsToReset = [...VALID_RETRY_BUCKETS];
+    } else if (Array.isArray(options.resetRetries)) {
+      const normalized = options.resetRetries.map((b) => String(b).trim()).filter(Boolean);
+      if (normalized.length === 1 && normalized[0] === "all") {
+        bucketsToReset = [...VALID_RETRY_BUCKETS];
+      } else {
+        bucketsToReset = normalized;
+      }
+    } else if (typeof options.resetRetries === "string") {
+      const trimmed = options.resetRetries.trim();
+      if (trimmed === "all") {
+        bucketsToReset = [...VALID_RETRY_BUCKETS];
+      } else if (trimmed !== "") {
+        bucketsToReset = trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+      }
+    } else {
+      throw new Error("Invalid resetRetries option: expected 'all' or array of retry buckets (impl, codex, ci).");
+    }
+
+    for (const bucket of bucketsToReset) {
+      if (!VALID_RETRY_BUCKETS.includes(bucket)) {
+        throw new Error(`Unknown retry bucket '${bucket}'. Use impl | codex | ci | all.`);
+      }
+    }
+  }
+
+  if (bucketsToReset.length > 0) {
+    if (!state.retries || typeof state.retries !== "object") {
+      state.retries = { impl: 0, codex: 0, ci: 0 };
+    }
+    for (const bucket of bucketsToReset) {
+      state.retries[bucket] = 0;
+    }
+  }
+
+  state.currentState = targetState;
+  state.escalationReason = null;
+  state.stallsInState = 0;
+  state.gate = (targetState === "S1_AUTO_GRILL" || targetState === "S2_CONTRACT_LOCK")
+    ? "WAITING_HUMAN"
+    : "AUTO_PROCEED";
+  return saveState(statePath, state);
+}
+
 export function recordFinding(statePath, patternId, detail) {
   const state = loadState(statePath);
   if (!state) throw new Error("No active /ship state found.");
@@ -395,13 +501,40 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         console.log(JSON.stringify(state, null, 2));
         break;
       }
+      case "resume": {
+        let targetState;
+        let resetRetries;
+        for (let i = 0; i < rest.length; i++) {
+          const arg = rest[i];
+          if (arg === "--reset-retries") {
+            if (i + 1 >= rest.length || rest[i + 1].startsWith("--")) {
+              throw new Error("Missing value for --reset-retries (use impl,codex,ci or all).");
+            }
+            const raw = rest[++i].trim();
+            resetRetries = raw === "all" ? "all" : raw.split(",").map((s) => s.trim()).filter(Boolean);
+          } else if (arg.startsWith("--reset-retries=")) {
+            const raw = arg.slice("--reset-retries=".length).trim();
+            if (!raw) throw new Error("Missing value for --reset-retries (use impl,codex,ci or all).");
+            resetRetries = raw === "all" ? "all" : raw.split(",").map((s) => s.trim()).filter(Boolean);
+          } else if (arg.startsWith("--")) {
+            throw new Error(`Unknown flag for resume: ${arg}`);
+          } else if (!targetState) {
+            targetState = arg;
+          } else {
+            throw new Error(`Unexpected extra argument for resume: ${arg}`);
+          }
+        }
+        const state = resumeRun(statePath, { targetState, resetRetries });
+        console.log(JSON.stringify(state, null, 2));
+        break;
+      }
       case "reset": {
         if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
         console.log(JSON.stringify({ reset: true, statePath }));
         break;
       }
       default:
-        console.error("Usage: state.mjs <status|init|set-gate|record-grill|approve-contract|lock-oracle|transition|record-retry|record-finding|escalate|reset>");
+        console.error("Usage: state.mjs <status|init|set-gate|record-grill|approve-contract|lock-oracle|transition|record-retry|record-finding|escalate|resume|reset>");
         process.exit(1);
     }
   } catch (err) {

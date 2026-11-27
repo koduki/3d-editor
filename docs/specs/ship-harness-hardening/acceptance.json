@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "feature": "ship-harness-hardening",
+  "specPath": "docs/specs/ship-harness-hardening/spec.md",
+  "deployTarget": "merge-only",
+  "criteria": [
+    {
+      "id": "AC-1",
+      "title": "ship-reviewer.md exists as a valid Guard-11 read-only pro subagent, registered in ship.config.json with implementerTiers and microFixMaxLines",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-2",
+      "title": "wait-pr-gates.mjs parses nested and flat codex-review-state:v1 metadata, respects updatedAt and headRefOid, and never marks running or eyes-only state as clean",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-3",
+      "title": "wait-pr-gates.mjs grants +300s running grace period (capped at 900s) when Codex is running/eyes and completes clean when updated to completed",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-4",
+      "title": "wait-pr-gates.mjs runGhWithRetry retries transient 5xx/network errors with exponential backoff up to 4 times and fails fast on 4xx client errors",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-5",
+      "title": "wait-pr-gates.mjs deduplicates @codex review across invocations via fresh PR comments and emits periodic heartbeat to stderr without polluting stdout JSON",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-6",
+      "title": "ci-log-compressor.mjs classifies Gradle unit test failures containing benign libproot.so lines as gradle_test while still classifying real 16KB alignment failures as apk_elf_alignment",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-7",
+      "title": "state.mjs resumeRun and CLI resume cleanly from ESCALATED, clear escalationReason, enforce lock preconditions, and selectively reset retry buckets",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-8",
+      "title": "check-staged-boundaries.mjs and .githooks/pre-commit enforce secondary boundary locks (always block secrets, allow initial A oracle addition, block M/D oracle edits when locked, block unapproved protected edits)",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    },
+    {
+      "id": "AC-9",
+      "title": "Agent prompts, kotlin-android-host.md rule, SKILL.md, and AGENTS.md (<= 90 lines) document oracle harness pitfalls, concurrency/lifecycle checklist, ship-reviewer, tiered routing, micro-fix policy, and resume",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/ship-harness-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true
+    }
+  ]
+}

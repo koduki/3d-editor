@@ -61,6 +61,7 @@ const READ_ONLY_SUBAGENTS = new Set([
   "ship-recon",
   "ship-architect",
   "ship-verifier",
+  "ship-reviewer",
 ]);
 
 const ALLOWED_SUBAGENT_MODELS = new Set(["inherit", "flash", "pro"]);
@@ -316,7 +317,7 @@ export function runGuards(repoRoot, options = {}) {
               rel,
               toolEntry.line,
               `Read-only subagent '${expectedName}' must not be granted write tool '${toolEntry.value}'`,
-              "Remove all file-write tools from read-only subagents (ship-recon, ship-architect, ship-verifier).",
+              "Remove all file-write tools from read-only subagents (ship-recon, ship-architect, ship-verifier, ship-reviewer).",
             );
           }
         }

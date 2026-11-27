@@ -18,7 +18,7 @@ const ERROR_LINE_RE = /(GUARD FAILED|FAIL:|ERROR:|::error::|FAILURE:|Execution f
 
 const CATEGORIES = [
   { id: "guard_violation", re: /GUARD FAILED|\[no-lint-or-type-bypass\]|\[no-test-skip-or-ignore\]|\[workspace-trust-and-acp-scope\]|\[extension-module-boundary\]/i },
-  { id: "apk_elf_alignment", re: /16KB LOAD alignment|LOAD offset=|libproot\.so|has no LOAD segments/i },
+  { id: "apk_elf_alignment", re: /16KB LOAD alignment|LOAD offset=|not 16KB[- ]aligned|ELF alignment (?:check )?failed|has no LOAD segments|libproot(?:-loader)?\.so[^\n]*(?:not 16KB|align|FAILED|error|missing|invalid)/i },
   { id: "runtime_asset_lock", re: /runtime-assets\.py|sha256|size mismatch|unknown lock entry/i },
   { id: "openvscode_smoke", re: /OpenVSCode Server smoke test failed|remoteagent\.log/i },
   { id: "gradle_compile", re: /compile\w*Kotlin|e:\s+file:\/\/|Unresolved reference|Compilation error/i },
@@ -27,6 +27,15 @@ const CATEGORIES = [
   { id: "python_test", re: /test_runtime_assets\.py|Traceback \(most recent call last\)/i },
 ];
 
+function classifyLines(lines) {
+  for (const c of CATEGORIES) {
+    if (lines.some((line) => c.re.test(line))) {
+      return c.id;
+    }
+  }
+  return "unknown";
+}
+
 export function compressCiLog(rawText, options = {}) {
   const { maxSnippets = 45, maxTailLines = 25, maxChars = 6000 } = options;
   const cleaned = rawText
@@ -34,14 +43,6 @@ export function compressCiLog(rawText, options = {}) {
     .split(/\r?\n/)
     .map((line) => line.replace(GHA_TS_RE, "").trimEnd())
     .filter((line) => line.length > 0 && !NOISE_LINE_RE.test(line));
-
-  let category = "unknown";
-  for (const c of CATEGORIES) {
-    if (cleaned.some((line) => c.re.test(line))) {
-      category = c.id;
-      break;
-    }
-  }
 
   const matchedIndexes = new Set();
   for (let i = 0; i < cleaned.length; i++) {
@@ -66,6 +67,12 @@ export function compressCiLog(rawText, options = {}) {
   }
 
   const tailLines = cleaned.slice(-maxTailLines);
+
+  // Two-phase classification: prioritize focused error & tail lines, fall back to full cleaned log only if unknown.
+  let category = classifyLines([...deduped, ...tailLines]);
+  if (category === "unknown") {
+    category = classifyLines(cleaned);
+  }
 
   // Extract candidate repository file paths mentioned in error lines.
   const fileSet = new Set();
