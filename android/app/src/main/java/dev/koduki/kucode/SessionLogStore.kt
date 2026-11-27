@@ -200,6 +200,7 @@ class SessionLogStore(
         val serverAlive: Boolean = false,
         val activeView: String = "BOOT",
         val windowFocus: Boolean = true,
+        val captureDurationMs: Long = -1L,
     ) {
         fun toJsonObject(computedOffsetMs: Long = offsetMs): JSONObject = JSONObject()
             .put("tsMs", timestampMs)
@@ -225,6 +226,7 @@ class SessionLogStore(
             .put("serverAlive", serverAlive)
             .put("activeView", activeView)
             .put("windowFocus", windowFocus)
+            .put("captureDurationMs", captureDurationMs)
 
         companion object {
             fun fromJsonObject(obj: JSONObject): MetricSnapshot = MetricSnapshot(
@@ -253,6 +255,11 @@ class SessionLogStore(
                 serverAlive = obj.optBoolean("serverAlive", false),
                 activeView = obj.optString("activeView", "BOOT"),
                 windowFocus = obj.optBoolean("windowFocus", true),
+                captureDurationMs = if (!obj.has("captureDurationMs") || obj.isNull("captureDurationMs")) {
+                    -1L
+                } else {
+                    obj.optLong("captureDurationMs", -1L)
+                },
             )
         }
     }
@@ -1555,6 +1562,7 @@ class SessionLogStore(
                 "(Duration: `${formatDurationHuman(summary.durationMs)}`)",
         )
         sb.appendLine("- Process PID: `${summary.pid}` | App: `${summary.packageName} ${summary.appVersion}`")
+        sb.appendLine("- Build SHA: `${summary.buildSha}`")
         sb.appendLine("- Device: `${summary.deviceSummary}` | Android: `${summary.androidSummary}` | PageSize: `${summary.pageSize}`")
         sb.appendLine("- WebView: `${summary.webviewVersion}` | XR Spatial: `${summary.xrSpatialSupported}`")
         sb.appendLine(
@@ -1625,6 +1633,15 @@ class SessionLogStore(
                 val viewFocus = "${m.runtimeState}/${m.activeView}/focus=${m.windowFocus}/srv=${m.serverAlive}"
                 sb.appendLine(
                     "| +${formatOffset(m.offsetMs)} | `${m.trigger}` | $ram | $pss | $cpu | $jvm | $nat | $fds | $thr | $disk | ${m.thermalStatus} | $bat | ${m.networkSummary} | `$viewFocus` |",
+                )
+            }
+            val captureSamples = metrics.filter { it.captureDurationMs >= 0L }
+            if (captureSamples.isNotEmpty()) {
+                val lastMs = captureSamples.last().captureDurationMs
+                val maxMs = captureSamples.maxOf { it.captureDurationMs }
+                val avgMs = captureSamples.sumOf { it.captureDurationMs } / captureSamples.size
+                sb.appendLine(
+                    "- Telemetry Capture Overhead: `last=${lastMs}ms, avg=${avgMs}ms, max=${maxMs}ms, samples=${captureSamples.size}`",
                 )
             }
         }

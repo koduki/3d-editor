@@ -41,6 +41,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Process-wide Android flight recorder coordinating [SessionLogStore] across:
@@ -54,6 +55,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Android's main UI thread never blocks on disk I/O or lock contention.
  */
 class SessionTelemetryManager private constructor(private val appContext: Context) {
+
+    data class TelemetryOverheadStats(
+        val sampleCount: Long,
+        val lastCaptureDurationMs: Long,
+        val maxCaptureDurationMs: Long,
+        val totalCaptureDurationMs: Long,
+    )
 
     private val diagnosticsDir = File(appContext.filesDir, "diagnostics")
     private val vscodeDataDir = File(appContext.filesDir, "runtime/vscode-data")
@@ -80,6 +88,14 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
     private val handlingCrash = AtomicBoolean(false)
     private val initialReconcileStarted = AtomicBoolean(false)
     private val initialReconcileLatch = CountDownLatch(1)
+    private val telemetryOverheadRef = AtomicReference(
+        TelemetryOverheadStats(
+            sampleCount = 0L,
+            lastCaptureDurationMs = -1L,
+            maxCaptureDurationMs = -1L,
+            totalCaptureDurationMs = 0L,
+        ),
+    )
 
     private val sessionLifecycleLock = Any()
     private val logcatLock = Any()
@@ -112,6 +128,8 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
     private var lastWindowFocus: Boolean = true
 
     fun diagnosticsRootDirectory(): File = diagnosticsDir
+
+    fun getTelemetryOverheadStats(): TelemetryOverheadStats = telemetryOverheadRef.get()
 
     fun bindRuntimeProviders(
         isServerAlive: () -> Boolean,
@@ -822,7 +840,24 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
         }
     }
 
+    private fun recordTelemetryCaptureDuration(durationMs: Long) {
+        val safeDurationMs = durationMs.coerceAtLeast(0L)
+        telemetryOverheadRef.updateAndGet { prev ->
+            TelemetryOverheadStats(
+                sampleCount = prev.sampleCount + 1L,
+                lastCaptureDurationMs = safeDurationMs,
+                maxCaptureDurationMs = if (prev.maxCaptureDurationMs < 0L) {
+                    safeDurationMs
+                } else {
+                    maxOf(prev.maxCaptureDurationMs, safeDurationMs)
+                },
+                totalCaptureDurationMs = prev.totalCaptureDurationMs + safeDurationMs,
+            )
+        }
+    }
+
     private fun buildMetricSnapshot(trigger: String, includePss: Boolean): SessionLogStore.MetricSnapshot {
+        val captureStartNs = System.nanoTime()
         val now = System.currentTimeMillis()
         val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         val memInfo = ActivityManager.MemoryInfo()
@@ -852,6 +887,8 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
         val powerSave = runCatching { pm?.isPowerSaveMode ?: false }.getOrDefault(false)
 
         val (batPct, charging) = queryBatteryStatus(appContext)
+        val captureDurationMs = ((System.nanoTime() - captureStartNs) / 1_000_000L).coerceAtLeast(0L)
+        recordTelemetryCaptureDuration(captureDurationMs)
 
         return SessionLogStore.MetricSnapshot(
             timestampMs = now,
@@ -876,6 +913,7 @@ class SessionTelemetryManager private constructor(private val appContext: Contex
             serverAlive = runCatching { serverAliveProvider() }.getOrDefault(false),
             activeView = lastActiveView,
             windowFocus = lastWindowFocus,
+            captureDurationMs = captureDurationMs,
         )
     }
 

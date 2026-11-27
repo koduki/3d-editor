@@ -7,6 +7,7 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Persistent Debian seed plus separately managed OpenVSCode installation.
@@ -34,10 +35,29 @@ internal class RuntimeInstaller(
     },
     private val onProgress: (message: String, progress: Int) -> Unit = { _, _ -> },
     private val onLog: (String) -> Unit = {},
+    private val usableSpaceBytes: (File) -> Long = { it.usableSpace },
+    private val minRootfsFreeBytes: Long = DEFAULT_MIN_ROOTFS_FREE_BYTES,
+    private val minOpenvscodeFreeBytes: Long = DEFAULT_MIN_OPENVSCODE_FREE_BYTES,
+    private val maxDebianBackups: Int = DEFAULT_MAX_DEBIAN_BACKUPS,
 ) {
+    class InsufficientStorageException(
+        val requiredBytes: Long,
+        val availableBytes: Long,
+        val target: String,
+    ) : IOException(
+        "Insufficient storage for $target: required=${requiredBytes}B, available=${availableBytes}B",
+    )
+
     enum class ExtractOutcome {
         ALREADY_INSTALLED,
         STAGED_NEW_INSTALL,
+    }
+
+    companion object {
+        const val DEFAULT_MIN_ROOTFS_FREE_BYTES = 512L * 1024L * 1024L
+        const val DEFAULT_MIN_OPENVSCODE_FREE_BYTES = 512L * 1024L * 1024L
+        const val DEFAULT_MAX_DEBIAN_BACKUPS = 3
+        private val BACKUP_SEQ = AtomicLong(0L)
     }
 
     fun readInstalledVersion(paths: PosixRuntimeConfig.Paths): String? {
@@ -52,6 +72,18 @@ internal class RuntimeInstaller(
     private fun readManagedVersion(paths: PosixRuntimeConfig.Paths): String? =
         paths.openvscodeVersionMarker.takeIf { Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS) }
             ?.let { runCatching { it.readText(Charsets.UTF_8).trim() }.getOrNull() }
+
+    private fun checkFreeSpace(targetDir: File, requiredBytes: Long, target: String) {
+        if (requiredBytes <= 0L) return
+        val availableBytes = usableSpaceBytes(targetDir)
+        if (availableBytes < requiredBytes) {
+            throw InsufficientStorageException(
+                requiredBytes = requiredBytes,
+                availableBytes = availableBytes,
+                target = target,
+            )
+        }
+    }
 
     fun recoverInterruptedInstall(paths: PosixRuntimeConfig.Paths) {
         // Old versions swapped the entire rootfs. Preserve both trees if the
@@ -85,6 +117,7 @@ internal class RuntimeInstaller(
         paths.runtimeRoot.mkdirs()
         recoverInterruptedInstall(paths)
         if (!exists(paths.rootfsDir)) {
+            checkFreeSpace(paths.runtimeRoot, minRootfsFreeBytes, "rootfs")
             onProgress("初回セットアップ: Debian minimal rootfs を展開中...", 10)
             deleteTreeNoFollow(paths.stagingDir)
             Files.createDirectory(paths.stagingDir.toPath())
@@ -124,6 +157,7 @@ internal class RuntimeInstaller(
             return ExtractOutcome.ALREADY_INSTALLED
         }
 
+        checkFreeSpace(paths.runtimeRoot, minOpenvscodeFreeBytes, "openvscode")
         onProgress("openvscode-server を展開中...", 50)
         deleteTreeNoFollow(paths.openvscodeStagingDir)
         Files.createDirectory(paths.openvscodeStagingDir.toPath())
@@ -161,21 +195,76 @@ internal class RuntimeInstaller(
         return true
     }
 
+    fun pruneOldDebianBackups(
+        paths: PosixRuntimeConfig.Paths,
+        keepCount: Int = maxDebianBackups,
+        preserveDir: File? = null,
+    ): List<File> {
+        val preservePath = preserveDir?.toPath()?.toAbsolutePath()?.normalize()
+        val backups = paths.runtimeRoot.listFiles()
+            ?.filter {
+                it.name.startsWith("rootfs-backup-") &&
+                    Files.isDirectory(it.toPath(), LinkOption.NOFOLLOW_LINKS)
+            }
+            ?.sortedWith(
+                compareByDescending<File> { it.lastModified() }
+                    .thenByDescending { it.name },
+            )
+            .orEmpty()
+        if (backups.isEmpty()) return emptyList()
+
+        val safeKeep = keepCount.coerceAtLeast(0)
+        val toKeep = linkedSetOf<File>()
+        if (preservePath != null) {
+            backups.firstOrNull { it.toPath().toAbsolutePath().normalize() == preservePath }
+                ?.let { toKeep.add(it) }
+        }
+        for (dir in backups) {
+            if (toKeep.size >= safeKeep) break
+            toKeep.add(dir)
+        }
+
+        val deleted = mutableListOf<File>()
+        for (dir in backups) {
+            if (dir !in toKeep) {
+                deleteTreeNoFollow(dir)
+                deleted.add(dir)
+            }
+        }
+        return deleted
+    }
+
     /**
      * Explicit reset never deletes the OS. Caller must stop the runtime and
      * obtain user confirmation; home and workspace remain separate.
      */
-    fun archiveDebianForReset(paths: PosixRuntimeConfig.Paths): File? {
+    fun archiveDebianForReset(
+        paths: PosixRuntimeConfig.Paths,
+        pruneBackups: Boolean = true,
+    ): File? {
         recoverInterruptedInstall(paths)
         if (!exists(paths.rootfsDir)) return null
-        val archive = Files.createTempDirectory(paths.runtimeRoot.toPath(), "rootfs-backup-").toFile()
-        Files.delete(archive.toPath())
+        paths.runtimeRoot.mkdirs()
+        val nowMs = System.currentTimeMillis()
+        var archive: File
+        do {
+            val seq = BACKUP_SEQ.incrementAndGet().toString().padStart(6, '0')
+            archive = File(paths.runtimeRoot, "rootfs-backup-$nowMs-$seq")
+        } while (exists(archive))
         moveDirectoryAtomically(paths.rootfsDir, archive)
-        runCatching { Files.setLastModifiedTime(archive.toPath(), java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis())) }
+        runCatching {
+            Files.setLastModifiedTime(
+                archive.toPath(),
+                java.nio.file.attribute.FileTime.fromMillis(nowMs),
+            )
+        }
         if (exists(paths.backupRootfsDir)) {
             val legacy = Files.createTempDirectory(paths.runtimeRoot.toPath(), "rootfs-recovered-").toFile()
             Files.delete(legacy.toPath())
             moveDirectoryAtomically(paths.backupRootfsDir, legacy)
+        }
+        if (pruneBackups) {
+            pruneOldDebianBackups(paths, keepCount = maxDebianBackups, preserveDir = archive)
         }
         return archive
     }
@@ -188,13 +277,17 @@ internal class RuntimeInstaller(
             it.name.startsWith("rootfs-backup-") &&
                 Files.isDirectory(it.toPath(), LinkOption.NOFOLLOW_LINKS) &&
                 File(it, "bin/bash").isFile
-        }?.maxByOrNull { it.lastModified() }
+        }?.maxWithOrNull(
+            compareBy<File> { it.lastModified() }
+                .thenBy { it.name },
+        )
 
     fun restoreLatestDebianBackup(paths: PosixRuntimeConfig.Paths): File? {
         val selected = findLatestDebianBackup(paths) ?: return null
-        // Archive the current tree as well. Recovery never removes either OS.
-        archiveDebianForReset(paths)
+        // Archive the current tree without premature pruning before restoring.
+        val archivedCurrent = archiveDebianForReset(paths, pruneBackups = false)
         moveDirectoryAtomically(selected, paths.rootfsDir)
+        pruneOldDebianBackups(paths, keepCount = maxDebianBackups, preserveDir = archivedCurrent)
         return selected
     }
 

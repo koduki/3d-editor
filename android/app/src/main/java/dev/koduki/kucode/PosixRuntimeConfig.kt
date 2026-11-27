@@ -3,6 +3,7 @@ package dev.koduki.kucode
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
 
 /**
  * Pure-JVM configuration builder for PRoot + Debian minimal + embedded openvscode-server.
@@ -180,6 +181,57 @@ object PosixRuntimeConfig {
         return cmd
     }
 
+    private fun isConfinedJavaHome(baseDir: File, candidate: File): Boolean {
+        if (!baseDir.isDirectory) return false
+        val baseReal = runCatching { baseDir.toPath().toRealPath() }.getOrNull() ?: return false
+        val candidateReal = runCatching { candidate.toPath().toRealPath() }.getOrNull() ?: return false
+        if (!candidateReal.startsWith(baseReal)) return false
+        if (!Files.isDirectory(candidateReal)) return false
+        val javaBinReal = runCatching { candidateReal.resolve("bin").resolve("java").toRealPath() }.getOrNull()
+            ?: return false
+        if (!javaBinReal.startsWith(baseReal)) return false
+        return Files.isRegularFile(javaBinReal)
+    }
+
+    private fun normalizeValidPosixDir(raw: String?): String? {
+        val trimmed = raw?.trim()?.trimEnd('/') ?: return null
+        if (trimmed.isEmpty() || !trimmed.startsWith("/")) return null
+        if ('\u0000' in trimmed || '\n' in trimmed || '\r' in trimmed || ':' in trimmed) return null
+        if (trimmed.split('/').any { it == ".." }) return null
+        return trimmed
+    }
+
+    /**
+     * Detects an installed JDK inside the Debian rootfs or persistent mise store while
+     * enforcing symlink confinement within [Paths.rootfsDir] or [Paths.homeDir].
+     */
+    fun detectGuestJavaHome(paths: Paths): String? {
+        val jvmRoot = File(paths.rootfsDir, "usr/lib/jvm")
+        val defaultJava = File(jvmRoot, "default-java")
+        if (isConfinedJavaHome(paths.rootfsDir, defaultJava)) {
+            return "/usr/lib/jvm/default-java"
+        }
+        val rootfsJvms = jvmRoot.listFiles()
+            ?.filter { it.name != "default-java" }
+            ?.sortedByDescending { it.name }
+            .orEmpty()
+        for (candidate in rootfsJvms) {
+            if (isConfinedJavaHome(paths.rootfsDir, candidate)) {
+                return "/usr/lib/jvm/${candidate.name}"
+            }
+        }
+        val miseJavaRoot = File(paths.homeDir, ".local/share/mise/installs/java")
+        val miseJvms = miseJavaRoot.listFiles()
+            ?.sortedByDescending { it.name }
+            .orEmpty()
+        for (candidate in miseJvms) {
+            if (isConfinedJavaHome(paths.homeDir, candidate)) {
+                return "$GUEST_HOME/.local/share/mise/installs/java/${candidate.name}"
+            }
+        }
+        return null
+    }
+
     fun buildProotEnvironment(
         paths: Paths,
         disableSeccomp: Boolean = false,
@@ -187,7 +239,25 @@ object PosixRuntimeConfig {
         adminToken: String = "",
         includeNodeExtraCaCerts: Boolean = paths.androidUserCaBundleFile.isFile,
         traceparent: String = "",
+        javaHome: String? = detectGuestJavaHome(paths),
     ): Map<String, String> {
+        val validJavaHome = normalizeValidPosixDir(javaHome)
+        val userPathEntries = listOfNotNull(
+            "$GUEST_HOME/.local/bin",
+            "$GUEST_HOME/.local/share/mise/shims",
+            "$GUEST_HOME/.cargo/bin",
+            "$GUEST_SDK/cmdline-tools/latest/bin",
+            "$GUEST_SDK/platform-tools",
+            validJavaHome?.let { "$it/bin" },
+        )
+        val systemPathEntries = listOf(
+            "/usr/local/sbin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+        )
         val env = linkedMapOf(
             "PROOT_LOADER" to paths.prootLoader.absolutePath,
             "PROOT_TMP_DIR" to paths.tmpDir.absolutePath,
@@ -198,7 +268,7 @@ object PosixRuntimeConfig {
             "COLORTERM" to "truecolor",
             "LANG" to "C.UTF-8",
             "LC_ALL" to "C.UTF-8",
-            "PATH" to "$GUEST_HOME/.local/bin:$GUEST_HOME/.local/share/mise/shims:$GUEST_HOME/.cargo/bin:$GUEST_SDK/cmdline-tools/latest/bin:$GUEST_SDK/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH" to (userPathEntries + systemPathEntries).joinToString(":"),
             "ANDROID_HOME" to GUEST_SDK,
             "ANDROID_SDK_ROOT" to GUEST_SDK,
             "XDG_CACHE_HOME" to "$GUEST_HOME/.cache",
@@ -212,6 +282,9 @@ object PosixRuntimeConfig {
             "REQUESTS_CA_BUNDLE" to GUEST_CA_BUNDLE,
             "PIP_CERT" to GUEST_CA_BUNDLE,
         )
+        if (validJavaHome != null) {
+            env["JAVA_HOME"] = validJavaHome
+        }
         if (includeNodeExtraCaCerts) {
             env["NODE_EXTRA_CA_CERTS"] = GUEST_ANDROID_USER_CA_BUNDLE
         }
@@ -899,27 +972,42 @@ object PosixRuntimeConfig {
         export XDG_CACHE_HOME="${'$'}{XDG_CACHE_HOME:-${'$'}HOME/.cache}"
         export XDG_CONFIG_HOME="${'$'}{XDG_CONFIG_HOME:-${'$'}HOME/.config}"
         export XDG_DATA_HOME="${'$'}{XDG_DATA_HOME:-${'$'}HOME/.local/share}"
+        if [ -z "${'$'}{JAVA_HOME:-}" ]; then
+          if [ -x /usr/lib/jvm/default-java/bin/java ]; then
+            export JAVA_HOME="/usr/lib/jvm/default-java"
+          else
+            for kucode_jdk in /usr/lib/jvm/* "${'$'}XDG_DATA_HOME/mise/installs/java"/*; do
+              if [ -d "${'$'}kucode_jdk" ] && [ -x "${'$'}kucode_jdk/bin/java" ]; then
+                export JAVA_HOME="${'$'}kucode_jdk"
+                break
+              fi
+            done
+            if [ -z "${'$'}{JAVA_HOME:-}" ]; then
+              kucode_java="${'$'}(command -v javac 2>/dev/null || command -v java 2>/dev/null || true)"
+              if [ -n "${'$'}kucode_java" ] && command -v readlink >/dev/null 2>&1; then
+                kucode_real="${'$'}(readlink -f "${'$'}kucode_java" 2>/dev/null || true)"
+                kucode_jdk="${'$'}(dirname "${'$'}(dirname "${'$'}kucode_real")" 2>/dev/null || true)"
+                if [ -n "${'$'}kucode_jdk" ] && [ -f "${'$'}kucode_jdk/release" ] && [ -x "${'$'}kucode_jdk/bin/java" ]; then
+                  export JAVA_HOME="${'$'}kucode_jdk"
+                fi
+              fi
+              unset kucode_java kucode_real
+            fi
+            unset kucode_jdk
+          fi
+        fi
+        if [ -n "${'$'}{JAVA_HOME:-}" ] && [ -d "${'$'}JAVA_HOME/bin" ]; then
+          case ":${'$'}PATH:" in
+            *":${'$'}JAVA_HOME/bin:"*) ;;
+            *) export PATH="${'$'}JAVA_HOME/bin:${'$'}PATH" ;;
+          esac
+        fi
         for kucode_dir in "${'$'}ANDROID_HOME/platform-tools" "${'$'}ANDROID_HOME/cmdline-tools/latest/bin" "${'$'}HOME/.cargo/bin" "${'$'}XDG_DATA_HOME/mise/shims" "${'$'}HOME/.local/bin"; do
           case ":${'$'}PATH:" in
             *":${'$'}kucode_dir:"*) ;;
             *) export PATH="${'$'}kucode_dir:${'$'}PATH" ;;
           esac
         done
-        if [ -z "${'$'}{JAVA_HOME:-}" ]; then
-          if [ -f /usr/lib/jvm/default-java/release ] && [ -x /usr/lib/jvm/default-java/bin/java ]; then
-            export JAVA_HOME="/usr/lib/jvm/default-java"
-          else
-            kucode_java="${'$'}(command -v javac 2>/dev/null || command -v java 2>/dev/null || true)"
-            if [ -n "${'$'}kucode_java" ] && command -v readlink >/dev/null 2>&1; then
-              kucode_real="${'$'}(readlink -f "${'$'}kucode_java" 2>/dev/null || true)"
-              kucode_jdk="${'$'}(dirname "${'$'}(dirname "${'$'}kucode_real")" 2>/dev/null || true)"
-              if [ -n "${'$'}kucode_jdk" ] && [ -f "${'$'}kucode_jdk/release" ] && [ -x "${'$'}kucode_jdk/bin/java" ]; then
-                export JAVA_HOME="${'$'}kucode_jdk"
-              fi
-            fi
-            unset kucode_java kucode_real kucode_jdk
-          fi
-        fi
         unset kucode_dir
     """.trimIndent() + "\n"
 

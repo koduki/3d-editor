@@ -6,12 +6,14 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.LinkOption
 
 class RuntimeInstallerTest {
 
@@ -265,6 +267,158 @@ class RuntimeInstallerTest {
             val secretPerms = Files.getPosixFilePermissions(secret.toPath())
             assertFalse(java.nio.file.attribute.PosixFilePermission.GROUP_READ in secretPerms)
             assertFalse(java.nio.file.attribute.PosixFilePermission.OTHERS_READ in secretPerms)
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    fun ensureExtracted_preflightThrowsInsufficientStorageWithoutCreatingStagingOrMutatingExisting() {
+        val base = Files.createTempDirectory("xr-preflight-test").toFile()
+        try {
+            val paths = testPaths(base)
+            val v1Assets = fakeAssets("v1")
+
+            val lowRootfs = RuntimeInstaller(
+                openAsset = { ByteArrayInputStream(v1Assets.getValue(it)) },
+                expectedVersion = "v1",
+                usableSpaceBytes = { 128L * 1024L * 1024L },
+                minRootfsFreeBytes = 512L * 1024L * 1024L,
+                minOpenvscodeFreeBytes = 256L * 1024L * 1024L,
+            )
+            val rootfsErr = assertThrows(RuntimeInstaller.InsufficientStorageException::class.java) {
+                lowRootfs.ensureExtracted(paths)
+            }
+            assertEquals("rootfs", rootfsErr.target)
+            assertEquals(512L * 1024L * 1024L, rootfsErr.requiredBytes)
+            assertEquals(128L * 1024L * 1024L, rootfsErr.availableBytes)
+            assertFalse(paths.rootfsDir.exists())
+            assertFalse(paths.stagingDir.exists())
+            assertFalse(paths.openvscodeStagingDir.exists())
+
+            val okInstaller = RuntimeInstaller(
+                openAsset = { ByteArrayInputStream(v1Assets.getValue(it)) },
+                expectedVersion = "v1",
+                usableSpaceBytes = { 2L * 1024L * 1024L * 1024L },
+            )
+            assertEquals(RuntimeInstaller.ExtractOutcome.STAGED_NEW_INSTALL, okInstaller.ensureExtracted(paths))
+            okInstaller.commitInstallation(paths)
+
+            val rootfsSentinel = File(paths.rootfsDir, "etc/keep-rootfs").apply { parentFile.mkdirs(); writeText("keep-r") }
+            val homeSentinel = File(paths.homeDir, ".ssh/keep").apply { parentFile.mkdirs(); writeText("keep-h") }
+            val wsSentinel = File(paths.workspaceDir, "keep.txt").apply { parentFile.mkdirs(); writeText("keep-w") }
+
+            val v2Assets = fakeAssets("v2")
+            val lowServer = RuntimeInstaller(
+                openAsset = { ByteArrayInputStream(v2Assets.getValue(it)) },
+                expectedVersion = "v2",
+                usableSpaceBytes = { 100L * 1024L * 1024L },
+                minRootfsFreeBytes = 512L * 1024L * 1024L,
+                minOpenvscodeFreeBytes = 256L * 1024L * 1024L,
+            )
+            val serverErr = assertThrows(RuntimeInstaller.InsufficientStorageException::class.java) {
+                lowServer.ensureExtracted(paths)
+            }
+            assertEquals("openvscode", serverErr.target)
+            assertEquals(256L * 1024L * 1024L, serverErr.requiredBytes)
+            assertEquals(100L * 1024L * 1024L, serverErr.availableBytes)
+            assertFalse(paths.openvscodeStagingDir.exists())
+            assertEquals("v1", paths.openvscodeVersionMarker.readText())
+            assertEquals("keep-r", rootfsSentinel.readText())
+            assertEquals("keep-h", homeSentinel.readText())
+            assertEquals("keep-w", wsSentinel.readText())
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    fun pruneOldDebianBackups_sortsByMtimeThenNameAndDeletesNoFollow() {
+        val base = Files.createTempDirectory("xr-prune-test").toFile()
+        try {
+            val paths = testPaths(base)
+            paths.runtimeRoot.mkdirs()
+            val homeKeep = File(paths.homeDir, "note.txt").apply { parentFile.mkdirs(); writeText("home") }
+            val wsKeep = File(paths.workspaceDir, "code.kt").apply { parentFile.mkdirs(); writeText("ws") }
+            val outsideTarget = File(base, "outside-secret").apply { writeText("must-not-delete") }
+
+            // Same mtime -> tie-broken by name descending
+            val b1 = File(paths.runtimeRoot, "rootfs-backup-1000-000001").apply {
+                mkdirs()
+                File(this, "bin/bash").apply { parentFile.mkdirs(); writeText("#!/bin/sh\n") }
+                Files.createSymbolicLink(File(this, "escape-link").toPath(), outsideTarget.toPath())
+                setLastModified(1_700_000_000_000L)
+            }
+            val b2 = File(paths.runtimeRoot, "rootfs-backup-1000-000002").apply {
+                mkdirs()
+                File(this, "bin/bash").apply { parentFile.mkdirs(); writeText("#!/bin/sh\n") }
+                setLastModified(1_700_000_000_000L)
+            }
+            val b3 = File(paths.runtimeRoot, "rootfs-backup-2000-000003").apply {
+                mkdirs()
+                File(this, "bin/bash").apply { parentFile.mkdirs(); writeText("#!/bin/sh\n") }
+                setLastModified(1_700_000_010_000L)
+            }
+            val b4 = File(paths.runtimeRoot, "rootfs-backup-3000-000004").apply {
+                mkdirs()
+                File(this, "bin/bash").apply { parentFile.mkdirs(); writeText("#!/bin/sh\n") }
+                setLastModified(1_700_000_020_000L)
+            }
+
+            val installer = RuntimeInstaller(
+                openAsset = { throw AssertionError("unexpected asset") },
+                maxDebianBackups = 2,
+            )
+            val deleted = installer.pruneOldDebianBackups(paths, keepCount = 2, preserveDir = b1)
+            assertEquals(setOf(b2, b3), deleted.toSet())
+            assertTrue("preserveDir b1 must remain", Files.isDirectory(b1.toPath(), LinkOption.NOFOLLOW_LINKS))
+            assertTrue("newest b4 must remain", Files.isDirectory(b4.toPath(), LinkOption.NOFOLLOW_LINKS))
+            assertFalse(b2.exists())
+            assertFalse(b3.exists())
+            assertTrue("Symlink inside pruned backup must not delete external target", outsideTarget.isFile)
+            assertEquals("home", homeKeep.readText())
+            assertEquals("ws", wsKeep.readText())
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    fun archiveAndRestoreLatestDebianBackup_useMonotonicNamesAndBoundedRetention() {
+        val base = Files.createTempDirectory("xr-restore-retention").toFile()
+        try {
+            val paths = testPaths(base)
+            val installer = RuntimeInstaller(
+                openAsset = { throw AssertionError("unexpected asset") },
+                maxDebianBackups = 3,
+            )
+            val backups = mutableListOf<File>()
+            repeat(4) { i ->
+                File(paths.rootfsDir, "bin").mkdirs()
+                File(paths.rootfsDir, "bin/bash").writeText("#!/bin/sh\n")
+                File(paths.rootfsDir, "etc").mkdirs()
+                File(paths.rootfsDir, "etc/tag").writeText("b-$i")
+                val archived = installer.archiveDebianForReset(paths, pruneBackups = true)!!
+                assertTrue(archived.name.matches(Regex("rootfs-backup-\\d+-\\d+")))
+                archived.setLastModified(1_700_000_000_000L + i * 5_000L)
+                backups.add(archived)
+            }
+            assertFalse(backups[0].exists())
+            assertTrue(backups[1].exists())
+            assertTrue(backups[2].exists())
+            assertTrue(backups[3].exists())
+
+            File(paths.rootfsDir, "bin").mkdirs()
+            File(paths.rootfsDir, "bin/bash").writeText("#!/bin/sh\n")
+            File(paths.rootfsDir, "etc").mkdirs()
+            File(paths.rootfsDir, "etc/tag").writeText("active-before-restore")
+
+            val restored = installer.restoreLatestDebianBackup(paths)
+            assertEquals(backups[3], restored)
+            assertEquals("b-3", File(paths.rootfsDir, "etc/tag").readText())
+            val remaining = paths.runtimeRoot.listFiles()?.filter { it.name.startsWith("rootfs-backup-") }.orEmpty()
+            assertEquals(3, remaining.size)
+            assertTrue(remaining.any { File(it, "etc/tag").readText() == "active-before-restore" })
         } finally {
             deleteTreeNoFollow(base)
         }

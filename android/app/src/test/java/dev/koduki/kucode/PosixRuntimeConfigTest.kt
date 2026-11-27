@@ -8,6 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.nio.file.Files
 
 class PosixRuntimeConfigTest {
 
@@ -260,6 +261,88 @@ class PosixRuntimeConfigTest {
         assertTrue(profileD.contains(".local/bin"))
         val profile = PosixRuntimeConfig.buildDefaultProfile()
         assertTrue(profile.contains(".local/bin"))
+    }
+
+    @Test
+    fun detectGuestJavaHome_checksConfinementPriorityAndProfileDParity() {
+        val base = Files.createTempDirectory("posix-java-home").toFile()
+        try {
+            val paths = PosixRuntimeConfig.Paths(
+                runtimeRoot = File(base, "runtime"),
+                workspaceDir = File(base, "workspace"),
+                homeDir = File(base, "home"),
+                nativeLibDir = File(base, "native"),
+                androidSharedDir = File(base, "shared"),
+            )
+            paths.rootfsDir.mkdirs()
+            paths.homeDir.mkdirs()
+
+            assertNull(PosixRuntimeConfig.detectGuestJavaHome(paths))
+
+            val outsideJdk = File(base, "outside-jdk").apply {
+                File(this, "bin").mkdirs()
+                File(this, "bin/java").writeText("#!/bin/sh\n")
+            }
+            val jvmRoot = File(paths.rootfsDir, "usr/lib/jvm").apply { mkdirs() }
+            val defaultJavaLink = File(jvmRoot, "default-java").toPath()
+            Files.createSymbolicLink(defaultJavaLink, outsideJdk.toPath())
+            assertNull(PosixRuntimeConfig.detectGuestJavaHome(paths))
+
+            val miseJdk = File(paths.homeDir, ".local/share/mise/installs/java/21.0.5").apply {
+                File(this, "bin").mkdirs()
+                File(this, "bin/java").writeText("#!/bin/sh\n")
+            }
+            assertEquals("/root/.local/share/mise/installs/java/21.0.5", PosixRuntimeConfig.detectGuestJavaHome(paths))
+            assertTrue(miseJdk.isDirectory)
+
+            val rootfsJdk = File(jvmRoot, "java-17-openjdk-arm64").apply {
+                File(this, "bin").mkdirs()
+                File(this, "bin/java").writeText("#!/bin/sh\n")
+            }
+            assertEquals("/usr/lib/jvm/java-17-openjdk-arm64", PosixRuntimeConfig.detectGuestJavaHome(paths))
+
+            Files.delete(defaultJavaLink)
+            Files.createSymbolicLink(defaultJavaLink, rootfsJdk.toPath())
+            assertEquals("/usr/lib/jvm/default-java", PosixRuntimeConfig.detectGuestJavaHome(paths))
+
+            val env = PosixRuntimeConfig.buildProotEnvironment(paths, includeNodeExtraCaCerts = false)
+            assertEquals("/usr/lib/jvm/default-java", env["JAVA_HOME"])
+            assertEquals("/root/Android/Sdk", env["ANDROID_HOME"])
+            assertEquals("/root/Android/Sdk", env["ANDROID_SDK_ROOT"])
+            assertEquals("/root/.cache", env["XDG_CACHE_HOME"])
+            assertEquals("/root/.config", env["XDG_CONFIG_HOME"])
+            assertEquals("/root/.local/share", env["XDG_DATA_HOME"])
+
+            val parts = env.getValue("PATH").split(':')
+            val javaIdx = parts.indexOf("/usr/lib/jvm/default-java/bin")
+            val sdkIdx = parts.indexOf("/root/Android/Sdk/platform-tools")
+            val sbinIdx = parts.indexOf("/usr/local/sbin")
+            assertTrue(javaIdx > sdkIdx && sdkIdx >= 0)
+            assertTrue(javaIdx < sbinIdx)
+
+            val invalidEnv = PosixRuntimeConfig.buildProotEnvironment(
+                paths,
+                includeNodeExtraCaCerts = false,
+                javaHome = "relative/path",
+            )
+            assertFalse(invalidEnv.containsKey("JAVA_HOME"))
+
+            val profileD = PosixRuntimeConfig.buildProfileDEnvScript()
+            assertTrue(profileD.contains("ANDROID_HOME"))
+            assertTrue(profileD.contains("ANDROID_SDK_ROOT"))
+            assertTrue(profileD.contains("XDG_CACHE_HOME"))
+            assertTrue(profileD.contains("XDG_CONFIG_HOME"))
+            assertTrue(profileD.contains("XDG_DATA_HOME"))
+            assertTrue(profileD.contains("JAVA_HOME"))
+            assertTrue(profileD.contains("mise/installs/java"))
+
+            val proc = ProcessBuilder("bash", "-n").redirectErrorStream(true).start()
+            proc.outputStream.use { it.write(profileD.toByteArray(Charsets.UTF_8)) }
+            val out = proc.inputStream.bufferedReader().readText()
+            assertEquals("profile.d failed bash -n: $out", 0, proc.waitFor())
+        } finally {
+            deleteTreeNoFollow(base)
+        }
     }
 }
 

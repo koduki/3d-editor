@@ -249,4 +249,88 @@ class DiagnosticsRunnerTest {
             deleteTreeNoFollow(dir)
         }
     }
+
+    @Test
+    fun computeDirectorySizeBytes_sumsRegularFilesSkipsSymlinksAndHandlesMissingOrFileRoots() {
+        val base = Files.createTempDirectory("kucode-diag-size").toFile()
+        try {
+            val diagDir = java.io.File(base, "diagnostics").apply { mkdirs() }
+            val subDir = java.io.File(diagDir, "sessions/s1").apply { mkdirs() }
+            java.io.File(subDir, "meta.json").writeBytes(ByteArray(150) { 0x41 })
+            java.io.File(subDir, "events.jsonl").writeBytes(ByteArray(250) { 0x42 })
+
+            val outside = java.io.File(base, "outside").apply { mkdirs() }
+            val outsideBlob = java.io.File(outside, "huge.bin").apply { writeBytes(ByteArray(8192) { 0x43 }) }
+            Files.createSymbolicLink(java.io.File(diagDir, "link-file").toPath(), outsideBlob.toPath())
+            Files.createSymbolicLink(java.io.File(diagDir, "link-dir").toPath(), outside.toPath())
+
+            assertEquals(400L, DiagnosticsRunner.computeDirectorySizeBytes(diagDir))
+            assertEquals(-1L, DiagnosticsRunner.computeDirectorySizeBytes(java.io.File(base, "missing")))
+            assertEquals(-1L, DiagnosticsRunner.computeDirectorySizeBytes(outsideBlob))
+
+            val symlinkRoot = java.io.File(base, "root-link")
+            Files.createSymbolicLink(symlinkRoot.toPath(), diagDir.toPath())
+            assertEquals(-1L, DiagnosticsRunner.computeDirectorySizeBytes(symlinkRoot))
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
+    @Test
+    fun computeDiagnosticsOverheadAndFormatSummary_handlesValidAndUnavailableMetrics() {
+        val valid = DiagnosticsRunner.computeDiagnosticsOverhead(
+            startElapsedMs = 100L,
+            endElapsedMs = 350L,
+            startCpuMs = 40L,
+            endCpuMs = 95L,
+            startPssMb = 120L,
+            endPssMb = 128L,
+            diagnosticsDiskBytes = 4096L,
+            telemetryLastCaptureDurationMs = 4L,
+        )
+        assertEquals(250L, valid.diagnosticsDurationMs)
+        assertEquals(55L, valid.hostCpuDeltaMs)
+        assertEquals(8L, valid.pssDeltaMb)
+        assertEquals(4096L, valid.diagnosticsDiskBytes)
+        assertEquals(4L, valid.telemetryLastCaptureDurationMs)
+
+        val validText = DiagnosticsRunner.formatOverheadSummary(valid)
+        assertTrue(validText.contains("250ms"))
+        assertTrue(validText.contains("55ms"))
+        assertTrue(validText.contains("+8MB"))
+        assertTrue(validText.contains("4ms"))
+        assertTrue(!validText.contains("unknown"))
+
+        val clamped = DiagnosticsRunner.computeDiagnosticsOverhead(
+            startElapsedMs = 500L,
+            endElapsedMs = 400L,
+            startCpuMs = 300L,
+            endCpuMs = 250L,
+            startPssMb = 140L,
+            endPssMb = 135L,
+            diagnosticsDiskBytes = 512L,
+            telemetryLastCaptureDurationMs = 0L,
+        )
+        assertEquals(0L, clamped.diagnosticsDurationMs)
+        assertEquals(0L, clamped.hostCpuDeltaMs)
+        assertEquals(-5L, clamped.pssDeltaMb)
+
+        val unavailable = DiagnosticsRunner.computeDiagnosticsOverhead(
+            startElapsedMs = 100L,
+            endElapsedMs = 200L,
+            startCpuMs = -1L,
+            endCpuMs = 50L,
+            startPssMb = -1L,
+            endPssMb = 100L,
+            diagnosticsDiskBytes = -1L,
+            telemetryLastCaptureDurationMs = -1L,
+        )
+        assertEquals(-1L, unavailable.hostCpuDeltaMs)
+        assertEquals(null, unavailable.pssDeltaMb)
+        val unavailableText = DiagnosticsRunner.formatOverheadSummary(unavailable)
+        assertTrue(unavailableText.contains("hostCpuDelta=unknown"))
+        assertTrue(unavailableText.contains("pssDelta=unknown"))
+        assertTrue(unavailableText.contains("disk=unknown"))
+        assertTrue(unavailableText.contains("telemetryCapture=unknown"))
+    }
 }

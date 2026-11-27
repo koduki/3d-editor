@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "feature": "self-host-remaining-hardening",
+  "issues": [25, 26, 21, 19, 22, 24],
+  "specPath": "docs/specs/self-host-remaining-hardening/spec.md",
+  "deployTarget": "merge-only",
+  "criteria": [
+    {
+      "id": "AC-1",
+      "title": "SessionLogStore MetricSnapshot captureDurationMs backward compatibility, OtlpJsonSerializer kucode.telemetry.capture_duration_ms emission, and Markdown Build SHA + Telemetry Capture Overhead reporting",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/SelfHostHardeningOracleTest.kt",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Android JVM unit tests (:app:testDebugUnitTest, :app:testReleaseUnitTest)."
+    },
+    {
+      "id": "AC-2",
+      "title": "DiagnosticsRunner pure-JVM overhead & disk computation (symlink-safe NOFOLLOW_LINKS, negative/unknown PSS delta handling, unknown formatting)",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/SelfHostHardeningOracleTest.kt",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Android JVM unit tests (:app:testDebugUnitTest, :app:testReleaseUnitTest)."
+    },
+    {
+      "id": "AC-3",
+      "title": "kucode-cli.cjs sdk doctor zero-exec default vs --versions bounded probing, RAM-based recommendGradleOptions, and kucode build SDK hint span attributes without arg/secret leaks",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/self-host-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Node oracle test suite (tests/oracle/self-host-hardening.oracle.test.cjs)."
+    },
+    {
+      "id": "AC-4",
+      "title": "kucode-android/extension.js adaptive gradleArgs (preserving default CI behavior, overriding on explicit/low-RAM), installApk terminal failure/cancellation handling, and untrusted workspace blocking",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/self-host-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Node oracle test suite (tests/oracle/self-host-hardening.oracle.test.cjs)."
+    },
+    {
+      "id": "AC-5",
+      "title": "scripts/aura-language-smoke.sh --allow-non-aura/--ci-self-test, offline default vs --with-network, toolchain versions, 5-column results.tsv, and summary.json contract",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/self-host-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Node oracle test suite (tests/oracle/self-host-hardening.oracle.test.cjs)."
+    },
+    {
+      "id": "AC-6",
+      "title": "PosixRuntimeConfig.detectGuestJavaHome and buildProotEnvironment / buildProfileDEnvScript parity for JAVA_HOME, ANDROID_HOME, XDG_*, and user-precedent PATH",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/SelfHostHardeningOracleTest.kt",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Android JVM unit tests (:app:testDebugUnitTest, :app:testReleaseUnitTest)."
+    },
+    {
+      "id": "AC-7",
+      "title": "kucode-tools acp-client.js buildChildEnvironment parity across ACP and terminal/create, plus untrusted workspace gating on setupAntigravityCliCommand, setupCopilotCliCommand, and openInTerminal",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/self-host-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Node oracle test suite (tests/oracle/self-host-hardening.oracle.test.cjs)."
+    },
+    {
+      "id": "AC-8",
+      "title": "RuntimeInstaller InsufficientStorageException preflight preserving user rootfs/home/workspace, interrupted openvscode.previous recovery, and bounded backup retention across reset and restoreLatestDebianBackup",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/SelfHostHardeningOracleTest.kt",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Android JVM unit tests (:app:testDebugUnitTest, :app:testReleaseUnitTest)."
+    },
+    {
+      "id": "AC-9",
+      "title": "DiagnosticShareImporter request validation, 1 MiB cap, NOFOLLOW_LINKS symlink & traversal rejection, LogRedactor sanitization, and atomic import inside workspace/diagnostics-import",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/SelfHostHardeningOracleTest.kt",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Android JVM unit tests (:app:testDebugUnitTest, :app:testReleaseUnitTest)."
+    },
+    {
+      "id": "AC-10",
+      "title": "AndroidHostBridgeCore.cleanupAbandonedOnStartup abandons stale sessions and cleans staging directory on host restart",
+      "verificationType": "oracle-kotlin-unit",
+      "oracleFile": "android/app/src/test/java/dev/koduki/kucode/oracle/SelfHostHardeningOracleTest.kt",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Android JVM unit tests (:app:testDebugUnitTest, :app:testReleaseUnitTest)."
+    },
+    {
+      "id": "AC-11",
+      "title": "Strict kucode-android vs kucode-tools module boundary and Workspace Trust config/flag preservation",
+      "verificationType": "oracle-node-e2e",
+      "oracleFile": "tests/oracle/self-host-hardening.oracle.test.cjs",
+      "status": "PASS",
+      "passed": true,
+      "notes": "Verified PASS in local Node oracle test suite and run-all-guards.mjs."
+    },
+    {
+      "id": "AC-12",
+      "title": "Physical XREAL AURA device acceptance (real ARM64 toolchain build, Stable/Dev concurrent PSS/thermal, on-device language smoke, APK upgrade Debian persistence)",
+      "verificationType": "hardware-manual",
+      "oracleFile": null,
+      "status": "NOT RUN",
+      "passed": false
+    }
+  ]
+}

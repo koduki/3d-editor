@@ -685,4 +685,17 @@ test('openSessionLogs lists current and past abnormal sessions and opens AI bund
   assert.ok(postedEvents.some((e) => e.source === 'ext.terminal' && e.level === 'WARN' && e.msg.includes('code=137')));
 });
 
+test('setupAntigravityCli and setupCopilotCli block terminal execution in untrusted workspaces', async () => {
+  const mock = createMockVscode();
+  mock.vscode.workspace.isTrusted = false;
+  const ext = loadExtensionWithMockVscode(mock.vscode);
+  ext.activate({ subscriptions: [] });
+
+  await mock.commands.get('kucode.setupAntigravityCli')();
+  await mock.commands.get('kucode.setupCopilotCli')();
+  assert.equal(mock.createdTerminals.length, 0);
+  assert.equal(mock.errorMessages.length, 2);
+  assert.match(mock.errorMessages[0], /Trust this workspace/i);
+});
+
 

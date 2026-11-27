@@ -372,4 +372,88 @@ class SessionLogStoreTest {
             deleteTreeNoFollow(dir)
         }
     }
+
+    @Test
+    fun captureDurationMs_roundTripsBackwardCompatiblyAndEmitsReportAndOtlpMetrics() {
+        val dir = Files.createTempDirectory("kucode-capture-overhead").toFile()
+        var nowMs = 1_760_002_000_000L
+        try {
+            val defaultSnap = SessionLogStore.MetricSnapshot(timestampMs = nowMs, trigger = "compat")
+            assertEquals(-1L, defaultSnap.captureDurationMs)
+            assertEquals(-1L, defaultSnap.toJsonObject().getLong("captureDurationMs"))
+            assertEquals(
+                -1L,
+                SessionLogStore.MetricSnapshot.fromJsonObject(
+                    JSONObject().put("tsMs", nowMs).put("trigger", "legacy_missing"),
+                ).captureDurationMs,
+            )
+            assertEquals(
+                -1L,
+                SessionLogStore.MetricSnapshot.fromJsonObject(
+                    JSONObject().put("tsMs", nowMs).put("trigger", "legacy_null").put("captureDurationMs", JSONObject.NULL),
+                ).captureDurationMs,
+            )
+
+            val stats = SessionTelemetryManager.TelemetryOverheadStats(
+                sampleCount = 3L,
+                lastCaptureDurationMs = 8L,
+                maxCaptureDurationMs = 15L,
+                totalCaptureDurationMs = 27L,
+            )
+            assertEquals(3L, stats.sampleCount)
+            assertEquals(8L, stats.lastCaptureDurationMs)
+            assertEquals(15L, stats.maxCaptureDurationMs)
+            assertEquals(27L, stats.totalCaptureDurationMs)
+
+            val store = SessionLogStore(diagnosticsRootDir = File(dir, "diagnostics"), clockMs = { nowMs })
+            val env = sampleEnv().copy(buildSha = "cafebabe01")
+            val s1 = store.startSession(pid = 3100, env = env)
+            store.recordMetric(SessionLogStore.MetricSnapshot(timestampMs = nowMs + 10L, trigger = "m1", captureDurationMs = 5L))
+            store.recordMetric(SessionLogStore.MetricSnapshot(timestampMs = nowMs + 20L, trigger = "m2", captureDurationMs = -1L))
+            store.recordMetric(SessionLogStore.MetricSnapshot(timestampMs = nowMs + 30L, trigger = "m3", captureDurationMs = 15L))
+            store.endSession("done")
+
+            val md = store.renderSessionBundle(s1.sessionId, "ai")!!
+            assertTrue(md.contains("- Schema: `kucode-session-v1`"))
+            assertTrue(md.contains("- Build SHA: `cafebabe01`"))
+            assertTrue(md.contains("| Offset | Trigger | Avail/Total RAM | PSS | Host CPU ms | JVM Heap | Native | FDs | Thr | DiskFree | Thermal | Bat | Net | State / View / Focus |"))
+            assertTrue(md.contains("- Telemetry Capture Overhead: `last=15ms, avg=10ms, max=15ms, samples=2`"))
+
+            val otlp = OtlpJsonSerializer.serializeSession(store, s1.sessionId)!!
+            val metricsArr = otlp.metricsJson!!
+                .getJSONArray("resourceMetrics").getJSONObject(0)
+                .getJSONArray("scopeMetrics").getJSONObject(0)
+                .getJSONArray("metrics")
+            val gauge = (0 until metricsArr.length())
+                .map { metricsArr.getJSONObject(it) }
+                .firstOrNull { it.getString("name") == "kucode.telemetry.capture_duration_ms" }
+            assertNotNull(gauge)
+            assertEquals("ms", gauge!!.getString("unit"))
+            val dps = gauge.getJSONObject("gauge").getJSONArray("dataPoints")
+            assertEquals(2, dps.length())
+            assertEquals("5", dps.getJSONObject(0).getString("asInt"))
+            assertEquals("15", dps.getJSONObject(1).getString("asInt"))
+
+            nowMs += 1_000L
+            val s2 = store.startSession(pid = 3101, env = env)
+            store.recordMetric(SessionLogStore.MetricSnapshot(timestampMs = nowMs + 10L, trigger = "m_neg", captureDurationMs = -1L))
+            store.endSession("done")
+
+            val md2 = store.renderSessionBundle(s2.sessionId, "ai")!!
+            assertTrue(md2.contains("- Build SHA: `cafebabe01`"))
+            assertFalse(md2.contains("- Telemetry Capture Overhead:"))
+            val otlp2 = OtlpJsonSerializer.serializeSession(store, s2.sessionId)!!
+            val metricsArr2 = otlp2.metricsJson!!
+                .getJSONArray("resourceMetrics").getJSONObject(0)
+                .getJSONArray("scopeMetrics").getJSONObject(0)
+                .getJSONArray("metrics")
+            assertFalse(
+                (0 until metricsArr2.length()).any {
+                    metricsArr2.getJSONObject(it).getString("name") == "kucode.telemetry.capture_duration_ms"
+                },
+            )
+        } finally {
+            deleteTreeNoFollow(dir)
+        }
+    }
 }
