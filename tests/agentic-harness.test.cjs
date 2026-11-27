@@ -688,3 +688,209 @@ test('check-staged-boundaries regression: C100 NUL copy parsing and R100 rename 
   assert.equal(evaluateStagedEntries(oracleRename, activeLocked).decision, 'deny');
 });
 
+test('wait-pr-gates follow-up edge cases: not_configured, review/inline commit_id filtering, error state, headRefOid reset, and 403 rate limit', async () => {
+  const { extractCodexFindings, evaluateGateVerdict, runGhWithRetry, pollPr } = await import(
+    '../.agents/skills/ship/scripts/wait-pr-gates.mjs'
+  );
+  const sinceIso = '2026-11-27T00:00:00.000Z';
+  const oldSha = '1111111111111111111111111111111111111111';
+  const newSha = '2222222222222222222222222222222222222222';
+
+  // 1) Codex not-configured guidance comment must NEVER produce clean / auto_merge
+  const notCfg = extractCodexFindings([], [], [
+    {
+      author: { login: 'chatgpt-codex-connector[bot]' },
+      createdAt: '2026-11-27T00:01:00.000Z',
+      body: 'To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).',
+    },
+  ], { sinceIso, headRefOid: newSha });
+  assert.equal(notCfg.notConfigured, true);
+  assert.equal(notCfg.reviewPosted, false);
+  assert.equal(notCfg.status, 'not_configured');
+  const notCfgVerdict = evaluateGateVerdict({ ciPassed: true, codex: notCfg, timedOut: false });
+  assert.equal(notCfgVerdict.readyToAutoMerge, false);
+  assert.equal(notCfgVerdict.exitCode, 3);
+  assert.equal(notCfgVerdict.nextAction, 'escalate_human');
+
+  // 2) Stale reviews/lineComments for oldSha within the 5s window are ignored for newSha
+  const staleBySha = extractCodexFindings(
+    [{ author: { login: 'chatgpt-codex-connector[bot]' }, submittedAt: '2026-11-27T00:00:02.000Z', commit: { oid: oldSha }, state: 'COMMENTED', body: 'Looks good.' }],
+    [{ user: { login: 'chatgpt-codex-connector[bot]' }, updated_at: '2026-11-27T00:00:03.000Z', commit_id: oldSha, path: 'a.js', line: 1, body: 'P1 old bug' }],
+    [],
+    { sinceIso, headRefOid: newSha },
+  );
+  assert.equal(staleBySha.reviewPosted, false);
+  assert.equal(staleBySha.blockingCount, 0);
+  assert.equal(staleBySha.status, 'pending');
+
+  // 3) codexState status=error is NOT promoted to clean by an earlier/same-timestamp non-marker comment
+  const errored = extractCodexFindings(
+    [{ author: { login: 'chatgpt-codex-connector[bot]' }, submittedAt: '2026-11-27T00:01:00.000Z', state: 'COMMENTED', body: 'Receipt' }],
+    [],
+    [
+      {
+        author: { login: 'chatgpt-codex-connector[bot]' },
+        updatedAt: '2026-11-27T00:01:05.000Z',
+        body: `Codex failed\n<!-- codex-review-state:v1 {"code_review":{"commit_sha":"${newSha}","status":"error","has_any_findings":null,"has_unresolved_findings":null}} -->`,
+      },
+    ],
+    { sinceIso, headRefOid: newSha },
+  );
+  assert.equal(errored.reviewPosted, false);
+  assert.equal(errored.status, 'pending');
+  assert.equal(evaluateGateVerdict({ ciPassed: true, codex: errored, timedOut: false }).nextAction, 'escalate_human');
+
+  // 4) runGhWithRetry retries HTTP 403 API rate limit already exceeded, but fails fast on HTTP 404 referencing PR 502
+  let rlAttempts = 0;
+  const rlRes = await runGhWithRetry(['pr', 'view', '38'], {
+    maxRetries: 3,
+    baseDelayMs: 10,
+    runner: () => {
+      rlAttempts += 1;
+      if (rlAttempts < 3) {
+        throw new Error('gh: HTTP 403: API rate limit already exceeded');
+      }
+      return '{"ok":true}';
+    },
+    sleepFn: async () => {},
+  });
+  assert.equal(rlRes, '{"ok":true}');
+  assert.equal(rlAttempts, 3);
+
+  let notFoundAttempts = 0;
+  await assert.rejects(() =>
+    runGhWithRetry(['pr', 'view', '502'], {
+      maxRetries: 3,
+      baseDelayMs: 10,
+      runner: () => {
+        notFoundAttempts += 1;
+        throw new Error('gh: HTTP 404: Could not resolve to a PullRequest with the number of 502');
+      },
+      sleepFn: async () => {},
+    }),
+  );
+  assert.equal(notFoundAttempts, 1);
+
+  // 5) pollPr refreshes sinceIso when headRefOid changes mid-poll and escalates immediately on not_configured
+  let nowMs = Date.parse('2026-11-27T00:10:00.000Z');
+  let pollCalls = 0;
+  let mentionPosted = false;
+  const report = await pollPr(38, {
+    repo: 'koduki/kucode',
+    pollSeconds: 15,
+    codexTimeoutSeconds: 600,
+    nowFn: () => nowMs,
+    sleepFn: async (ms) => {
+      nowMs += ms;
+    },
+    logFn: () => {},
+    ghRunner: (args) => {
+      if (args[0] === 'pr' && args[1] === 'comment') {
+        mentionPosted = true;
+        return '';
+      }
+      if (args[0] === 'pr' && args[1] === 'view' && args.includes('commits,headRefOid,url')) {
+        return JSON.stringify({
+          url: 'https://github.com/koduki/kucode/pull/38',
+          headRefOid: oldSha,
+          commits: [{ oid: oldSha, committedDate: '2026-11-27T00:09:50.000Z' }],
+        });
+      }
+      if (args[0] === 'pr' && args[1] === 'view') {
+        pollCalls += 1;
+        if (pollCalls === 1) {
+          // Old commit has a review comment, CI still running
+          return JSON.stringify({
+            url: 'https://github.com/koduki/kucode/pull/38',
+            headRefOid: oldSha,
+            statusCheckRollup: [{ name: 'CI', status: 'IN_PROGRESS', conclusion: '' }],
+            reviews: [],
+            comments: [
+              { author: { login: 'chatgpt-codex-connector[bot]' }, createdAt: '2026-11-27T00:09:55.000Z', body: 'Old clean comment' },
+            ],
+          });
+        }
+        // New commit pushed mid-poll: old comment is now stale; only not_configured guidance exists
+        return JSON.stringify({
+          url: 'https://github.com/koduki/kucode/pull/38',
+          headRefOid: newSha,
+          statusCheckRollup: [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+          reviews: [],
+          comments: [
+            { author: { login: 'chatgpt-codex-connector[bot]' }, createdAt: '2026-11-27T00:09:55.000Z', body: 'Old clean comment' },
+            {
+              author: { login: 'chatgpt-codex-connector[bot]' },
+              createdAt: new Date(nowMs).toISOString(),
+              body: 'To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).',
+            },
+          ],
+        });
+      }
+      return '[]';
+    },
+  });
+  assert.equal(mentionPosted, false);
+  assert.equal(report.headRefOid, newSha);
+  assert.equal(report.codex.status, 'not_configured');
+  assert.equal(report.readyToAutoMerge, false);
+  assert.equal(report.exitCode, 3);
+  assert.equal(report.nextAction, 'escalate_human');
+});
+
+test('follow-up edge cases: state.mjs resumeRun oracleStatus gate, check-staged-boundaries draft rename, and ci-log-compressor OK 16KB alignment', async () => {
+  const stateMod = await import('../.agents/skills/ship/scripts/state.mjs');
+  const { parseNameStatusOutput, evaluateStagedEntries } = await import(
+    '../.agents/skills/ship/scripts/check-staged-boundaries.mjs'
+  );
+  const { compressCiLog } = await import('../scripts/guards/ci-log-compressor.mjs');
+
+  // 1) state.mjs resumeRun enforces oracleStatus passed/exempt before resuming to S4/S5
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kucode-resume-oracle-status-'));
+  const statePath = path.join(tmp, 'run.json');
+  try {
+    stateMod.initRun(statePath, 'Test oracleStatus precondition', { cwd: REPO_ROOT });
+    stateMod.transitionState(statePath, 'S2_CONTRACT_LOCK');
+    stateMod.approveContract(statePath, { specPath: 'docs/specs/x/spec.md' });
+    stateMod.lockOracle(statePath, { files: ['tests/oracle/x.oracle.test.cjs'], preImplRedVerified: true });
+    stateMod.escalateRun(statePath, 'Stalled in S3b before oracle passed');
+
+    // Must throw when resuming directly into S5 while oracleStatus is still pending
+    assert.throws(() => stateMod.resumeRun(statePath, { targetState: 'S5_PR_CI_HEAL_LOOP' }), /oracleStatus/);
+    assert.throws(() => stateMod.resumeRun(statePath, { targetState: 'S4_LOCAL_CODEX_REVIEW' }), /oracleStatus/);
+
+    // Resuming into S3b is still allowed
+    const resumedS3b = stateMod.resumeRun(statePath, { targetState: 'S3b_IMPL_WORKFLOW' });
+    assert.equal(resumedS3b.currentState, 'S3b_IMPL_WORKFLOW');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // 2) check-staged-boundaries allows renaming an unguarded draft into a new spec file, while still denying protected destination
+  const config = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, '.agents/ship.config.json'), 'utf8'));
+  const activeLocked = {
+    hasActiveShipRun: true,
+    currentState: 'S3b_IMPL_WORKFLOW',
+    contractLocked: true,
+    oracleLocked: true,
+    oracleTestFiles: ['tests/oracle/existing.oracle.test.cjs'],
+    allowedProtectedPaths: [],
+    config,
+    overrideEnv: false,
+  };
+  const draftToSpec = parseNameStatusOutput('R100\0notes/draft.md\0docs/specs/new-feat/spec.md\0', true);
+  assert.equal(evaluateStagedEntries(draftToSpec, activeLocked).decision, 'allow');
+  const draftToProtected = parseNameStatusOutput('R100\0notes/a.mjs\0scripts/guards/new-guard.mjs\0', true);
+  assert.equal(evaluateStagedEntries(draftToProtected, activeLocked).decision, 'deny');
+
+  // 3) ci-log-compressor does not misclassify benign OK 16KB LOAD alignment or sha256 lines as apk_elf_alignment / runtime_asset_lock
+  const logWithOkAlignmentAndSha = [
+    'OK 16KB LOAD alignment (2 segments): libproot.so',
+    'Verified sha256 digest for fixture input',
+    '> Task :app:testDebugUnitTest FAILED',
+    'OtelFlightRecorderOracleTest > ac1 FAILED',
+    '    java.lang.AssertionError: expected:<200> but was:<500>',
+  ].join('\n');
+  assert.equal(compressCiLog(logWithOkAlignmentAndSha).category, 'gradle_test');
+});
+
+

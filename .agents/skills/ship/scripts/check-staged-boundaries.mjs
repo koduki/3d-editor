@@ -235,7 +235,7 @@ export function evaluateStagedEntries(entries = [], options = {}) {
     if (statusCode === "R") {
       if (entryOldPath) {
         evaluateSinglePath("D", entryOldPath, ctx, violations);
-        evaluateSinglePath("R", entryPath, ctx, violations);
+        evaluateSinglePath("A", entryPath, ctx, violations);
       } else {
         evaluateSinglePath("R", entryPath, ctx, violations);
       }

@@ -315,6 +315,19 @@ export function resumeRun(statePath, options = {}) {
     throw new Error(`Precondition failed: cannot resume to ${targetState} before oracleLocked=true (lock oracle tests first).`);
   }
 
+  const postOraclePassStates = new Set([
+    "S4_LOCAL_CODEX_REVIEW",
+    "S5_PR_CI_HEAL_LOOP",
+    "S6_AUTO_MERGE_AND_DEPLOY",
+    "S7_POST_DEPLOY_VERIFY",
+    "S8_HARNESS_LEARN",
+  ]);
+  if (postOraclePassStates.has(targetState) && state.oracleStatus !== "passed" && state.oracleStatus !== "exempt") {
+    throw new Error(
+      `Precondition failed: cannot resume to ${targetState} while oracleStatus is '${state.oracleStatus}' (must be passed or exempt).`,
+    );
+  }
+
   const postPrGateStates = new Set([
     "S6_AUTO_MERGE_AND_DEPLOY",
     "S7_POST_DEPLOY_VERIFY",
