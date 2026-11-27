@@ -30,15 +30,16 @@ function sleep(ms) {
 
 const CODEX_LOGIN_RE = /codex|chatgpt-codex/i;
 const QUOTA_RE = /(usage limit|rate limit|quota exceeded|out of (?:code )?review|limit reached)/i;
+const NOT_CONFIGURED_RE = /to use codex here|create an environment for this repo|chatgpt\.com\/codex\/cloud\/settings\/environments/i;
 const BLOCKING_RE = /\b(P0|P1)\b|badge\/P[01]|critical|must fix|severity:\s*(?:critical|high)/i;
 const CODEX_STATE_MARKER_RE = /<!--\s*codex-review-state:v1\s+([\s\S]*?)\s*-->/gi;
 const CODEX_MENTION_RE = /@codex\s+review\b/i;
 
-const RATE_LIMIT_RE = /\b429\b|too many requests|secondary rate limit|rate limit exceeded/i;
+const RATE_LIMIT_RE = /\b429\b|too many requests|(?:secondary|api)?\s*rate\s+limit(?:\s+already)?\s+exceeded|\brate\s+limit\b|abuse detection/i;
 const DETERMINISTIC_4XX_RE =
   /\bHTTP\s*4(?:00|01|03|04|22)\b|\bstatus(?:\s*code)?\s*[:=]?\s*4(?:00|01|03|04|22)\b|\b(?:400\s+Bad Request|401\s+Unauthorized|403\s+Forbidden|404\s+Not Found|422\s+Unprocessable)\b|unknown flag|unknown command/i;
 const TRANSIENT_GH_RE =
-  /\bHTTP\s*5(?:00|02|03|04)\b|\bstatus(?:\s*code)?\s*[:=]?\s*5(?:00|02|03|04)\b|\b5(?:00|02|03|04)\b|bad gateway|service unavailable|gateway timeout|internal server error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|\bTLS\b|timed out|connection reset/i;
+  /\bHTTP\s*5(?:00|02|03|04)\b|\bstatus(?:\s*code)?\s*[:=]?\s*5(?:00|02|03|04)\b|\b5(?:00|02|03|04)\s+(?:internal server error|bad gateway|service unavailable|gateway timeout)\b|bad gateway|service unavailable|gateway timeout|internal server error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|\bTLS\b|timed out|connection reset/i;
 
 function getLatestTimestamp(item) {
   if (!item || typeof item !== "object") return { ms: null, iso: null };
@@ -250,7 +251,9 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
 
   const findings = [];
   let quotaLimited = false;
+  let notConfigured = false;
   let nonMarkerReviewPosted = false;
+  let latestNonMarkerTs = -Infinity;
 
   let codexState = null;
   let codexStateTs = -Infinity;
@@ -278,6 +281,11 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
     const login = r?.author?.login || r?.user?.login;
     if (!isCodexUser(login) || !isItemFresh(r, sinceMs)) continue;
 
+    const reviewSha = r?.commit?.oid || r?.commit_id || r?.commitId || "";
+    if (expectedHeadRefOid && reviewSha && !isCommitShaMatch(expectedHeadRefOid, reviewSha)) {
+      continue;
+    }
+
     const { ms: tsMs, iso: tsIso } = getLatestTimestamp(r);
     const body = String(r.body || "");
     const { hasMarker, state: matchedState } = resolveStateForHead(body);
@@ -286,6 +294,8 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
     }
 
     if (QUOTA_RE.test(body)) quotaLimited = true;
+    const isNotConfiguredMsg = !hasMarker && NOT_CONFIGURED_RE.test(body);
+    if (isNotConfiguredMsg) notConfigured = true;
 
     if (matchedState) {
       recordCodexState(matchedState, tsMs, tsIso, body);
@@ -298,8 +308,9 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
           _skipBlocking: matchedState.status === "running",
         });
       }
-    } else {
+    } else if (!isNotConfiguredMsg) {
       nonMarkerReviewPosted = true;
+      latestNonMarkerTs = Math.max(latestNonMarkerTs, tsMs ?? 0);
       if (body.trim()) {
         findings.push({
           source: "review",
@@ -308,12 +319,25 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
           body: body.slice(0, 600),
         });
       }
+    } else if (body.trim()) {
+      findings.push({
+        source: "review",
+        state: r.state,
+        createdAt: tsIso,
+        body: body.slice(0, 600),
+        _skipBlocking: true,
+      });
     }
   }
 
   for (const c of lineComments || []) {
     const login = c?.user?.login || c?.author?.login;
     if (!isCodexUser(login) || !isItemFresh(c, sinceMs)) continue;
+
+    const commentSha = c?.commit_id || c?.original_commit_id || c?.commit?.oid || "";
+    if (expectedHeadRefOid && commentSha && !isCommitShaMatch(expectedHeadRefOid, commentSha)) {
+      continue;
+    }
 
     const { ms: tsMs, iso: tsIso } = getLatestTimestamp(c);
     const body = String(c.body || "");
@@ -323,11 +347,14 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
     }
 
     if (QUOTA_RE.test(body)) quotaLimited = true;
+    const isNotConfiguredMsg = !hasMarker && NOT_CONFIGURED_RE.test(body);
+    if (isNotConfiguredMsg) notConfigured = true;
 
     if (matchedState) {
       recordCodexState(matchedState, tsMs, tsIso, body);
-    } else {
+    } else if (!isNotConfiguredMsg) {
       nonMarkerReviewPosted = true;
+      latestNonMarkerTs = Math.max(latestNonMarkerTs, tsMs ?? 0);
     }
 
     if (body.trim()) {
@@ -337,7 +364,7 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
         line: c.line || c.original_line || null,
         createdAt: tsIso,
         body: body.slice(0, 600),
-        _skipBlocking: matchedState?.status === "running",
+        _skipBlocking: matchedState?.status === "running" || isNotConfiguredMsg,
       });
     }
   }
@@ -354,6 +381,8 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
     }
 
     if (QUOTA_RE.test(body)) quotaLimited = true;
+    const isNotConfiguredMsg = !hasMarker && NOT_CONFIGURED_RE.test(body);
+    if (isNotConfiguredMsg) notConfigured = true;
 
     if (matchedState) {
       recordCodexState(matchedState, tsMs, tsIso, body);
@@ -365,8 +394,9 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
           _skipBlocking: matchedState.status === "running",
         });
       }
-    } else {
+    } else if (!isNotConfiguredMsg) {
       nonMarkerReviewPosted = true;
+      latestNonMarkerTs = Math.max(latestNonMarkerTs, tsMs ?? 0);
       if (body.trim()) {
         findings.push({
           source: "comment",
@@ -374,6 +404,13 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
           body: body.slice(0, 600),
         });
       }
+    } else if (body.trim()) {
+      findings.push({
+        source: "comment",
+        createdAt: tsIso,
+        body: body.slice(0, 600),
+        _skipBlocking: true,
+      });
     }
   }
 
@@ -382,6 +419,7 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
     return isCodexUser(login) && String(r?.content || "").toLowerCase() === "eyes";
   });
 
+  const FAILED_CODEX_STATES = new Set(["error", "failed", "cancelled", "canceled"]);
   let reviewPosted = false;
   let isRunning = false;
 
@@ -392,8 +430,11 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
     } else if (codexState.status === "running") {
       reviewPosted = false;
       isRunning = true;
+    } else if (FAILED_CODEX_STATES.has(codexState.status)) {
+      reviewPosted = nonMarkerReviewPosted && latestNonMarkerTs > codexStateTs;
+      isRunning = !reviewPosted && hasEyesReaction;
     } else {
-      reviewPosted = nonMarkerReviewPosted;
+      reviewPosted = nonMarkerReviewPosted && latestNonMarkerTs > codexStateTs;
       isRunning = !reviewPosted && hasEyesReaction;
     }
   } else {
@@ -433,7 +474,9 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
       : isRunning
         ? "running"
         : !reviewPosted
-          ? "pending"
+          ? notConfigured
+            ? "not_configured"
+            : "pending"
           : "clean";
 
   return {
@@ -443,6 +486,7 @@ export function extractCodexFindings(reviews = [], lineComments = [], issueComme
     hasEyesReaction,
     codexState,
     quotaLimited,
+    notConfigured,
     totalCodexItems: all.length,
     blockingCount: blocking.length,
     blocking,
@@ -465,6 +509,14 @@ export function evaluateGateVerdict({ ciPassed, codex, timedOut }) {
       exitCode: 3,
       nextAction: "escalate_human",
       escalateReason: "OpenAI ChatGPT Plus Codex review hit usage/quota limit. Auto-merge halted for human confirmation.",
+    };
+  }
+  if (codex?.notConfigured && !codex?.reviewPosted && !codex?.isRunning) {
+    return {
+      readyToAutoMerge: false,
+      exitCode: 3,
+      nextAction: "escalate_human",
+      escalateReason: "ChatGPT Codex Connector is not configured for this repository/environment. Auto-merge halted for human confirmation.",
     };
   }
   if (timedOut || !codex?.reviewPosted || codex?.status === "running" || codex?.isRunning) {
@@ -593,7 +645,7 @@ export async function pollPr(prNumber, options = {}) {
   );
   const lastCommit = (initialPr.commits || []).slice(-1)[0];
   let headRefOid = options.headRefOid || initialPr.headRefOid || lastCommit?.oid || null;
-  const sinceIso = options.sinceIso || lastCommit?.committedDate || new Date(startMs - 10_000).toISOString();
+  let sinceIso = options.sinceIso || lastCommit?.committedDate || new Date(startMs - 10_000).toISOString();
 
   let checks = [];
   let ciDone = false;
@@ -604,6 +656,7 @@ export async function pollPr(prNumber, options = {}) {
     hasEyesReaction: false,
     codexState: null,
     quotaLimited: false,
+    notConfigured: false,
     totalCodexItems: 0,
     blockingCount: 0,
     blocking: [],
@@ -616,6 +669,16 @@ export async function pollPr(prNumber, options = {}) {
       await gh(["pr", "view", String(prNumber), ...repoArgs, "--json", "statusCheckRollup,reviews,comments,headRefOid,url"]),
     );
     if (!options.headRefOid && pr.headRefOid) {
+      if (headRefOid && pr.headRefOid !== headRefOid) {
+        const changeNowMs = nowFn();
+        if (!options.sinceIso) {
+          sinceIso = new Date(changeNowMs).toISOString();
+        }
+        autoMentioned = false;
+        autoMentionHandled = false;
+        runningGraceGranted = false;
+        codexDeadline = Math.min(maxAbsoluteDeadlineMs, changeNowMs + codexTimeoutSeconds * 1000);
+      }
       headRefOid = pr.headRefOid;
     }
 
@@ -661,6 +724,7 @@ export async function pollPr(prNumber, options = {}) {
       !codex.reviewPosted &&
       !codex.isRunning &&
       !codex.hasEyesReaction &&
+      !codex.notConfigured &&
       elapsedSec >= autoMentionAfterSec
     ) {
       try {
@@ -676,7 +740,10 @@ export async function pollPr(prNumber, options = {}) {
       }
     }
 
-    const codexFinished = (codex.reviewPosted && !codex.isRunning) || codex.quotaLimited;
+    const codexFinished =
+      (codex.reviewPosted && !codex.isRunning) ||
+      codex.quotaLimited ||
+      (codex.notConfigured && !codex.isRunning && !codex.reviewPosted);
     if (!codexFinished && nowMs >= codexDeadline && !runningGraceGranted) {
       const grace = computeCodexDeadline({
         nowMs,

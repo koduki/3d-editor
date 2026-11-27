@@ -18,8 +18,8 @@ const ERROR_LINE_RE = /(GUARD FAILED|FAIL:|ERROR:|::error::|FAILURE:|Execution f
 
 const CATEGORIES = [
   { id: "guard_violation", re: /GUARD FAILED|\[no-lint-or-type-bypass\]|\[no-test-skip-or-ignore\]|\[workspace-trust-and-acp-scope\]|\[extension-module-boundary\]/i },
-  { id: "apk_elf_alignment", re: /16KB LOAD alignment|LOAD offset=|not 16KB[- ]aligned|ELF alignment (?:check )?failed|has no LOAD segments|libproot(?:-loader)?\.so[^\n]*(?:not 16KB|align|FAILED|error|missing|invalid)/i },
-  { id: "runtime_asset_lock", re: /runtime-assets\.py|sha256|size mismatch|unknown lock entry/i },
+  { id: "apk_elf_alignment", re: /(?:FAIL(?:ED)?|ERROR)[^\n]*16KB LOAD alignment|not 16KB[- ]aligned|LOAD offset=[^\n]*(?:not 16KB|fail|error|invalid)|ELF alignment (?:check )?failed|has no LOAD segments|libproot(?:-loader)?\.so[^\n]*(?:not 16KB|align[^\n]*(?:fail|error)|FAILED|error|missing|invalid)/i },
+  { id: "runtime_asset_lock", re: /runtime-assets\.py[^\n]*(?:fail|error|mismatch|unknown|exit)|sha256\s+mismatch|size mismatch|unknown lock entry/i },
   { id: "openvscode_smoke", re: /OpenVSCode Server smoke test failed|remoteagent\.log/i },
   { id: "gradle_compile", re: /compile\w*Kotlin|e:\s+file:\/\/|Unresolved reference|Compilation error/i },
   { id: "gradle_test", re: /testDebugUnitTest|testDebugMediumUnitTest|testReleaseUnitTest|AssertionError|AssertionFailedError/i },
