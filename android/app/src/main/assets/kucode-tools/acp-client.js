@@ -114,7 +114,7 @@ function buildAugmentedPath(rawPath, homeDir, envVars) {
   const env = envVars || process.env;
   const home = homeDir || env.HOME || '/root';
   const xdgData = env.XDG_DATA_HOME || path.join(home, '.local', 'share');
-  const androidHome = env.ANDROID_HOME || path.join(home, 'Android', 'Sdk');
+  const androidHome = env.ANDROID_HOME || env.ANDROID_SDK_ROOT || path.join(home, 'Android', 'Sdk');
   const userDirs = [
     path.join(home, '.local', 'bin'),
     path.join(xdgData, 'mise', 'shims'),
@@ -122,6 +122,10 @@ function buildAugmentedPath(rawPath, homeDir, envVars) {
     path.join(androidHome, 'cmdline-tools', 'latest', 'bin'),
     path.join(androidHome, 'platform-tools'),
   ];
+  const javaHome = typeof env.JAVA_HOME === 'string' && path.isAbsolute(env.JAVA_HOME) && !env.JAVA_HOME.includes('\0')
+    ? env.JAVA_HOME
+    : null;
+  const javaDirs = javaHome ? [path.join(javaHome, 'bin')] : [];
   const systemDirs = [
     '/usr/local/sbin',
     '/usr/local/bin',
@@ -135,7 +139,7 @@ function buildAugmentedPath(rawPath, homeDir, envVars) {
     .map((p) => p.trim())
     .filter((p) => p.length > 0 && path.isAbsolute(p));
   const merged = [];
-  for (const dir of [...userDirs, ...existing, ...systemDirs]) {
+  for (const dir of [...userDirs, ...javaDirs, ...existing, ...systemDirs]) {
     if (!merged.includes(dir)) merged.push(dir);
   }
   return merged.join(path.delimiter);
@@ -150,6 +154,91 @@ function isExecutableFile(filePath) {
   } catch (_) {
     return false;
   }
+}
+
+function detectJavaHome(envVars = process.env, options = {}) {
+  const env = envVars && typeof envVars === 'object' ? envVars : {};
+  const opts = options && typeof options === 'object' ? options : {};
+  const candidates = [];
+
+  if (typeof env.JAVA_HOME === 'string' && env.JAVA_HOME.trim()) {
+    const explicit = env.JAVA_HOME.trim();
+    if (path.isAbsolute(explicit) && !explicit.includes('\0')) {
+      candidates.push(explicit);
+    }
+  }
+
+  if (Array.isArray(opts.searchDirs)) {
+    for (const dir of opts.searchDirs) {
+      if (typeof dir === 'string' && path.isAbsolute(dir) && !dir.includes('\0')) {
+        candidates.push(dir);
+      }
+    }
+  }
+
+  candidates.push('/usr/lib/jvm/default-java');
+  try {
+    for (const entry of fs.readdirSync('/usr/lib/jvm', { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.isDirectory() || entry.isSymbolicLink()) {
+        candidates.push(path.join('/usr/lib/jvm', entry.name));
+      }
+    }
+  } catch (_) {}
+
+  const home = env.HOME || '/root';
+  const xdgData = env.XDG_DATA_HOME || path.join(home, '.local', 'share');
+  const miseJavaDir = path.join(xdgData, 'mise', 'installs', 'java');
+  try {
+    for (const entry of fs.readdirSync(miseJavaDir, { withFileTypes: true }).sort((a, b) => b.name.localeCompare(a.name))) {
+      if (entry.isDirectory() || entry.isSymbolicLink()) {
+        candidates.push(path.join(miseJavaDir, entry.name));
+      }
+    }
+  } catch (_) {}
+
+  for (const candidate of candidates) {
+    if (isExecutableFile(path.join(candidate, 'bin', 'java'))) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function buildChildEnvironment(baseEnv = process.env, extraEnv = {}) {
+  const merged = {
+    ...(baseEnv && typeof baseEnv === 'object' ? baseEnv : {}),
+    ...(extraEnv && typeof extraEnv === 'object' ? extraEnv : {}),
+  };
+  const home = merged.HOME || '/root';
+  const xdgCache = merged.XDG_CACHE_HOME || path.join(home, '.cache');
+  const xdgConfig = merged.XDG_CONFIG_HOME || path.join(home, '.config');
+  const xdgData = merged.XDG_DATA_HOME || path.join(home, '.local', 'share');
+  const androidHome = merged.ANDROID_HOME || merged.ANDROID_SDK_ROOT || path.join(home, 'Android', 'Sdk');
+  const androidSdkRoot = merged.ANDROID_SDK_ROOT || androidHome;
+  const javaHome = detectJavaHome({ ...merged, HOME: home, XDG_DATA_HOME: xdgData });
+
+  const env = {
+    ...merged,
+    HOME: home,
+    XDG_CACHE_HOME: xdgCache,
+    XDG_CONFIG_HOME: xdgConfig,
+    XDG_DATA_HOME: xdgData,
+    ANDROID_HOME: androidHome,
+    ANDROID_SDK_ROOT: androidSdkRoot,
+  };
+  if (javaHome) {
+    env.JAVA_HOME = javaHome;
+  } else {
+    delete env.JAVA_HOME;
+  }
+  env.PATH = buildAugmentedPath(merged.PATH, home, env);
+  const derivedTp = deriveChildTraceParent(merged.TRACEPARENT);
+  if (derivedTp) {
+    env.TRACEPARENT = derivedTp;
+  } else {
+    delete env.TRACEPARENT;
+  }
+  return env;
 }
 
 function resolveExecutableOnPath(command, envPath, homeDir) {
@@ -285,26 +374,13 @@ class AcpSessionClient extends EventEmitter {
     if (this.disposed) throw new Error('ACP client is disposed');
     if (this.proc) throw new Error('ACP client already started');
 
-    const augmentedPath = buildAugmentedPath(this.extraEnv.PATH || process.env.PATH, process.env.HOME);
-    const resolvedCmd = resolveExecutableOnPath(this.command, augmentedPath, process.env.HOME);
+    const env = buildChildEnvironment(process.env, this.extraEnv);
+    this.agentTraceParent = env.TRACEPARENT || null;
+    const resolvedCmd = resolveExecutableOnPath(this.command, env.PATH, env.HOME);
     if (!resolvedCmd) {
       const err = new Error('Agent executable not found on PATH: ' + this.command);
       err.code = 'ENOENT_AGENT';
       throw err;
-    }
-
-    const env = {
-      ...process.env,
-      ...this.extraEnv,
-      PATH: augmentedPath,
-    };
-    const derivedTp = deriveChildTraceParent(this.extraEnv.TRACEPARENT || process.env.TRACEPARENT);
-    if (derivedTp) {
-      env.TRACEPARENT = derivedTp;
-      this.agentTraceParent = derivedTp;
-    } else {
-      delete env.TRACEPARENT;
-      this.agentTraceParent = null;
     }
 
     const proc = spawn(resolvedCmd, this.args, {
@@ -711,22 +787,21 @@ class AcpSessionClient extends EventEmitter {
       ? resolveSafeWorkspacePath(this.workspaceRoot, params.cwd)
       : this.workspaceRoot;
 
-    const env = { ...process.env, PATH: buildAugmentedPath(process.env.PATH, process.env.HOME) };
+    const paramEnv = {};
     let explicitTp = null;
     if (Array.isArray(params.env)) {
       for (const item of params.env) {
         if (item && typeof item.name === 'string' && typeof item.value === 'string') {
-          env[item.name] = item.value;
+          paramEnv[item.name] = item.value;
           if (item.name === 'TRACEPARENT') explicitTp = item.value;
         }
       }
     }
-    const derivedTp = deriveChildTraceParent(explicitTp || this.agentTraceParent || process.env.TRACEPARENT);
-    if (derivedTp) {
-      env.TRACEPARENT = derivedTp;
-    } else {
-      delete env.TRACEPARENT;
+    const traceparentInput = explicitTp || this.agentTraceParent || process.env.TRACEPARENT;
+    if (traceparentInput) {
+      paramEnv.TRACEPARENT = traceparentInput;
     }
+    const env = buildChildEnvironment(process.env, paramEnv);
 
     const byteLimit = Math.min(
       Math.max(1024, Number(params.outputByteLimit) || DEFAULT_TERMINAL_OUTPUT_LIMIT),
@@ -871,6 +946,8 @@ module.exports = {
   PROTOCOL_VERSION,
   DEFAULT_AGENT_PRESETS,
   buildAugmentedPath,
+  detectJavaHome,
+  buildChildEnvironment,
   resolveExecutableOnPath,
   resolveSafeWorkspacePath,
   sliceLines,

@@ -21,7 +21,15 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
+import java.nio.file.FileVisitOption
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
+import java.util.EnumSet
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
 import java.text.SimpleDateFormat
@@ -46,6 +54,14 @@ object DiagnosticsRunner {
         val durationMs: Long = 0L,
     )
 
+    data class DiagnosticsOverhead(
+        val diagnosticsDurationMs: Long,
+        val hostCpuDeltaMs: Long,
+        val pssDeltaMb: Long?,
+        val diagnosticsDiskBytes: Long,
+        val telemetryLastCaptureDurationMs: Long = -1L,
+    )
+
     data class ReportInput(
         val timestampUtc: String,
         val deviceInfo: Map<String, String>,
@@ -53,6 +69,108 @@ object DiagnosticsRunner {
         val recentLogs: String,
         val sessionSummaryText: String = "",
     )
+
+    fun computeDirectorySizeBytes(dir: File): Long {
+        val rootPath = dir.toPath()
+        if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS) ||
+            Files.isSymbolicLink(rootPath) ||
+            !Files.isDirectory(rootPath, LinkOption.NOFOLLOW_LINKS) ||
+            !Files.isReadable(rootPath)
+        ) {
+            return -1L
+        }
+        var totalBytes = 0L
+        var rootFailed = false
+        try {
+            Files.walkFileTree(
+                rootPath,
+                EnumSet.noneOf(FileVisitOption::class.java),
+                Int.MAX_VALUE,
+                object : SimpleFileVisitor<Path>() {
+                    override fun preVisitDirectory(dirPath: Path, attrs: BasicFileAttributes): FileVisitResult {
+                        if (attrs.isSymbolicLink || Files.isSymbolicLink(dirPath)) {
+                            if (dirPath == rootPath) {
+                                rootFailed = true
+                                return FileVisitResult.TERMINATE
+                            }
+                            return FileVisitResult.SKIP_SUBTREE
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                        if (!attrs.isSymbolicLink && !Files.isSymbolicLink(file) && attrs.isRegularFile) {
+                            totalBytes += attrs.size()
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult {
+                        if (file == rootPath) {
+                            rootFailed = true
+                            return FileVisitResult.TERMINATE
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+                },
+            )
+        } catch (_: Exception) {
+            return -1L
+        }
+        return if (rootFailed) -1L else totalBytes
+    }
+
+    fun computeDiagnosticsOverhead(
+        startElapsedMs: Long,
+        endElapsedMs: Long,
+        startCpuMs: Long,
+        endCpuMs: Long,
+        startPssMb: Long,
+        endPssMb: Long,
+        diagnosticsDiskBytes: Long,
+        telemetryLastCaptureDurationMs: Long = -1L,
+    ): DiagnosticsOverhead {
+        val durationMs = maxOf(0L, endElapsedMs - startElapsedMs)
+        val cpuDeltaMs = if (startCpuMs < 0L || endCpuMs < 0L) {
+            -1L
+        } else {
+            maxOf(0L, endCpuMs - startCpuMs)
+        }
+        val pssDeltaMb = if (startPssMb < 0L || endPssMb < 0L) {
+            null
+        } else {
+            endPssMb - startPssMb
+        }
+        return DiagnosticsOverhead(
+            diagnosticsDurationMs = durationMs,
+            hostCpuDeltaMs = cpuDeltaMs,
+            pssDeltaMb = pssDeltaMb,
+            diagnosticsDiskBytes = diagnosticsDiskBytes,
+            telemetryLastCaptureDurationMs = telemetryLastCaptureDurationMs,
+        )
+    }
+
+    fun formatOverheadSummary(overhead: DiagnosticsOverhead): String {
+        val duration = if (overhead.diagnosticsDurationMs >= 0L) "${overhead.diagnosticsDurationMs}ms" else "unknown"
+        val cpu = if (overhead.hostCpuDeltaMs >= 0L) "${overhead.hostCpuDeltaMs}ms" else "unknown"
+        val pss = overhead.pssDeltaMb?.let { "${if (it >= 0L) "+" else ""}${it}MB" } ?: "unknown"
+        val disk = if (overhead.diagnosticsDiskBytes >= 0L) formatBytesHuman(overhead.diagnosticsDiskBytes) else "unknown"
+        val telemetry = if (overhead.telemetryLastCaptureDurationMs >= 0L) {
+            "${overhead.telemetryLastCaptureDurationMs}ms"
+        } else {
+            "unknown"
+        }
+        return "duration=$duration, hostCpuDelta=$cpu, pssDelta=$pss, disk=$disk, telemetryCapture=$telemetry"
+    }
+
+    private fun formatBytesHuman(bytes: Long): String {
+        if (bytes < 0L) return "unknown"
+        return when {
+            bytes >= 1024L * 1024L -> String.format(Locale.US, "%.2f MB (%d B)", bytes / (1024.0 * 1024.0), bytes)
+            bytes >= 1024L -> String.format(Locale.US, "%.1f KB (%d B)", bytes / 1024.0, bytes)
+            else -> "$bytes B"
+        }
+    }
 
     fun formatMarkdownReport(input: ReportInput): String {
         val sb = StringBuilder()
@@ -102,7 +220,19 @@ object DiagnosticsRunner {
         collectMutex.withLock {
             withContext(Dispatchers.IO) {
                 val telemetry = SessionTelemetryManager.getInstance(context)
-                runCatching { telemetry.captureMetricSnapshot("diagnostics_start", includePss = true) }
+                val startNs = System.nanoTime()
+                val collectSpan = runCatching {
+                    telemetry.startSpan(name = "diagnostics.collect")
+                }.getOrNull()
+                val startSnapshot = runCatching {
+                    telemetry.captureMetricSnapshot("diagnostics_start", includePss = true)
+                }.getOrNull()
+                val startCpuMs = startSnapshot?.hostCpuTimeMs
+                    ?: runCatching { android.os.Process.getElapsedCpuTime() }.getOrDefault(-1L)
+                val startPssMb = startSnapshot?.pssMb ?: -1L
+                var endSnapshotRecorded = false
+                var collectError: Throwable? = null
+                var computedOverhead: DiagnosticsOverhead? = null
                 try {
                     val paths = runtime.getPaths()
                     val status = runtime.getStatus()
@@ -110,6 +240,14 @@ object DiagnosticsRunner {
                     val sessions = telemetry.listSessionSummaries()
                     val currentSession = sessions.firstOrNull { it.isCurrentSession }
                     val previousSession = sessions.firstOrNull { !it.isCurrentSession }
+                    val pkgInfo = runCatching {
+                        context.packageManager.getPackageInfo(context.packageName, 0)
+                    }.getOrNull()
+                    val versionName = pkgInfo?.versionName?.takeIf { it.isNotBlank() } ?: "unknown"
+                    val versionCode = pkgInfo?.longVersionCode ?: 0L
+                    val buildSha = runCatching {
+                        context.getString(R.string.kucode_build_sha).trim().ifEmpty { "unknown" }
+                    }.getOrDefault("unknown")
 
                     val deviceInfo = linkedMapOf<String, String>()
                     deviceInfo["Device"] = "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})"
@@ -123,6 +261,8 @@ object DiagnosticsRunner {
                     deviceInfo["System DNS"] = if (systemDns.isEmpty()) "(fallback 1.1.1.1/8.8.8.8)" else systemDns.joinToString(", ")
                     deviceInfo["System CA Bundle"] = querySystemCaSummary(paths)
                     deviceInfo["App"] = "${context.packageName} (targetSdk=${context.applicationInfo.targetSdkVersion})"
+                    deviceInfo["App Version"] = "$versionName (code=$versionCode)"
+                    deviceInfo["Build SHA"] = buildSha
                     deviceInfo["XR Spatial Feature"] =
                         context.packageManager.hasSystemFeature("android.software.xr.api.spatial").toString()
                     deviceInfo["All Files Access"] = status.hasAllFilesAccess.toString()
@@ -229,6 +369,34 @@ object DiagnosticsRunner {
                         }
                     }
 
+                    val diagnosticsDiskBytes = computeDirectorySizeBytes(paths.diagnosticsDir)
+                    val endSnapshot = runCatching {
+                        telemetry.captureMetricSnapshot("diagnostics_end", includePss = true)
+                    }.getOrNull()
+                    endSnapshotRecorded = true
+                    val endElapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(0L)
+                    val endCpuMs = endSnapshot?.hostCpuTimeMs
+                        ?: runCatching { android.os.Process.getElapsedCpuTime() }.getOrDefault(-1L)
+                    val endPssMb = endSnapshot?.pssMb ?: -1L
+                    val telemetryStats = runCatching { telemetry.getTelemetryOverheadStats() }.getOrNull()
+                    val overhead = computeDiagnosticsOverhead(
+                        startElapsedMs = 0L,
+                        endElapsedMs = endElapsedMs,
+                        startCpuMs = startCpuMs,
+                        endCpuMs = endCpuMs,
+                        startPssMb = startPssMb,
+                        endPssMb = endPssMb,
+                        diagnosticsDiskBytes = diagnosticsDiskBytes,
+                        telemetryLastCaptureDurationMs = telemetryStats?.lastCaptureDurationMs ?: -1L,
+                    )
+                    computedOverhead = overhead
+                    deviceInfo["Diagnostics Overhead"] = formatOverheadSummary(overhead)
+                    deviceInfo["Diagnostics Disk"] = if (diagnosticsDiskBytes >= 0L) {
+                        formatBytesHuman(diagnosticsDiskBytes)
+                    } else {
+                        "unknown"
+                    }
+
                     val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
                         timeZone = TimeZone.getTimeZone("UTC")
                     }
@@ -242,8 +410,36 @@ object DiagnosticsRunner {
                             sessionSummaryText = sessionListDigest,
                         ),
                     )
+                } catch (t: Throwable) {
+                    collectError = t
+                    throw t
                 } finally {
-                    runCatching { telemetry.captureMetricSnapshot("diagnostics_end", includePss = true) }
+                    if (!endSnapshotRecorded) {
+                        val trigger = if (collectError != null) "diagnostics_error_end" else "diagnostics_end"
+                        runCatching { telemetry.captureMetricSnapshot(trigger, includePss = true) }
+                    }
+                    if (collectSpan != null) {
+                        val spanAttrs = computedOverhead?.let { ov ->
+                            mapOf(
+                                "kucode.diagnostics.duration_ms" to ov.diagnosticsDurationMs,
+                                "kucode.diagnostics.disk_bytes" to ov.diagnosticsDiskBytes,
+                            )
+                        } ?: emptyMap()
+                        runCatching {
+                            telemetry.endSpan(
+                                spanId = collectSpan.spanId,
+                                status = if (collectError == null) {
+                                    SessionLogStore.SpanStatus.OK
+                                } else {
+                                    SessionLogStore.SpanStatus.ERROR
+                                },
+                                statusMessage = collectError?.let {
+                                    LogRedactor.redact(it.message ?: it.javaClass.simpleName)
+                                },
+                                attributes = spanAttrs,
+                            )
+                        }
+                    }
                 }
             }
         }

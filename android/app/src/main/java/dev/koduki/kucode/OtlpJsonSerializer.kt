@@ -190,6 +190,9 @@ object OtlpJsonSerializer {
             MetricExtractor("kucode.process.low_memory", "1") { if (it.lowMemory) 1L else 0L },
             MetricExtractor("kucode.server.alive", "1") { if (it.serverAlive) 1L else 0L },
             MetricExtractor("kucode.thermal.level", "1") { thermalStatusToLevel(it.thermalStatus) },
+            MetricExtractor("kucode.telemetry.capture_duration_ms", "ms") {
+                if (it.captureDurationMs >= 0L) it.captureDurationMs else null
+            },
         )
 
         val metricsArray = JSONArray()

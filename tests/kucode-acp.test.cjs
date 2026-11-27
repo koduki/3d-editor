@@ -690,4 +690,39 @@ test('AcpChatViewProvider ignores workspace-scoped ACP overrides and blocks untr
   messageListener({ type: 'connect' });
   await new Promise((r) => setTimeout(r, 20));
   assert.ok(postedMessages.some((m) => m.type === 'error' && /Trust this workspace/.test(m.message)));
+
+  // Untrusted workspace must reject openInTerminal cleanly
+  await assert.rejects(
+    () => provider.openInTerminal('echo blocked', 'Blocked Setup'),
+    /Trust this workspace/i,
+  );
+});
+
+test('detectJavaHome and buildChildEnvironment align SDK, XDG, PATH, and TRACEPARENT', (t) => {
+  const { detectJavaHome, buildChildEnvironment } = require(acpClientPath);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kucode-acp-env-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const fakeJdk = path.join(tmp, 'jdk-21');
+  fs.mkdirSync(path.join(fakeJdk, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(fakeJdk, 'bin', 'java'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+  assert.equal(detectJavaHome({ JAVA_HOME: fakeJdk }), fakeJdk);
+
+  const parentTp = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+  const childEnv = buildChildEnvironment(
+    { HOME: '/root', JAVA_HOME: fakeJdk, PATH: '/usr/bin:/bin', TRACEPARENT: parentTp },
+    { EXTRA_VAR: '1' },
+  );
+  assert.equal(childEnv.HOME, '/root');
+  assert.equal(childEnv.XDG_CACHE_HOME, '/root/.cache');
+  assert.equal(childEnv.XDG_CONFIG_HOME, '/root/.config');
+  assert.equal(childEnv.XDG_DATA_HOME, '/root/.local/share');
+  assert.equal(childEnv.ANDROID_HOME, '/root/Android/Sdk');
+  assert.equal(childEnv.ANDROID_SDK_ROOT, '/root/Android/Sdk');
+  assert.equal(childEnv.JAVA_HOME, fakeJdk);
+  assert.equal(childEnv.EXTRA_VAR, '1');
+  assert.notEqual(childEnv.TRACEPARENT, parentTp);
+  const parts = childEnv.PATH.split(path.delimiter);
+  assert.ok(parts.indexOf(`${fakeJdk}/bin`) < parts.indexOf('/usr/local/sbin'));
 });

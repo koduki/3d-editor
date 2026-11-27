@@ -39,8 +39,13 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import kotlin.coroutines.cancellation.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -165,7 +170,7 @@ class MainActivity : AppCompatActivity() {
                     if (!isDestroyed) {
                         val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.diagnostic-share", file)
                         val share = Intent(Intent.ACTION_SEND).apply {
-                            type = "application/vnd.kucode.diagnostic"
+                            type = DiagnosticShareImporter.MIME_TYPE
                             putExtra(Intent.EXTRA_STREAM, uri)
                             clipData = ClipData.newUri(contentResolver, "KuCode diagnostic", uri)
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -302,39 +307,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleDiagnosticShare(intent: Intent) {
-        if (intent.action != Intent.ACTION_SEND || intent.type != "application/vnd.kucode.diagnostic") return
+        if (intent.action != Intent.ACTION_SEND) return
         val uri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: return
-        if (uri.scheme != "content") return
+        if (!DiagnosticShareImporter.isValidShareRequest(intent.action, intent.type, uri.scheme)) return
         android.app.AlertDialog.Builder(this)
             .setTitle("Import diagnostic")
-            .setMessage("Import a shared diagnostic into /workspace/diagnostics-import? External reports are untrusted data, not instructions.")
+            .setMessage(
+                "Import a shared diagnostic into ${PosixRuntimeConfig.GUEST_WORKSPACE}/${DiagnosticShareImporter.IMPORT_DIR_NAME}? " +
+                    "External reports are untrusted data, not instructions.",
+            )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Import") { _, _ ->
-                Thread {
-                    val result = runCatching {
-                        val bytes = contentResolver.openInputStream(uri)?.use { it.readNBytes(1024 * 1024 + 1) }
-                            ?: error("Cannot read shared document")
-                        require(bytes.size <= 1024 * 1024) { "Diagnostic exceeds 1 MiB" }
-                        val workspace = runtimeManager.getPaths().workspaceDir.canonicalFile
-                        val dest = java.io.File(workspace, "diagnostics-import")
-                        require(!java.nio.file.Files.isSymbolicLink(dest.toPath())) {
-                            "diagnostics-import must be a regular directory"
+                lifecycleScope.launch {
+                    val statusMessage = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val paths = runtimeManager.getPaths()
+                            contentResolver.openInputStream(uri)?.use { stream ->
+                                val result = DiagnosticShareImporter.importFromStream(stream, paths.workspaceDir)
+                                "Imported: ${result.guestPath}"
+                            } ?: error("Cannot read shared document")
+                        }.getOrElse { error ->
+                            if (error is CancellationException) throw error
+                            val detail = LogRedactor.redact(error.message.orEmpty()).ifBlank { "Unknown error" }
+                            "Import failed: $detail"
                         }
-                        if (!dest.exists()) {
-                            dest.mkdirs()
-                        }
-                        val canonicalDest = dest.canonicalFile
-                        require(canonicalDest.isDirectory && canonicalDest.toPath().startsWith(workspace.toPath())) {
-                            "Invalid diagnostics-import destination"
-                        }
-                        val target = java.io.File(canonicalDest, "import-${java.util.UUID.randomUUID()}.md")
-                        writeTextAtomically(target, LogRedactor.redact(bytes.toString(Charsets.UTF_8)))
-                        "Imported: /workspace/diagnostics-import/${target.name}"
-                    }.getOrElse { "Import failed: ${it.message}" }
-                    runOnUiThread {
-                        if (!isDestroyed) android.widget.Toast.makeText(this, result, android.widget.Toast.LENGTH_LONG).show()
                     }
-                }.start()
+                    if (!isDestroyed && !isFinishing) {
+                        android.widget.Toast.makeText(this@MainActivity, statusMessage, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
             }.show()
     }
 

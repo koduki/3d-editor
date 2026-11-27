@@ -12,7 +12,7 @@ git -C "$root" rev-parse HEAD
 [[ "$(uname -m)" == aarch64 || "$(uname -m)" == arm64 ]] || { echo "NOT RUN: ARM64 AURA required"; exit 2; }
 command -v kucode >/dev/null || { echo "NOT RUN: KuCode CLI missing"; exit 2; }
 test -f "$root/runtime-assets.lock.json" || { echo "NOT RUN: reviewed asset lock unavailable"; exit 2; }
-kucode sdk doctor | tee "$out/sdk-doctor.json"
+kucode sdk doctor --versions | tee "$out/sdk-doctor.json"
 python3 "$root/scripts/runtime-assets.py" fetch --lock "$root/runtime-assets.lock.json"
 cp "$root/runtime-assets.lock.json" "$out/"
 python3 -m unittest discover -s "$root/tests" -p test_runtime_assets.py -v

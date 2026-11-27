@@ -205,6 +205,29 @@ class AndroidInstallPolicyTest {
         assertEquals("あい", String(BootHostBridge.truncateUtf8Bytes(text, 6), Charsets.UTF_8))
     }
 
+    @Test
+    fun cleanupAbandonedOnStartupAbandonsOwnedSessionsAndDeletesStageDir() {
+        val base = Files.createTempDirectory("bridge-cleanup-test").toFile()
+        val directExecutor = Executor { it.run() }
+        try {
+            val fake = FakeAndroidBridgePlatform(base)
+            fake.stageDir.mkdirs()
+            val staleApk = File(fake.stageDir, "stale-install.apk").apply { writeText("stale") }
+            val nestedFile = File(fake.stageDir, "nested/part.tmp").apply {
+                parentFile!!.mkdirs()
+                writeText("part")
+            }
+            val core = AndroidHostBridgeCore(fake, directExecutor)
+            core.cleanupAbandonedOnStartup()
+            assertEquals(1, fake.abandonedOwnedSessionsCount)
+            assertFalse(staleApk.exists())
+            assertFalse(nestedFile.exists())
+            assertFalse(fake.stageDir.exists())
+        } finally {
+            deleteTreeNoFollow(base)
+        }
+    }
+
     private class FakeAndroidBridgePlatform(baseDir: File) : AndroidBridgePlatform {
         override val ownPackageName: String = "dev.koduki.kucode"
         override val filesDir: File = baseDir
@@ -216,6 +239,7 @@ class AndroidInstallPolicyTest {
         val installedSigners = mutableMapOf<String, InstalledPackageSigners>()
         var createdSessions = 0
         var lastSessionId = 0
+        var abandonedOwnedSessionsCount = 0
         val abandonedSessions = mutableSetOf<Int>()
         val notifiedSessions = mutableSetOf<Int>()
         val cancelledNotifications = mutableSetOf<Int>()
@@ -232,7 +256,7 @@ class AndroidInstallPolicyTest {
         }
         override fun writeAndCommitSession(sessionId: Int, apk: File, operationId: String) = Unit
         override fun abandonSession(sessionId: Int) { abandonedSessions.add(sessionId) }
-        override fun abandonOwnedSessions() = Unit
+        override fun abandonOwnedSessions() { abandonedOwnedSessionsCount++ }
         override fun notifyPendingUserAction(sessionId: Int, packageName: String, confirmIntent: Any) {
             notifiedSessions.add(sessionId)
         }

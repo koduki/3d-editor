@@ -164,6 +164,9 @@ class AcpChatViewProvider {
   }
 
   async openInTerminal(commandText, name = 'KuCode ACP Setup') {
+    if (vscode.workspace.isTrusted === false) {
+      throw new Error('Trust this workspace before opening an agent terminal.');
+    }
     const term = vscode.window.createTerminal({ name });
     term.show(false);
     term.sendText(commandText, true);

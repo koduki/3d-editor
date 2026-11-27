@@ -506,6 +506,10 @@ async function sendSelectionToAcpCommand() {
 }
 
 async function setupAntigravityCliCommand() {
+  if (vscode.workspace.isTrusted === false) {
+    vscode.window.showErrorMessage('Trust this workspace before running agent setup.');
+    return;
+  }
   if (acpProviderInstance) {
     await acpProviderInstance.openInTerminal('kucode-install-agy && agy acp --login', 'KuCode: Antigravity CLI (agy) Setup');
     return;
@@ -518,6 +522,10 @@ async function setupAntigravityCliCommand() {
 }
 
 async function setupCopilotCliCommand() {
+  if (vscode.workspace.isTrusted === false) {
+    vscode.window.showErrorMessage('Trust this workspace before running agent setup.');
+    return;
+  }
   if (acpProviderInstance) {
     await acpProviderInstance.openInTerminal('kucode-install-copilot && copilot login', 'KuCode: Copilot CLI Setup');
     return;
