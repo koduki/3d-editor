@@ -20,3 +20,6 @@ description: "Architectural, security, and testability rules for KuCode's Androi
 5. **Test Discipline**:
    - Mark subprocess/socket/archive tests with `@Category(MediumTest::class)`.
    - Never add `@Ignore` or new `@Suppress` annotations to hide failures.
+6. **`@JavascriptInterface` Sync-Read vs I/O-Lock Separation**:
+   - UI thread and `@JavascriptInterface` synchronous readers must NEVER acquire blocking disk or network I/O locks.
+   - Keep fast in-memory state/snapshot locks strictly separate from blocking I/O locks in an acyclic lock DAG (never hold a UI/bridge state lock across disk/network I/O, and prefer atomic/immutable snapshots or CAS/monotonic ordering for cross-thread reads).

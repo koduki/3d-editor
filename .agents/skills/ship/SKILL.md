@@ -13,7 +13,7 @@ The user invokes **`/ship <feature, bug, #issue, or uploaded diagnostic bundle>`
 1. **Cloud-First / Zero Local PC Dependency**: Assume execution on **Antigravity Remote Agents** (browser/mobile). Use `invoke_subagent` with `Workspace: "inherit"` (worktree modes are unsupported on Remote Agents) and rely on **GitHub PR ChatGPT Codex Connector** as the primary OpenAI reviewer (no local `codex login` or extra API keys required).
 2. **Single Human Gate (`S2_CONTRACT_LOCK`)**: Stop for human input ONLY during `S1_AUTO_GRILL` (when ambiguities exist) and **`S2_CONTRACT_LOCK`** (contract approval). After S2 approval, run `S3a` -> `S3b` -> `S5` -> `S6` -> `S7` -> `S8` autonomously until done or a Safety Escalation triggers.
 3. **Clean-Room Spec-Derived Test Oracle (`S3a` before `S3b`)**: Never let the coding agent write its own acceptance tests from implementation code. Always spawn a **completely separate agent process (`oracle-test-author`, `Model: "pro"`)** BEFORE implementation begins (`S3a_ORACLE_TEST_GEN`) to author behavioral E2E/contract oracle tests directly from the approved specification (`spec.md` + `acceptance.json`), verify pre-implementation Red failure, and hard-lock those oracle files via `PreToolUse` hook before coding (`S3b_IMPL_WORKFLOW`) starts.
-4. **Tiered Custom Subagents & Quota-Safe Parent Model**: Route sub-tasks through the 5 permanent custom subagents under `.agents/agents/*.md` configured in `.agents/ship.config.json` (`ship-recon`/`flash`, `ship-architect`/`pro`, `oracle-test-author`/`pro`, `ship-implementer`/`inherit`, `ship-verifier`/`flash`). Recommend **Orchestrator** (or **Gemini 4 Neon**) as the parent model, and switch the parent model to **Claude Sonnet 5.5** if the Gemini 5-hour quota pool saturates (all `inherit` implementers switch automatically). If a surface has not auto-discovered `.agents/agents/`, register the equivalent subagent via `define_subagent` with the same minimal toolset and tier.
+4. **Tiered Custom Subagents & Quota-Safe Parent Model**: Route sub-tasks through the 6 permanent custom subagents under `.agents/agents/*.md` configured in `.agents/ship.config.json` (`ship-recon`/`flash`, `ship-architect`/`pro`, `oracle-test-author`/`pro`, `ship-implementer` routed via `execution.implementerTiers` as `standard`=`flash` / `complex`=`inherit`, `ship-verifier`/`flash`, `ship-reviewer`/`pro`). Recommend **Orchestrator** (or **Gemini 4 Neon**) as the parent model, and switch the parent model to **Claude Sonnet 5.5** if the Gemini 5-hour quota pool saturates (all `inherit` implementers switch automatically). If a surface has not auto-discovered `.agents/agents/`, register the equivalent subagent via `define_subagent` with the same minimal toolset and tier.
 5. **Main Agent Never Reads Large Code or Raw Logs**: Hold only the map (`AGENTS.md`, `.agents/ship.config.json`, `spec.md`, ADR titles), state checkpoint, contract, changed file list, and compressed JSON outputs.
 6. **Strict Retry Caps (Max 2)** & **Zero Extra API Billing**: Cap verification, Codex fix rounds, and CI repair loops at 2 retries each (within Antigravity Pro + ChatGPT Plus subscriptions). Exceeding any cap escalates cleanly to the human.
 7. **Truthfulness Invariant**: Never claim physical-device checks (e.g. XREAL AURA) passed based solely on Linux CI or JVM/Node tests. Record unrun hardware gates as `NOT RUN`.
@@ -23,7 +23,9 @@ The user invokes **`/ship <feature, bug, #issue, or uploaded diagnostic bundle>`
 ## Startup & Resume
 1. Read `.agents/ship.config.json` and `AGENTS.md`.
 2. Run `node .agents/skills/ship/scripts/state.mjs status`.
-3. If an active run exists on the current branch (`active: true` and `currentState !== "DONE"`), resume immediately from `currentState`.
+3. If an active run exists on the current branch (`active: true` and `currentState !== "DONE"`):
+   - If `currentState === "ESCALATED"` or recovering from `WAITING_HUMAN` after resolving the blocker, run `node .agents/skills/ship/scripts/state.mjs resume [targetState] [--reset-retries impl,codex,ci|all]` (clears `escalationReason`, resets `stallsInState` and selected retry counters, enforces contract/oracle/CI/Codex lock preconditions, and sets `gate` appropriately).
+   - Resume immediately from `currentState`.
 4. Otherwise:
    - If currently on `defaultBranch` (`main`), create a descriptive branch (`feat/<slug>` or `fix/<slug>`).
    - Run `node .agents/skills/ship/scripts/state.mjs init "<user request>"`.
@@ -110,15 +112,19 @@ Execution sequence:
 
 ---
 
-### `S3b_IMPL_WORKFLOW` — Adaptive Parallel Implementation & Serial Oracle Verification
-Choose concurrency dynamically per `.agents/ship.config.json` to preserve Antigravity Pro 5-hour quota:
-- **Express / small task (1–2 files)**: 1 `ship-implementer` subagent (`Workspace: "inherit"`, `Model: "inherit"`).
-- **Standard task**: up to 2 parallel `ship-implementer` subagents (`Workspace: "inherit"`, `Model: "inherit"`).
-- **Multi-layer feature**: up to **3 parallel `ship-implementer` subagents** in Wave 1 with **strictly disjoint file ownership (1 file = 1 subagent)**, followed by sequential Wave 2 wiring.
+### `S3b_IMPL_WORKFLOW` — Adaptive Parallel Implementation, Serial Oracle Verification & Pre-PR Adversarial Review
+Choose concurrency and **2-Tier Implementer Routing** dynamically per `.agents/ship.config.json` (`execution.implementerTiers`) to preserve Antigravity Pro 5-hour quota:
+- **2-Tier Implementer Routing** (`execution.implementerTiers`):
+  - **`standard` tier (`Model: "flash"`)**: config/schema wiring, documentation/prompts, straightforward single-module scripts, and mechanical updates.
+  - **`complex` tier (`Model: "inherit"`)**: stateful concurrency, lock DAG/IPC/network protocols, security boundaries, and intricate multi-file logic.
+- **Concurrency scaling**:
+  - **Express / small task (1–2 files)**: 1 `ship-implementer` subagent (`Workspace: "inherit"`, routed by tier).
+  - **Standard task**: up to 2 parallel `ship-implementer` subagents (`Workspace: "inherit"`, routed by tier).
+  - **Multi-layer feature**: up to **3 parallel `ship-implementer` subagents** in Wave 1 with **strictly disjoint file ownership (1 file = 1 subagent)**, followed by sequential Wave 2 wiring.
 - **Note**: On Desktop App/CLI, `.agents/skills/ship/workflows/build_and_verify.py` mirrors this same `S3a` -> `S3b` oracle-first pipeline.
 
 Execution sequence:
-1. **Implement (Wave 1 -> Wave 2)**: Launch bounded `invoke_subagent` implementer worker(s) (`TypeName: "ship-implementer"`, `Model: "inherit"`, `Workspace: "inherit"`, falling back to `TypeName: "self"` if `.agents/agents/` is not discovered), giving each worker its exact exclusive production file list (`owned_files`) and `spec.md`.
+1. **Implement (Wave 1 -> Wave 2)**: Launch bounded `invoke_subagent` implementer worker(s) (`TypeName: "ship-implementer"`, `Model` from `execution.implementerTiers` — `"flash"` for `standard`, `"inherit"` for `complex` — `Workspace: "inherit"`, falling back to `TypeName: "self"` if `.agents/agents/` is not discovered), giving each worker its exact exclusive production file list (`owned_files`) and `spec.md`.
    - Workers may optionally add internal unit tests for private helpers, **but CANNOT edit locked oracle test files** (`guard-boundaries.mjs` rejects any attempt).
    - If a worker suspects a genuine ambiguity in the spec or a syntax bug in an oracle test, it MUST report the discrepancy to the orchestrator instead of editing the oracle. The orchestrator either escalates spec ambiguity to the human, or (for pure test harness syntax errors only) re-invokes `oracle-test-author` (`Model: "pro"`) with ONLY the error message and `spec.md` (never implementation code) — never letting the coding agent touch the oracle.
 2. **Serial Critical-Section Verification (Max 2 Retries)**:
@@ -129,8 +135,11 @@ Execution sequence:
      4. `verification.tests`
      5. `verification.gradle` (runs Kotlin unit tests, Medium tests, and `*OracleTest.kt` when Android SDK is available)
    - If verification fails: call `state.mjs record-retry impl`. If exceeded (>2) -> `state.mjs escalate` and stop. Otherwise route ONLY the compressed failure items back to the responsible `ship-implementer` worker (`send_message`) and re-verify serially.
-3. Update `acceptance.json` (`passed: true` ONLY for criteria proven by passing locked oracle test evidence; keep unrun hardware gates `NOT RUN`).
-4. Transition via `state.mjs transition S5_PR_CI_HEAL_LOOP --oracle-passed` (or `S4_LOCAL_CODEX_REVIEW --oracle-passed` on PC local with `codex` CLI).
+3. **Pre-PR Adversarial Review (Once After `ship-verifier` Passes, Before PR Creation in `S5`)**:
+   - Invoke the read-only reviewer (`TypeName: "ship-reviewer"`, `Model: "pro"`, `Workspace: "inherit"`) once against `git diff main...HEAD` to audit for P0/P1 concurrency/lock DAG, CAS/monotonic ordering, per-request consent, crash-finalized recovery, and security/contract regressions before opening the PR.
+   - If `ship-reviewer` reports verified P0/P1 findings, fix them (via `ship-implementer` or Micro-Fix Policy below) and re-verify serially with `ship-verifier`.
+4. Update `acceptance.json` (`passed: true` ONLY for criteria proven by passing locked oracle test evidence; keep unrun hardware gates `NOT RUN`).
+5. Transition via `state.mjs transition S5_PR_CI_HEAL_LOOP --oracle-passed` (or `S4_LOCAL_CODEX_REVIEW --oracle-passed` on PC local with `codex` CLI).
 
 ---
 
@@ -140,21 +149,24 @@ Execution sequence:
 
 ---
 
-### `S5_PR_CI_HEAL_LOOP` — PR Creation, GitHub Actions CI & ChatGPT Codex GitHub App Gate (Max 10 Min)
-1. Commit changes cleanly (pre-commit guards run automatically via `.githooks/pre-commit`), push branch to `origin`, and open/update PR via `gh pr create` with: Spec map, Clean-Room Oracle test list (`S3a`), Changed files, Verification results, and explicit hardware `NOT RUN` note.
+### `S5_PR_CI_HEAL_LOOP` — PR Creation, GitHub Actions CI & ChatGPT Codex GitHub App Gate (Max 10 Min + 5 Min Running Grace)
+1. Commit changes cleanly — `.githooks/pre-commit` enforces the secondary boundary lock via `node .agents/skills/ship/scripts/check-staged-boundaries.mjs` (blocking secrets, unapproved protected edits, and locked oracle/contract `M`/`D`/`R` tampering even where `PreToolUse` hooks do not fire) before `node scripts/guards/run-all-guards.mjs --changed-only`. Push branch to `origin`, and open/update PR via `gh pr create` with: Spec map, Clean-Room Oracle test list (`S3a`), Changed files, Verification results, and explicit hardware `NOT RUN` note.
 2. Record PR number via `state.mjs transition S5_PR_CI_HEAL_LOOP --pr <num>`.
 3. Launch `node .agents/skills/ship/scripts/wait-pr-gates.mjs <pr-number>` (use background execution on Remote Agents so waiting consumes zero turns/tokens until completion).
-   - Waits for all GitHub Actions checks (including locked oracle suites) AND ChatGPT Codex Connector PR review (nudging `@codex review` once after 90s if silent, waiting up to **10 minutes**).
-4. Act strictly on the structured JSON verdict:
+   - Waits for all GitHub Actions checks (including locked oracle suites) AND ChatGPT Codex Connector PR review (deduplicating `@codex review` via fresh PR comments, nudging once after 90s if silent, waiting up to **10 minutes** plus up to `+300s` `runningGraceSeconds` capped at `900s` `maxTotalTimeoutSeconds` while Codex is actively running).
+4. **Micro-Fix Policy (`ciSelfHeal.microFixMaxLines: 50`)**:
+   - When a CI failure or Codex P0/P1 finding is strictly a single-file, `< 50`-line targeted fix already pinpointed by the orchestrator, the orchestrator may patch that single file directly instead of spawning a new implementer subagent, then verify serially via `ship-verifier` (`Model: "flash"`).
+   - Micro-fixes MUST NEVER touch locked oracle test files, locked contracts, or unapproved protected files. Larger or multi-file fixes must be routed to `ship-implementer`.
+5. Act strictly on the structured JSON verdict:
    - **`nextAction === "heal_ci"`**:
      - Call `state.mjs record-retry ci`. If exceeded (>2) -> `state.mjs escalate` and stop.
-     - Read ONLY `failureReports[].triage` (LogSage compressed JSON). Fix production code via a subagent without modifying locked contracts/oracles/guards or weakening tests, verify locally, commit, push, and re-run `wait-pr-gates.mjs`.
+     - Read ONLY `failureReports[].triage` (LogSage compressed JSON). Fix production code (via `ship-implementer` or Micro-Fix Policy if single-file `< 50` lines) without modifying locked contracts/oracles/guards or weakening tests, verify serially via `ship-verifier`, commit, push, and re-run `wait-pr-gates.mjs`.
    - **`nextAction === "fix_codex_findings"`** (KDD'26 cross-model discipline):
      - Call `state.mjs record-retry codex`. If exceeded (>2) -> `state.mjs escalate` and stop.
-     - For factual P0/P1 bugs or security/contract violations: write a failing reproducing test first (Red), fix (Green), reply concisely on the PR, push, and re-run `wait-pr-gates.mjs`.
+     - For factual P0/P1 bugs or security/contract violations: write a failing reproducing test first (Red), fix (Green, via `ship-implementer` or Micro-Fix Policy if single-file `< 50` lines), verify serially via `ship-verifier`, reply concisely on the PR, push, and re-run `wait-pr-gates.mjs`.
      - For architectural/contract disagreements with Codex: do NOT argue; run `state.mjs escalate` and return the disagreement to the human.
-   - **`nextAction === "escalate_human"`** (Codex 10-min timeout or ChatGPT Plus quota limit):
-     - **DO NOT auto-merge.** Run `state.mjs escalate "<escalateReason>"` and return to the human with the PR link and CI status.
+   - **`nextAction === "escalate_human"`** (Codex timeout, still-running at cap, or ChatGPT Plus quota limit):
+     - **DO NOT auto-merge.** Run `state.mjs escalate "<escalateReason>"` and return to the human with the PR link and CI status (resume later via `state.mjs resume`).
    - **`nextAction === "auto_merge"`** (`readyToAutoMerge === true`):
      - Transition via `node .agents/skills/ship/scripts/state.mjs transition S6_AUTO_MERGE_AND_DEPLOY --ci-passed --codex-passed`.
 

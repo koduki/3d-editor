@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+echo "[pre-commit] Checking staged boundary locks..."
+node .agents/skills/ship/scripts/check-staged-boundaries.mjs
+
 echo "[pre-commit] Running KuCode non-ignorable guards..."
 node scripts/guards/run-all-guards.mjs --changed-only
 

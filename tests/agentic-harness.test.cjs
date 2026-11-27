@@ -24,6 +24,7 @@ test('ship.config.json defines cloud-first Remote Agents, 1-gate, one-by-one gri
     oracleAuthor: 'oracle-test-author',
     implementer: 'ship-implementer',
     verifier: 'ship-verifier',
+    reviewer: 'ship-reviewer',
   });
   assert.deepEqual(cfg.execution.models, {
     orchestrator: 'inherit',
@@ -32,6 +33,11 @@ test('ship.config.json defines cloud-first Remote Agents, 1-gate, one-by-one gri
     oracleAuthor: 'pro',
     implementer: 'inherit',
     verifier: 'flash',
+    reviewer: 'pro',
+  });
+  assert.deepEqual(cfg.execution.implementerTiers, {
+    standard: 'flash',
+    complex: 'inherit',
   });
   assert.ok(cfg.boundaries.protectedPatterns.includes('(^|/)\\.agents/agents/'));
   assert.equal(cfg.grilling.mode, 'one-by-one');
@@ -45,8 +51,11 @@ test('ship.config.json defines cloud-first Remote Agents, 1-gate, one-by-one gri
   assert.equal(cfg.oracleTesting.lockOracleDuringImplementation, true);
   assert.equal(cfg.codexReview.primarySurface, 'github-app');
   assert.equal(cfg.codexReview.timeoutSeconds, 600);
+  assert.equal(cfg.codexReview.runningGraceSeconds, 300);
+  assert.equal(cfg.codexReview.maxTotalTimeoutSeconds, 900);
   assert.equal(cfg.codexReview.onTimeoutOrQuota, 'escalate');
   assert.equal(cfg.ciSelfHeal.track, 'subscription-only');
+  assert.equal(cfg.ciSelfHeal.microFixMaxLines, 50);
 });
 
 test('run-all-guards passes cleanly on the live KuCode repository', async () => {
@@ -118,6 +127,7 @@ test('Guard 11 validates .agents/agents/*.md frontmatter, official tool allowlis
     'ship-architect.md',
     'ship-implementer.md',
     'ship-recon.md',
+    'ship-reviewer.md',
     'ship-verifier.md',
   ]);
 
@@ -178,13 +188,30 @@ test('Guard 11 validates .agents/agents/*.md frontmatter, official tool allowlis
       '# Prompt',
     ].join('\n'));
 
+    // (d) Read-only pre-PR reviewer accidentally granted write tool
+    write('.agents/agents/ship-reviewer.md', [
+      '---',
+      'name: ship-reviewer',
+      'description: Read-only reviewer with forbidden write tool',
+      'tools:',
+      '  - view_file',
+      '  - write_to_file',
+      '  - run_command',
+      'subagent: true',
+      'model: pro',
+      'commandExecutionPolicy: sandbox',
+      '---',
+      '# Prompt',
+    ].join('\n'));
+
     const report = runGuards(tmp, { changedOnly: false });
     assert.equal(report.passed, false);
     const guard11 = report.violations.filter((v) => v.ruleId === 'custom-subagent-frontmatter');
-    assert.equal(guard11.length, 3, `Expected 3 Guard 11 violations, got: ${JSON.stringify(guard11, null, 2)}`);
+    assert.equal(guard11.length, 4, `Expected 4 Guard 11 violations, got: ${JSON.stringify(guard11, null, 2)}`);
     assert.ok(guard11.some((v) => v.file.endsWith('bad-tool.md') && /read_file_typo/.test(v.detail)));
     assert.ok(guard11.some((v) => v.file.endsWith('bad-model.md') && /gpt-99/.test(v.detail)));
     assert.ok(guard11.some((v) => v.file.endsWith('ship-verifier.md') && /write_to_file/.test(v.detail)));
+    assert.ok(guard11.some((v) => v.file.endsWith('ship-reviewer.md') && /write_to_file/.test(v.detail)));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -577,3 +604,87 @@ test('Flight Recorder analyzer parses both session directories and exported KuCo
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('wait-pr-gates regression: unresolved state flag, running security_review, and running summary + review comment', async () => {
+  const { extractCodexFindings, evaluateGateVerdict } = await import('../.agents/skills/ship/scripts/wait-pr-gates.mjs');
+  const sinceIso = '2026-11-26T12:00:00.000Z';
+  const headSha = 'abcdef1234567890abcdef1234567890abcdef12';
+
+  // 1) Completed code_review with has_unresolved_findings: true (no fresh inline comment) -> blocking_findings & fix_codex_findings
+  const unresolved = extractCodexFindings([], [], [
+    {
+      author: { login: 'chatgpt-codex-connector[bot]' },
+      updatedAt: '2026-11-26T12:02:00.000Z',
+      body: `Codex Review summary\n<!-- codex-review-state:v1 {"code_review":{"commit_sha":"${headSha}","status":"completed","has_any_findings":true,"has_unresolved_findings":true}} -->`,
+    },
+  ], { sinceIso, headRefOid: headSha });
+  assert.ok(unresolved.blockingCount >= 1);
+  assert.equal(unresolved.status, 'blocking_findings');
+  assert.equal(evaluateGateVerdict({ ciPassed: true, codex: unresolved, timedOut: false }).nextAction, 'fix_codex_findings');
+
+  // 2) code_review completed (no unresolved findings) + security_review running -> running & escalate_human (never auto_merge)
+  const secRunning = extractCodexFindings([], [], [
+    {
+      author: { login: 'chatgpt-codex-connector[bot]' },
+      updatedAt: '2026-11-26T12:03:00.000Z',
+      body: `Codex Review\n<!-- codex-review-state:v1 {"code_review":{"commit_sha":"${headSha}","status":"completed","has_any_findings":false,"has_unresolved_findings":false},"security_review":{"commit_sha":"${headSha}","status":"running","has_any_findings":null,"has_unresolved_findings":null}} -->`,
+    },
+  ], { sinceIso, headRefOid: headSha });
+  assert.equal(secRunning.status, 'running');
+  assert.equal(secRunning.isRunning, true);
+  const secVerdict = evaluateGateVerdict({ ciPassed: true, codex: secRunning, timedOut: false });
+  assert.equal(secVerdict.readyToAutoMerge, false);
+  assert.equal(secVerdict.nextAction, 'escalate_human');
+
+  // 3) Fresh running summary comment + separate fresh review comment -> running (never clean)
+  const mixedRunning = extractCodexFindings(
+    [{ author: { login: 'chatgpt-codex-connector[bot]' }, submittedAt: '2026-11-26T12:04:00.000Z', state: 'COMMENTED', body: 'Reviewed partial diff.' }],
+    [],
+    [
+      {
+        author: { login: 'chatgpt-codex-connector[bot]' },
+        updatedAt: '2026-11-26T12:04:10.000Z',
+        body: `Codex is still reviewing...\n<!-- codex-review-state:v1 {"code_review":{"commit_sha":"${headSha}","status":"running","has_any_findings":null,"has_unresolved_findings":null}} -->`,
+      },
+    ],
+    { sinceIso, headRefOid: headSha },
+  );
+  assert.equal(mixedRunning.status, 'running');
+  assert.notEqual(mixedRunning.status, 'clean');
+});
+
+test('check-staged-boundaries regression: C100 NUL copy parsing and R100 rename out of protected/oracle paths', async () => {
+  const { parseNameStatusOutput, evaluateStagedEntries } = await import('../.agents/skills/ship/scripts/check-staged-boundaries.mjs');
+  const { loadShipConfig } = await import('../.agents/skills/ship/scripts/state.mjs');
+  const config = loadShipConfig(REPO_ROOT);
+
+  // 1) C100 copy + M .env in NUL-delimited output parses cleanly without desync and denies .env
+  const copied = parseNameStatusOutput('C100\0src.js\0dst.js\0M\0.env\0', true);
+  assert.equal(copied.length, 2);
+  assert.equal(copied[0].status, 'C100');
+  assert.equal(copied[0].oldPath, 'src.js');
+  assert.equal(copied[0].path, 'dst.js');
+  assert.equal(copied[1].status, 'M');
+  assert.equal(copied[1].path, '.env');
+  const envResult = evaluateStagedEntries(copied, { hasActiveShipRun: false, config });
+  assert.equal(envResult.decision, 'deny');
+  assert.ok(envResult.violations.some((v) => v.path === '.env'));
+
+  // 2) R100 rename moving a protected file or locked oracle file out of its guarded path is denied during active /ship run
+  const activeLocked = {
+    hasActiveShipRun: true,
+    currentState: 'S3b_IMPL_WORKFLOW',
+    contractLocked: true,
+    oracleLocked: true,
+    oracleTestFiles: ['tests/oracle/foo.oracle.test.cjs'],
+    allowedProtectedPaths: [],
+    config,
+    overrideEnv: false,
+  };
+  const protectedRename = parseNameStatusOutput('R100\0scripts/guards/run-all-guards.mjs\0scripts/tmp.mjs\0', true);
+  assert.equal(evaluateStagedEntries(protectedRename, activeLocked).decision, 'deny');
+
+  const oracleRename = parseNameStatusOutput('R100\0tests/oracle/foo.oracle.test.cjs\0tests/foo.test.cjs\0', true);
+  assert.equal(evaluateStagedEntries(oracleRename, activeLocked).decision, 'deny');
+});
+

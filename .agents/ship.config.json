@@ -18,7 +18,8 @@
       "architect": "ship-architect",
       "oracleAuthor": "oracle-test-author",
       "implementer": "ship-implementer",
-      "verifier": "ship-verifier"
+      "verifier": "ship-verifier",
+      "reviewer": "ship-reviewer"
     },
     "models": {
       "orchestrator": "inherit",
@@ -26,7 +27,12 @@
       "architect": "pro",
       "oracleAuthor": "pro",
       "implementer": "inherit",
-      "verifier": "flash"
+      "verifier": "flash",
+      "reviewer": "pro"
+    },
+    "implementerTiers": {
+      "standard": "flash",
+      "complex": "inherit"
     },
     "maxRetries": {
       "impl": 2,
@@ -63,12 +69,15 @@
     "autoMentionComment": "@codex review",
     "autoMentionIfSilentSeconds": 90,
     "timeoutSeconds": 600,
+    "runningGraceSeconds": 300,
+    "maxTotalTimeoutSeconds": 900,
     "onTimeoutOrQuota": "escalate"
   },
   "ciSelfHeal": {
     "track": "subscription-only",
     "allowExternalApiBilling": false,
-    "maxAttempts": 2
+    "maxAttempts": 2,
+    "microFixMaxLines": 50
   },
   "delivery": {
     "defaultTarget": "merge-only",
